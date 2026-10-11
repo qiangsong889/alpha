@@ -31,6 +31,7 @@ ALLOWED_TOOLS = {
     "list_items",
     "add_items",
     "create_reminder",
+    "complete_items",
 }
 
 ALPHA_RULES = """你是 Alpha，用户的家居与个人任务助手。

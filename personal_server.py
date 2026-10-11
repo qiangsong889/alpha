@@ -47,7 +47,7 @@ def list_items(list_name: str) -> str:
         while True:
             response = tasks.tasks().list(
                 tasklist=list_id, pageToken=page_token,
-                showCompleted=True, showHidden=True, showDeleted=False,
+                showCompleted=False, showHidden=True, showDeleted=False,
             ).execute()
             for task in response.get("items", []):
                 status = "已完成" if task.get("status") == "completed" else "未完成"
@@ -146,5 +146,75 @@ def create_reminder(title: str, local_time: str, minutes_before: int = 0) -> str
     return f"已创建提醒：{title.strip()}，时间：{start.isoformat()}（{tz_name}），{timing}"
 
 
+@mcp.tool()
+def complete_items(list_name: str, item_titles: list[str]) -> str:
+    """将指定清单中匹配标题的所有未完成任务标记完成。
+
+    一个标题会匹配全部同名任务，无需重复传入；重复输入的标题会去重。
+    找不到的标题不会阻止其他任务完成，返回结果分别报告已完成和没找到的条目。
+    """
+    if not item_titles or any(
+        not isinstance(title, str) or not title.strip()
+        for title in item_titles
+    ):
+        raise ToolError("item_titles 必须是至少包含一个非空任务标题的列表")
+
+    titles = list(dict.fromkeys(item_titles))
+
+    with build(
+        "tasks", "v1",
+        credentials=get_credentials(),
+        cache_discovery=False,
+    ) as tasks:
+        list_id = _find_list_id(tasks, list_name)
+        matches: dict[str, list[str]] = {title: [] for title in titles}
+        page_token = None
+
+        while True:
+            response = tasks.tasks().list(
+                tasklist=list_id,
+                pageToken=page_token,
+                showCompleted=False,
+                showDeleted=False,
+            ).execute()
+
+            for task in response.get("items", []):
+                title = task.get("title")
+                if title in matches:
+                    matches[title].append(task["id"])
+
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+
+        missing = [title for title in titles if not matches[title]]
+        completed: dict[str, int] = {}
+        for title in titles:
+            try:
+                for task_id in matches[title]:
+                    tasks.tasks().patch(
+                        tasklist=list_id,
+                        task=task_id,
+                        body={"status": "completed"},
+                    ).execute()
+                    completed[title] = completed.get(title, 0) + 1
+            except Exception as exc:
+                confirmed = "、".join(
+                    f"{name}（{count} 条）" for name, count in completed.items()
+                ) or "无"
+                raise ToolError(
+                    f'标记 "{title}" 完成时失败。'
+                    f'已确认完成：{confirmed}。'
+                    f'没找到：{"、".join(missing) or "无"}。'
+                    "失败的任务也可能已生效，请查询状态后再重试。"
+                ) from exc
+
+    confirmed = "、".join(
+        f"{name}（{count} 条）" for name, count in completed.items()
+    ) or "无"
+    return f"{list_name}：已完成：{confirmed}；没找到：{'、'.join(missing) or '无'}"
+        
+    
+    
 if __name__ == "__main__":
     mcp.run(transport="stdio")
