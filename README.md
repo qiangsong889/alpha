@@ -2,7 +2,7 @@
 
 Alpha is a personal AI assistant under development. Its goal is to control home devices through natural language and connect personal services, such as tasks and calendars, through MCP. The project also provides hands-on practice with asynchronous Python, model tool calling, MCP, and OAuth.
 
-The current implementation includes a command-line agent connected to both Home Assistant and a local Google Tasks MCP server. Calendar support currently covers authorization and a basic read check.
+The current implementation includes a command-line agent connected to both Home Assistant and a local Google Tasks MCP server. Calendar support includes authorization, a basic read check, and reminder creation.
 
 ## Current Features
 
@@ -11,7 +11,8 @@ The current implementation includes a command-line agent connected to both Home 
 - Calls Claude using `AsyncAnthropic` and responds briefly in Chinese.
 - Connects to Home Assistant's `/api/mcp` endpoint over Streamable HTTP and initializes an MCP session.
 - Discovers tools from both sessions, rejects duplicate tool names at startup, filters tools through an allowlist, and converts their schemas to Claude's tool format.
-- Routes tool calls to the owning session and manages both connections with `AsyncExitStack`.
+- Routes tool calls to the owning session. The HTTP client remains open for the process lifetime; personal tools are cached after a short discovery connection, and each personal tool call launches and closes its own stdio subprocess and session; Home Assistant tools and the Assist prompt are cached after an initial discovery connection. Each HA tool call creates, initializes, and closes its own transport and session.
+- Reports per-turn connection failures, including grouped background-task errors, and returns to the input prompt without automatically replaying operations.
 - Combines Alpha's rules with the server's `Assist` prompt and adds a prompt caching marker.
 - Executes tool calls and returns their text and error status to the model.
 - Keeps conversation history during the current process, with up to 10 model requests per turn.
@@ -28,6 +29,7 @@ The current allowlist is shown below. Available tools depend on what the Home As
 | `llm__GetDateTime` | Retrieve the date and time |
 | `list_items` | Read a Google Tasks list |
 | `add_items` | Add tasks to a Google Tasks list |
+| `create_reminder` | Create a primary-calendar event with a popup reminder |
 
 ### Google Personal Services
 
@@ -40,6 +42,7 @@ The current allowlist is shown below. Available tools depend on what the Home As
 | --- | --- | --- |
 | `list_items` | `list_name` | Task titles and completion status |
 | `add_items` | `list_name`, `items` | A text confirmation of added tasks |
+| `create_reminder` | `title`, `when`, optional `minutes_before` | Confirmation including the scheduled time and reminder timing |
 
 Task list lookup and task retrieval both handle pagination. If a list cannot be found, the error includes available list names. If a batch insertion fails partway through, the error identifies tasks already added. Successful insertions are not rolled back.
 
@@ -88,7 +91,7 @@ ANTHROPIC_MODEL=a-claude-model-id-available-to-your-account
 
 Set `HA_URL` to the root address; the code appends `/api/mcp`. The server must provide an `Assist` prompt. `ANTHROPIC_MODEL` overrides the code's default, `claude-sonnet-5`; use a model ID available to your account.
 
-Complete Google authorization using the steps below before starting Alpha. Alpha launches `personal_server.py` using this directory's `.venv/bin/python`; both MCP sessions must initialize successfully. Verify the Home Assistant connection, then start a conversation:
+Complete Google authorization using the steps below before starting Alpha. Alpha launches `personal_server.py` using this directory's `.venv/bin/python`; Alpha attempts discovery of both servers at startup, then closes their discovery connections. If either server is unavailable, it continues with the other server and retries the missing catalog on subsequent user turns until successful. Verify the Home Assistant connection, then start a conversation:
 
 ```bash
 python ha_client.py
@@ -184,10 +187,25 @@ The SDK wraps returned text in an MCP tool result. Expected failures use `ToolEr
 
 ## Limitations and Next Steps
 
-- Both Home Assistant and the personal server are required at startup; optional connections and automatic reconnection are not implemented.
+- Each server is discovered independently at startup. Unavailable services are noted in the system prompt, and missing catalogs are retried on subsequent turns until successful. Each HA tool call uses a fresh HTTP transport/session; each personal tool call uses a fresh stdio subprocess/session. Failed operations are not automatically replayed.
+- After successful discovery, tool catalogs and the HA Assist prompt remain cached until restart; server-side tool changes are not automatically refreshed. Starting a personal subprocess for each call adds process startup overhead.
 - Tasks supports reading and adding entries; completion and deletion tools are not implemented.
-- Calendar is not yet exposed through MCP, and event creation or modification workflows are not implemented.
+- Calendar reminder creation is exposed through MCP; event modification and deletion are not implemented.
 - Tool calls run sequentially. Concurrent scheduling, persistent conversation history, and multi-user credential storage are not implemented.
 - If a conversation turn fails, its messages are not saved to history, but device operations or task insertions that already succeeded remain in effect.
 
 `.env`, `credentials.json`, `token.json`, and the virtual environment are excluded by `.gitignore`. Keep these files local rather than committing them with the source code.
+
+## Calendar Reminders and Cross-Server Tool Calls
+
+`create_reminder` creates a 15-minute event in the primary calendar with a popup reminder. `when` must include a date, time with seconds, and an explicit UTC offset (or `Z`). Missing timezones, invalid dates, empty titles, and reminder minutes outside 0–40320 are rejected before accessing Google credentials or APIs.
+
+```json
+{
+  "title": "Pay rent",
+  "when": "2026-10-11T08:00:00-07:00",
+  "minutes_before": 10
+}
+```
+
+For requests such as “remind me tomorrow at 8 AM,” Alpha's system prompt instructs the model to call `llm__GetDateTime` when available, resolve the date and correct timezone offset, then call `create_reminder`. The reminder tool's description only states its own input requirements and does not reference another server's tools. Alpha routes each tool to its owning server; no hard-coded sequence is required. If the time tool is unavailable or timezone information is insufficient, the model should ask the user.
