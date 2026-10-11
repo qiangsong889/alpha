@@ -42,7 +42,7 @@ The current allowlist is shown below. Available tools depend on what the Home As
 | --- | --- | --- |
 | `list_items` | `list_name` | Task titles and completion status |
 | `add_items` | `list_name`, `items` | A text confirmation of added tasks |
-| `create_reminder` | `title`, `when`, optional `minutes_before` | Confirmation including the scheduled time and reminder timing |
+| `create_reminder` | `title`, `local_time`, optional `minutes_before` | Confirmation including the scheduled time and reminder timing |
 
 Task list lookup and task retrieval both handle pagination. If a list cannot be found, the error includes available list names. If a batch insertion fails partway through, the error identifies tasks already added. Successful insertions are not rolled back.
 
@@ -198,14 +198,24 @@ The SDK wraps returned text in an MCP tool result. Expected failures use `ToolEr
 
 ## Calendar Reminders and Cross-Server Tool Calls
 
-`create_reminder` creates a 15-minute event in the primary calendar with a popup reminder. `when` must include a date, time with seconds, and an explicit UTC offset (or `Z`). Missing timezones, invalid dates, empty titles, and reminder minutes outside 0–40320 are rejected before accessing Google credentials or APIs.
+`create_reminder` creates a 15-minute event with a popup reminder. Pass `local_time` without a timezone or UTC offset. The server uses Python `ZoneInfo` to calculate the correct offset for that date.
+
+Configure the IANA timezone in `.env` (default: `America/Los_Angeles`):
+
+```dotenv
+REMINDER_TIMEZONE=America/Los_Angeles
+```
 
 ```json
 {
   "title": "Pay rent",
-  "when": "2026-10-11T08:00:00-07:00",
+  "local_time": "2026-11-03T08:00:00",
   "minutes_before": 10
 }
 ```
 
-For requests such as “remind me tomorrow at 8 AM,” Alpha's system prompt instructs the model to call `llm__GetDateTime` when available, resolve the date and correct timezone offset, then call `create_reminder`. The reminder tool's description only states its own input requirements and does not reference another server's tools. Alpha routes each tool to its owning server; no hard-coded sequence is required. If the time tool is unavailable or timezone information is insufficient, the model should ask the user.
+Invalid dates, timezone-bearing inputs, empty titles, and minutes outside 0–40320 are rejected. Local times that do not exist or occur twice during daylight saving transitions are also rejected rather than silently selecting an instant. Event duration is calculated in UTC to preserve 15 elapsed minutes across transitions.
+
+For relative dates, Alpha's system prompt directs the model to query `llm__GetDateTime` when available and resolve the local date. The model does not calculate offsets from abbreviations such as PDT or CST. If the date's timezone context is unclear, it should ask the user. The reminder tool itself does not reference another server's tools.
+
+The `when` parameter has been replaced by `local_time`. Restart Alpha or reconnect Inspector to refresh the cached tool schema. Only absolute local-date conversion is handled by code; interpreting relative phrases remains the model's responsibility.
