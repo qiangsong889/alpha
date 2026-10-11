@@ -6,11 +6,14 @@
 """
 
 import asyncio
+import argparse
 import json
 import os
 import time
 from contextlib import AsyncExitStack
 from pathlib import Path
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx2
 from anthropic import AsyncAnthropic
@@ -27,7 +30,6 @@ ALLOWED_TOOLS = {
     "intent__HassTurnOn",
     "intent__HassTurnOff",
     "light__HassLightSet",
-    "llm__GetDateTime",   
     "list_items",
     "add_items",
     "create_reminder",
@@ -36,13 +38,15 @@ ALLOWED_TOOLS = {
 
 ALPHA_RULES = """你是 Alpha，用户的家居与个人任务助手。
 始终用中文回答，回答简短，只告诉用户结果，不解释内部决策和工具调用过程。
+回答会被朗读出来，所以不要用 Markdown、列表或表情符号，用一两句口语化的话说完。
 需要家居状态或执行操作时使用提供的工具，不猜测状态，不虚构执行成功。 \n
 目标不明确时：开关灯、调亮度这类可撤销的操作，选最合理的理解直接执行，执行后告诉用户做了什么；
 以后的发邮件、删除文件这类不可撤销的操作，必须先确认。
 创建提醒时，传入不带时区的 local_time；时区由 personal 服务配置并计算偏移。
-对于“明天”等相对时间，如果 llm__GetDateTime 可用，先查询当前日期；
-不要根据 PDT、CST 等缩写推断偏移。如果返回日期所属时区与提醒配置不明确，先询问用户。
-如果时间工具不可用或信息不足，询问用户明确的本地日期和时间，不猜测。
+每条用户消息前缀包含程序提供的当前本地时间和 IANA 时区。
+对于“明天”等相对时间，以本条消息前缀为基准计算日期，不使用历史消息中的时间。
+提醒采用前缀中的配置时区；不需要查询 HA 时间或自行计算 UTC 偏移。
+用户指定其他时区或时间含义不明确时，先询问确认。
 """
 
 
@@ -126,7 +130,7 @@ def catalog_system(
     personal_tools: list[ToolParam] | None,
 ) -> list[TextBlockParam]:
     text = ha_catalog[1][0]["text"] if ha_catalog is not None else (
-        ALPHA_RULES + "\n家居设备暂时不可用。不要猜测当前时间或时区；信息不足时询问用户。"
+        ALPHA_RULES + "\n家居设备暂时不可用。"
     )
     if personal_tools is None:
         text += "\n个人任务和日历服务暂时不可用。不能声称已完成相关操作。"
@@ -176,11 +180,13 @@ async def agent_turn(
     *,
     ha_url: str,
     http_client: httpx2.AsyncClient,
+    timings: list[tuple[str, float]] | None = None,
 ) -> str:
     # 成功完成这一轮后才保存，避免 API 失败留下不完整的工具消息。
     current: list[MessageParam] = [{"role": "user", "content": user_text}]
     available_names = {tool["name"] for tool in tools}
-    for _ in range(10):
+    for request_index in range(1, 11):
+        started = time.perf_counter()
         response = await client.messages.create(
             model=model,
             max_tokens=4096,
@@ -188,6 +194,8 @@ async def agent_turn(
             tools=tools,
             messages=messages + current,
         )
+        if timings is not None:
+            timings.append((f"Claude 第{request_index}次", time.perf_counter() - started))
         if response.stop_reason == "max_tokens":
             raise RuntimeError("回复被截断，请提高 max_tokens 后重试")
         if response.stop_reason not in {"end_turn", "tool_use"}:
@@ -207,6 +215,7 @@ async def agent_turn(
         results: list[ToolResultBlockParam] = []
         for block in calls:
             print(f"[工具] {block.name} 参数：{json.dumps(block.input, ensure_ascii=False)}")
+            tool_started = time.perf_counter()
             try:
                 if block.name not in ALLOWED_TOOLS or block.name not in available_names:
                     raise ValueError(f"工具不在可用白名单中：{block.name}")
@@ -214,19 +223,13 @@ async def agent_turn(
                     raise ValueError("工具参数必须是对象")
                 owner = tool_owners.get(block.name)
                 if owner == "home_assistant":
-                    started = time.perf_counter()
                     result = await call_ha_tool(
                         block.name, block.input, url=ha_url, http_client=http_client
                     )
-                    finished = time.perf_counter()
-                    print(f"[耗时] {block.name}：{finished - started:.3f} 秒")
                 elif owner == "personal":
-                    started = time.perf_counter()
                     result = await call_personal_tool(
                         block.name, block.input, server=personal_server
                     )
-                    finished = time.perf_counter()
-                    print(f"[耗时] {block.name}：{finished - started:.3f} 秒")
                 else:
                     raise ValueError(f"工具没有对应服务器：{block.name}")
                 if not isinstance(result, CallToolResult):
@@ -239,6 +242,9 @@ async def agent_turn(
             except Exception as exc:
                 text = f"工具执行失败：{format_error(exc)}。操作可能已生效，写入操作不要盲目重试。"
                 is_error = True
+            finally:
+                if timings is not None:
+                    timings.append(("工具", time.perf_counter() - tool_started))
 
             print(f"[结果] isError={is_error} {text[:100]}")
             results.append({
@@ -259,13 +265,29 @@ def format_error(exc: BaseException) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
-async def main() -> None:
+async def speak(text: str) -> None:
+    """通过 macOS say 的标准输入朗读，避免把回答当命令参数。"""
+    process = await asyncio.create_subprocess_exec(
+        "say", stdin=asyncio.subprocess.PIPE,
+    )
+    try:
+        await process.communicate(text.encode("utf-8"))
+    finally:
+        if process.returncode is None:
+            process.terminate()
+            await process.wait()
+    if process.returncode != 0:
+        raise RuntimeError(f"朗读程序退出码：{process.returncode}")
+
+
+async def main(voice: bool = False) -> None:
     load_dotenv(Path(__file__).with_name(".env"))
     ha_url = os.environ.get("HA_URL", "").strip()
     token = os.environ.get("HA_TOKEN", "").strip()
     if not ha_url or not token or not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         raise SystemExit("请在 alpha/.env 中设置 HA_URL、HA_TOKEN 和 ANTHROPIC_API_KEY")
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
+    reminder_tz = ZoneInfo(os.environ.get("REMINDER_TIMEZONE", "America/Los_Angeles"))
 
     url = ha_url.rstrip("/") + "/api/mcp"
     directory = Path(__file__).resolve().parent
@@ -291,10 +313,26 @@ async def main() -> None:
         messages: list[MessageParam] = []
         client = await stack.enter_async_context(AsyncAnthropic())
         while True:
+            timings: list[tuple[str, float]] = []
             try:
-                user_text = (await asyncio.to_thread(input, "你：")).strip()
+                if voice:
+                    from listen import record, transcribe
+
+                    audio = await asyncio.to_thread(record)
+                    turn_started = time.perf_counter()
+                    text = await asyncio.to_thread(transcribe, audio)
+                    timings.append(("转文字", time.perf_counter() - turn_started))
+                    user_text = text.strip()
+                    print(f"识别文字：{user_text or '（未识别到文字）'}")
+                    print(f"录音时长：{audio.size / 16000:.2f} 秒")
+                else:
+                    user_text = (await asyncio.to_thread(input, "你：")).strip()
+                    turn_started = time.perf_counter()
             except EOFError:
                 break
+            except Exception as exc:
+                print(f"输入失败：{format_error(exc)}")
+                continue
             if user_text.lower() in {"exit", "quit", "退出"}:
                 break
             if not user_text:
@@ -312,18 +350,37 @@ async def main() -> None:
                 })
                 system = catalog_system(ha_catalog, personal_tools)
             try:
+                current_time = datetime.now(reminder_tz).isoformat(timespec="seconds")
+                timed_user_text = (
+                    f"[当前本地时间：{current_time}；时区：{reminder_tz.key}]\n{user_text}"
+                )
                 answer = await agent_turn(
                     client, tool_owners, personal_server, model, system, tools,
-                    messages, user_text, ha_url=url, http_client=http_client,
+                    messages, timed_user_text, ha_url=url, http_client=http_client,
+                    timings=timings,
                 )
                 print(f"Alpha：{answer}")
             except Exception as exc:
                 print(f"本轮失败：{format_error(exc)}")
                 print("本轮未自动重试；已执行的操作可能仍然生效。")
+                continue
+            total_label = "朗读开始前总计" if voice else "总计"
+            timings.append((total_label, time.perf_counter() - turn_started))
+            print("[耗时] " + " ｜ ".join(
+                f"{label} {seconds:.2f}s" for label, seconds in timings
+            ))
+            if voice and answer:
+                try:
+                    await speak(answer)
+                except Exception as exc:
+                    print(f"朗读失败：{format_error(exc)}")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Alpha 家居与个人任务助手")
+    parser.add_argument("--voice", action="store_true", help="录音输入并朗读回答（macOS）")
+    options = parser.parse_args()
     try:
-        asyncio.run(main())
+        asyncio.run(main(voice=options.voice))
     except KeyboardInterrupt:
         print("\n已退出")

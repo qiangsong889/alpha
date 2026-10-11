@@ -26,7 +26,6 @@ The current allowlist is shown below. Available tools depend on what the Home As
 | `intent__HassTurnOn` | Turn devices on |
 | `intent__HassTurnOff` | Turn devices off |
 | `light__HassLightSet` | Adjust lighting |
-| `llm__GetDateTime` | Retrieve the date and time |
 | `list_items` | Read a Google Tasks list |
 | `add_items` | Add tasks to a Google Tasks list |
 | `create_reminder` | Create a primary-calendar event with a popup reminder |
@@ -216,6 +215,24 @@ REMINDER_TIMEZONE=America/Los_Angeles
 
 Invalid dates, timezone-bearing inputs, empty titles, and minutes outside 0–40320 are rejected. Local times that do not exist or occur twice during daylight saving transitions are also rejected rather than silently selecting an instant. Event duration is calculated in UTC to preserve 15 elapsed minutes across transitions.
 
-For relative dates, Alpha's system prompt directs the model to query `llm__GetDateTime` when available and resolve the local date. The model does not calculate offsets from abbreviations such as PDT or CST. If the date's timezone context is unclear, it should ask the user. The reminder tool itself does not reference another server's tools.
+For relative dates, Alpha prefixes each user message with the current local timestamp and configured IANA timezone. The system prompt instructs the model to use that message's timestamp as its reference. Home Assistant's time tool is not exposed. Python computes the reminder's UTC offset using the same `REMINDER_TIMEZONE` configuration; ambiguous user requests require clarification.
 
 The `when` parameter has been replaced by `local_time`. Restart Alpha or reconnect Inspector to refresh the cached tool schema. Only absolute local-date conversion is handled by code; interpreting relative phrases remains the model's responsibility.
+
+## Voice Mode (macOS)
+
+Install the audio dependencies in the project environment:
+
+```bash
+python -m pip install sounddevice numpy faster-whisper
+```
+
+Start Alpha with voice input and spoken answers:
+
+```bash
+python alpha.py --voice
+```
+
+Press Enter to start recording, then Enter again to stop. Alpha transcribes the recording, prints the recognized text and timing, runs the agent, and reads its answer using macOS `say`. Enter `q` at the recording prompt to exit. Without `--voice`, Alpha retains its text input mode. Allow microphone access for your terminal when macOS requests it; the system speech settings determine the voice used for playback.
+
+`listen.py` exposes `record() -> numpy.ndarray` and `transcribe(audio) -> str`. Audio is mono float32 at 16 kHz. The small Whisper model runs on CPU with int8 computation and is loaded lazily, then reused; its first use downloads the model if needed. Recording and transcription run in worker threads in Alpha. Run `python listen.py` to test speech recognition independently.
