@@ -1,4 +1,4 @@
-"""Alpha：通过 Claude 和 Home Assistant MCP 控制家居。
+"""Alpha：通过 Claude、Home Assistant 和 Google Tasks MCP 管理家居与任务。
 
 运行：alpha/.venv/bin/python alpha/alpha.py
 同目录 .env：HA_URL、HA_TOKEN、ANTHROPIC_API_KEY。
@@ -8,6 +8,7 @@
 import asyncio
 import json
 import os
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 import anthropic
@@ -15,7 +16,8 @@ import httpx2
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, TextBlockParam, ToolParam, ToolResultBlockParam
 from dotenv import load_dotenv
-from mcp import ClientSession
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, GetPromptResult, PaginatedRequestParams, TextContent
 
@@ -26,9 +28,11 @@ ALLOWED_TOOLS = {
     "intent__HassTurnOff",
     "light__HassLightSet",
     "llm__GetDateTime",   
+    "list_items",
+    "add_items",
 }
 
-ALPHA_RULES = """你是 Alpha，用户的家居助手。
+ALPHA_RULES = """你是 Alpha，用户的家居与个人任务助手。
 始终用中文回答，回答简短，只告诉用户结果，不解释内部决策和工具调用过程。
 需要家居状态或执行操作时使用提供的工具，不猜测状态，不虚构执行成功。 \n
 目标不明确时：开关灯、调亮度这类可撤销的操作，选最合理的理解直接执行，执行后告诉用户做了什么；
@@ -36,24 +40,36 @@ ALPHA_RULES = """你是 Alpha，用户的家居助手。
 """
 
 
-async def load_tools(session: ClientSession) -> list[ToolParam]:
-    """读取全部工具页，只向 Claude 暴露白名单中的工具。"""
+async def load_tools(
+    sessions: dict[str, ClientSession],
+) -> tuple[list[ToolParam], dict[str, ClientSession]]:
+    """检查所有工具重名，合并白名单工具并记录所属会话。"""
     tools: list[ToolParam] = []
-    cursor = None
-    while True:
-        result = await session.list_tools(
-            params=PaginatedRequestParams(cursor=cursor) if cursor else None
-        )
-        for tool in result.tools:
-            if tool.name in ALLOWED_TOOLS:
-                tools.append({
-                    "name": tool.name,
-                    "description": tool.description or "",
-                    "input_schema": tool.input_schema,
-                })
-        cursor = result.next_cursor
-        if not cursor:
-            return tools
+    tool_sessions: dict[str, ClientSession] = {}
+    owners: dict[str, str] = {}
+    for server_name, session in sessions.items():
+        cursor = None
+        while True:
+            result = await session.list_tools(
+                params=PaginatedRequestParams(cursor=cursor) if cursor else None
+            )
+            for tool in result.tools:
+                if tool.name in owners:
+                    raise RuntimeError(
+                        f"工具重名：{tool.name}（{owners[tool.name]} / {server_name}）"
+                    )
+                owners[tool.name] = server_name
+                if tool.name in ALLOWED_TOOLS:
+                    tools.append({
+                        "name": tool.name,
+                        "description": tool.description or "",
+                        "input_schema": tool.input_schema,
+                    })
+                    tool_sessions[tool.name] = session
+            cursor = result.next_cursor
+            if not cursor:
+                break
+    return tools, tool_sessions
 
 
 async def load_system(session: ClientSession) -> list[TextBlockParam]:
@@ -74,7 +90,7 @@ async def load_system(session: ClientSession) -> list[TextBlockParam]:
 
 async def agent_turn(
     client: AsyncAnthropic,
-    session: ClientSession,
+    tool_sessions: dict[str, ClientSession],
     model: str,
     system: list[TextBlockParam],
     tools: list[ToolParam],
@@ -116,6 +132,9 @@ async def agent_turn(
                     raise ValueError(f"工具不在可用白名单中：{block.name}")
                 if not isinstance(block.input, dict):
                     raise ValueError("工具参数必须是对象")
+                session = tool_sessions.get(block.name)
+                if session is None:
+                    raise ValueError(f"工具没有对应会话：{block.name}")
                 result = await session.call_tool(block.name, arguments=block.input)
                 if not isinstance(result, CallToolResult):
                     raise RuntimeError("工具未返回完整结果")
@@ -149,35 +168,56 @@ async def main() -> None:
     model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-5")
 
     url = ha_url.rstrip("/") + "/api/mcp"
-    async with httpx2.AsyncClient(
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=httpx2.Timeout(30.0, read=300.0),
-    ) as http_client:
-        async with streamable_http_client(url, http_client=http_client) as (read, write):
-            async with ClientSession(read, write) as session:
-                await session.initialize()
-                tools = await load_tools(session)
-                system = await load_system(session)
-                print("Alpha 已连接。输入 exit / quit / 退出 结束对话。")
-                print("可用工具：" + ("、".join(tool["name"] for tool in tools) or "无"))
-                messages: list[MessageParam] = []
-                async with AsyncAnthropic() as client:
-                    while True:
-                        try:
-                            user_text = (await asyncio.to_thread(input, "你：")).strip()
-                        except EOFError:
-                            break
-                        if user_text.lower() in {"exit", "quit", "退出"}:
-                            break
-                        if not user_text:
-                            continue
-                        try:
-                            answer = await agent_turn(
-                                client, session, model, system, tools, messages, user_text
-                            )
-                            print(f"Alpha：{answer}")
-                        except (anthropic.APIError, RuntimeError) as exc:
-                            print(f"请求失败：{exc}")
+    directory = Path(__file__).resolve().parent
+    personal_server = StdioServerParameters(
+        command=str(directory / ".venv/bin/python"),
+        args=[str(directory / "personal_server.py")],
+        cwd=str(directory),
+    )
+    async with AsyncExitStack() as stack:
+        http_client = await stack.enter_async_context(httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=httpx2.Timeout(30.0, read=300.0),
+        ))
+        read_ha, write_ha = await stack.enter_async_context(
+            streamable_http_client(url, http_client=http_client)
+        )
+        session_ha = await stack.enter_async_context(ClientSession(read_ha, write_ha))
+        await session_ha.initialize()
+
+        read_personal, write_personal = await stack.enter_async_context(
+            stdio_client(personal_server)
+        )
+        session_personal = await stack.enter_async_context(
+            ClientSession(read_personal, write_personal)
+        )
+        await session_personal.initialize()
+
+        tools, tool_sessions = await load_tools({
+            "home_assistant": session_ha,
+            "personal": session_personal,
+        })
+        system = await load_system(session_ha)
+        print("Alpha 已连接 Home Assistant 和个人服务。输入 exit / quit / 退出 结束对话。")
+        print("可用工具：" + ("、".join(tool["name"] for tool in tools) or "无"))
+        messages: list[MessageParam] = []
+        client = await stack.enter_async_context(AsyncAnthropic())
+        while True:
+            try:
+                user_text = (await asyncio.to_thread(input, "你：")).strip()
+            except EOFError:
+                break
+            if user_text.lower() in {"exit", "quit", "退出"}:
+                break
+            if not user_text:
+                continue
+            try:
+                answer = await agent_turn(
+                    client, tool_sessions, model, system, tools, messages, user_text
+                )
+                print(f"Alpha：{answer}")
+            except (anthropic.APIError, RuntimeError) as exc:
+                print(f"请求失败：{exc}")
 
 
 if __name__ == "__main__":

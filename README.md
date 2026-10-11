@@ -2,7 +2,7 @@
 
 Alpha is a personal AI assistant under development. Its goal is to control home devices through natural language and connect personal services, such as tasks and calendars, through MCP. The project also provides hands-on practice with asynchronous Python, model tool calling, MCP, and OAuth.
 
-The current implementation includes a command-line agent for Home Assistant and a separate Google Tasks MCP server. The Tasks server is not yet connected to Alpha's conversation loop. Calendar support currently covers authorization and a basic read check.
+The current implementation includes a command-line agent connected to both Home Assistant and a local Google Tasks MCP server. Calendar support currently covers authorization and a basic read check.
 
 ## Current Features
 
@@ -10,7 +10,8 @@ The current implementation includes a command-line agent for Home Assistant and 
 
 - Calls Claude using `AsyncAnthropic` and responds briefly in Chinese.
 - Connects to Home Assistant's `/api/mcp` endpoint over Streamable HTTP and initializes an MCP session.
-- Discovers tools, filters them through an allowlist, and converts their schemas to Claude's tool format.
+- Discovers tools from both sessions, rejects duplicate tool names at startup, filters tools through an allowlist, and converts their schemas to Claude's tool format.
+- Routes tool calls to the owning session and manages both connections with `AsyncExitStack`.
 - Combines Alpha's rules with the server's `Assist` prompt and adds a prompt caching marker.
 - Executes tool calls and returns their text and error status to the model.
 - Keeps conversation history during the current process, with up to 10 model requests per turn.
@@ -25,6 +26,8 @@ The current allowlist is shown below. Available tools depend on what the Home As
 | `intent__HassTurnOff` | Turn devices off |
 | `light__HassLightSet` | Adjust lighting |
 | `llm__GetDateTime` | Retrieve the date and time |
+| `list_items` | Read a Google Tasks list |
+| `add_items` | Add tasks to a Google Tasks list |
 
 ### Google Personal Services
 
@@ -46,15 +49,10 @@ Task list lookup and task retrieval both handle pagination. If a list cannot be 
 User → Alpha CLI → Claude
            │         │
            │ ← Tool call decision
-           ↓
-  Home Assistant MCP Server
-      (Streamable HTTP)
-
-Inspector / Local MCP Client
-           ↓ stdio
-    personal_server.py
-           ↓ Google API
-       Google Tasks
+           ├─ session_ha → Home Assistant MCP (Streamable HTTP)
+           └─ session_personal → personal_server.py (stdio)
+                                         ↓ Google API
+                                     Google Tasks
 ```
 
 The model decides which tools to call; the Python client executes the MCP requests. Stdio connects local processes through standard input and output. The client normally launches the server process, so no HTTP listening port is required.
@@ -90,7 +88,7 @@ ANTHROPIC_MODEL=a-claude-model-id-available-to-your-account
 
 Set `HA_URL` to the root address; the code appends `/api/mcp`. The server must provide an `Assist` prompt. `ANTHROPIC_MODEL` overrides the code's default, `claude-sonnet-5`; use a model ID available to your account.
 
-Verify the connection, then start a conversation:
+Complete Google authorization using the steps below before starting Alpha. Alpha launches `personal_server.py` using this directory's `.venv/bin/python`; both MCP sessions must initialize successfully. Verify the Home Assistant connection, then start a conversation:
 
 ```bash
 python ha_client.py
@@ -186,7 +184,7 @@ The SDK wraps returned text in an MCP tool result. Expected failures use `ToolEr
 
 ## Limitations and Next Steps
 
-- Alpha currently connects only to Home Assistant. A next step is to add a stdio connection to the personal server and route its tool calls.
+- Both Home Assistant and the personal server are required at startup; optional connections and automatic reconnection are not implemented.
 - Tasks supports reading and adding entries; completion and deletion tools are not implemented.
 - Calendar is not yet exposed through MCP, and event creation or modification workflows are not implemented.
 - Tool calls run sequentially. Concurrent scheduling, persistent conversation history, and multi-user credential storage are not implemented.
