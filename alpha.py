@@ -14,6 +14,7 @@ from contextlib import AsyncExitStack
 from pathlib import Path
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from personal_worker import PersonalWorker, stop_worker
 
 import httpx2
 from anthropic import AsyncAnthropic
@@ -171,7 +172,7 @@ async def load_system(session: ClientSession) -> list[TextBlockParam]:
 async def agent_turn(
     client: AsyncAnthropic,
     tool_owners: dict[str, str],
-    personal_server: StdioServerParameters,
+    worker: PersonalWorker,
     model: str,
     system: list[TextBlockParam],
     tools: list[ToolParam],
@@ -227,9 +228,7 @@ async def agent_turn(
                         block.name, block.input, url=ha_url, http_client=http_client
                     )
                 elif owner == "personal":
-                    result = await call_personal_tool(
-                        block.name, block.input, server=personal_server
-                    )
+                    result = await worker.call(block.name, block.input)
                 else:
                     raise ValueError(f"工具没有对应服务器：{block.name}")
                 if not isinstance(result, CallToolResult):
@@ -302,6 +301,9 @@ async def main(voice: bool = False) -> None:
             timeout=httpx2.Timeout(30.0, read=300.0),
         ))
         personal_tools = await load_personal_catalog(personal_server)
+        worker = PersonalWorker(personal_server)
+        worker_task = asyncio.create_task(worker.run(), name="personal-worker")
+        stack.push_async_callback(stop_worker, worker_task)
         ha_catalog = await load_ha_catalog(url, http_client)
         tools, tool_owners = merge_tools({
             "personal": personal_tools if personal_tools is not None else [],
@@ -355,7 +357,7 @@ async def main(voice: bool = False) -> None:
                     f"[当前本地时间：{current_time}；时区：{reminder_tz.key}]\n{user_text}"
                 )
                 answer = await agent_turn(
-                    client, tool_owners, personal_server, model, system, tools,
+                    client, tool_owners, worker, model, system, tools,
                     messages, timed_user_text, ha_url=url, http_client=http_client,
                     timings=timings,
                 )

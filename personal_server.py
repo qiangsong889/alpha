@@ -4,6 +4,9 @@
 """
 from datetime import datetime, timedelta, timezone
 import os
+import sys
+import time
+from contextlib import contextmanager
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
 from typing import Any
@@ -161,22 +164,35 @@ def complete_items(list_name: str, item_titles: list[str]) -> str:
 
     titles = list(dict.fromkeys(item_titles))
 
-    with build(
-        "tasks", "v1",
-        credentials=get_credentials(),
-        cache_discovery=False,
-    ) as tasks:
-        list_id = _find_list_id(tasks, list_name)
+    @contextmanager
+    def timed_step(name: str):
+        started = time.perf_counter()
+        try:
+            yield
+        finally:
+            elapsed = time.perf_counter() - started
+            print(f"[server 耗时] {name} {elapsed:.2f}s", file=sys.stderr, flush=True)
+
+    with timed_step("get_credentials"):
+        creds = get_credentials()
+    with timed_step("build"):
+        service = build("tasks", "v1", credentials=creds, cache_discovery=False)
+    with service as tasks:
+        with timed_step("_find_list_id"):
+            list_id = _find_list_id(tasks, list_name)
         matches: dict[str, list[str]] = {title: [] for title in titles}
         page_token = None
+        page_number = 0
 
         while True:
-            response = tasks.tasks().list(
-                tasklist=list_id,
-                pageToken=page_token,
-                showCompleted=False,
-                showDeleted=False,
-            ).execute()
+            page_number += 1
+            with timed_step(f"tasks().list() 第{page_number}页"):
+                response = tasks.tasks().list(
+                    tasklist=list_id,
+                    pageToken=page_token,
+                    showCompleted=False,
+                    showDeleted=False,
+                ).execute()
 
             for task in response.get("items", []):
                 title = task.get("title")
@@ -192,11 +208,12 @@ def complete_items(list_name: str, item_titles: list[str]) -> str:
         for title in titles:
             try:
                 for task_id in matches[title]:
-                    tasks.tasks().patch(
-                        tasklist=list_id,
-                        task=task_id,
-                        body={"status": "completed"},
-                    ).execute()
+                    with timed_step(f"patch {title}（{task_id}）"):
+                        tasks.tasks().patch(
+                            tasklist=list_id,
+                            task=task_id,
+                            body={"status": "completed"},
+                        ).execute()
                     completed[title] = completed.get(title, 0) + 1
             except Exception as exc:
                 confirmed = "、".join(

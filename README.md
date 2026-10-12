@@ -11,7 +11,7 @@ The current implementation includes a command-line agent connected to both Home 
 - Calls Claude using `AsyncAnthropic` and responds briefly in Chinese.
 - Connects to Home Assistant's `/api/mcp` endpoint over Streamable HTTP and initializes an MCP session.
 - Discovers tools from both sessions, rejects duplicate tool names at startup, filters tools through an allowlist, and converts their schemas to Claude's tool format.
-- Routes tool calls to the owning session. The HTTP client remains open for the process lifetime; personal tools are cached after a short discovery connection, and each personal tool call launches and closes its own stdio subprocess and session; Home Assistant tools and the Assist prompt are cached after an initial discovery connection. Each HA tool call creates, initializes, and closes its own transport and session.
+- Routes tool calls to the owning session. The HTTP client remains open for the process lifetime; personal tools are cached after a short discovery connection, and a background `PersonalWorker` holds the personal stdio subprocess/session and serializes calls through a queue; Home Assistant tools and the Assist prompt are cached after an initial discovery connection. Each HA tool call creates, initializes, and closes its own transport and session.
 - Reports per-turn connection failures, including grouped background-task errors, and returns to the input prompt without automatically replaying operations.
 - Combines Alpha's rules with the server's `Assist` prompt and adds a prompt caching marker.
 - Executes tool calls and returns their text and error status to the model.
@@ -178,7 +178,8 @@ The SDK wraps returned text in an MCP tool result. Expected failures use `ToolEr
 | --- | --- |
 | `alpha.py` | Claude + Home Assistant CLI agent |
 | `ha_client.py` | Verify the Home Assistant MCP connection, tools, and Assist prompt |
-| `personal_server.py` | Google Tasks stdio MCP server |
+| `personal_server.py` | Google Tasks and Calendar stdio MCP server |
+| `personal_worker.py` | Queued personal MCP calls, persistent session, timeout, and reconnect loop |
 | `google_auth.py` | Google credential management and Tasks / Calendar API verification |
 | `mcp_probe.py` | Probe Home Assistant MCP using raw JSON-RPC |
 | `mcp_probe_browser.js` | Browser-side MCP probe script |
@@ -186,8 +187,8 @@ The SDK wraps returned text in an MCP tool result. Expected failures use `ToolEr
 
 ## Limitations and Next Steps
 
-- Each server is discovered independently at startup. Unavailable services are noted in the system prompt, and missing catalogs are retried on subsequent turns until successful. Each HA tool call uses a fresh HTTP transport/session; each personal tool call uses a fresh stdio subprocess/session. Failed operations are not automatically replayed.
-- After successful discovery, tool catalogs and the HA Assist prompt remain cached until restart; server-side tool changes are not automatically refreshed. Starting a personal subprocess for each call adds process startup overhead.
+- Each server is discovered independently at startup. Unavailable services are noted in the system prompt, and missing catalogs are retried on subsequent turns until successful. Each HA tool call uses a fresh HTTP transport/session; personal calls use a persistent worker session that reconnects after connection failures. Failed operations are not automatically replayed.
+- After successful discovery, tool catalogs and the HA Assist prompt remain cached until restart; server-side tool changes are not automatically refreshed. The personal worker retries connections after one second; its calls have a default 60-second timeout including queueing. Failed calls are not replayed, and requests that expire before execution are skipped.
 - Tasks supports reading and adding entries; completion and deletion tools are not implemented.
 - Calendar reminder creation is exposed through MCP; event modification and deletion are not implemented.
 - Tool calls run sequentially. Concurrent scheduling, persistent conversation history, and multi-user credential storage are not implemented.
