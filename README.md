@@ -243,3 +243,14 @@ Set `SILENCE_MS=1000` in `.env` to adjust VAD stopping. To compare 1300 ms, run 
 ### Two-stage Speech End Detection
 
 After 400 ms of silence (420 ms at 30 ms frame boundaries), a background transcription checks simple ending rules. One- or two-character text, trailing conjunctions, and incomplete “把…” fragments continue waiting; other text can end recording early once transcription finishes. Resumed speech invalidates the earlier preview. `SILENCE_MS=1500` is the fallback silence limit. Preview inference does not block VAD processing, but it adds inference work and may not finish before the fallback limit. Shared model inference is serialized; final transcription may wait for an unfinished preview.
+
+## Realtime Interruption Confirmation
+
+Run `python realtime.py` with `OPENAI_API_KEY` configured. The script uses streaming microphone input and output, with a two-stage interruption policy:
+
+- `speech_started` lowers output volume to 20% while playback continues.
+- At 400 ms of local VAD speech, playback pauses without consuming or clearing queued audio. Generation continues until transcription resolves the turn.
+- Meaningful transcription clears playback, cancels active generation, and truncates the unheard response. Noise such as “咳” resumes playback from the saved position; transcription failure also resumes the old response.
+- Short noise restores volume without cancelling the response. Local VAD is used because semantic VAD may delay its end-of-speech event.
+
+Set `INTERRUPT_MS` to an integer from 300 to 500 (default: 400). Local VAD processes 20 ms frames and tolerates gaps shorter than 100 ms. It is a heuristic, not a guarantee that every noise burst will be rejected. Input transcription uses `gpt-4o-mini-transcribe`; automatic response creation and interruption are disabled, so the client triggers responses only when audio is committed and transcription is meaningful. The latency log measures receipt of `speech_stopped` to the first returned audio chunk, rather than acoustic end-of-speech to audible playback.
