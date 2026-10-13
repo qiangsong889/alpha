@@ -225,7 +225,7 @@ The `when` parameter has been replaced by `local_time`. Restart Alpha or reconne
 Install the audio dependencies in the project environment:
 
 ```bash
-python -m pip install sounddevice numpy faster-whisper
+python -m pip install sounddevice numpy faster-whisper webrtcvad-wheels
 ```
 
 Start Alpha with voice input and spoken answers:
@@ -234,6 +234,12 @@ Start Alpha with voice input and spoken answers:
 python alpha.py --voice
 ```
 
-Press Enter to start recording, then Enter again to stop. Alpha transcribes the recording, prints the recognized text and timing, runs the agent, and reads its answer using macOS `say`. Enter `q` at the recording prompt to exit. Without `--voice`, Alpha retains its text input mode. Allow microphone access for your terminal when macOS requests it; the system speech settings determine the voice used for playback.
+Press Enter to start recording. VAD mode 2 stops after the configured `SILENCE_MS` of consecutive non-speech following detected speech (default: 1500 ms; rounded up to a 30 ms frame boundary). Recording is discarded after 5 seconds without speech and capped at 15 seconds after speech begins. Alpha transcribes the recording, prints the recognized text and timing, runs the agent, and reads its answer using macOS `say`. Enter `q` at the recording prompt to exit. Without `--voice`, Alpha retains its text input mode. Allow microphone access for your terminal when macOS requests it; the system speech settings determine the voice used for playback.
 
 `listen.py` exposes `record() -> numpy.ndarray` and `transcribe(audio) -> str`. Audio is mono float32 at 16 kHz. The small Whisper model runs on CPU with int8 computation and is loaded lazily, then reused; its first use downloads the model if needed. Recording and transcription run in worker threads in Alpha. Run `python listen.py` to test speech recognition independently.
+
+Set `SILENCE_MS=1000` in `.env` to adjust VAD stopping. To compare 1300 ms, run `SILENCE_MS=1300 python listen.py`. Test both “关客厅灯” and “把牛奶……还有鸡蛋，加到购物清单”. Each recording prints the wall-clock wait since the last detected speech frame, silence duration in audio samples, and stop reason.
+
+### Two-stage Speech End Detection
+
+After 400 ms of silence (420 ms at 30 ms frame boundaries), a background transcription checks simple ending rules. One- or two-character text, trailing conjunctions, and incomplete “把…” fragments continue waiting; other text can end recording early once transcription finishes. Resumed speech invalidates the earlier preview. `SILENCE_MS=1500` is the fallback silence limit. Preview inference does not block VAD processing, but it adds inference work and may not finish before the fallback limit. Shared model inference is serialized; final transcription may wait for an unfinished preview.
