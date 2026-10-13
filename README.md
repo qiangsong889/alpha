@@ -68,7 +68,7 @@ cd alpha
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install 'mcp==2.3.0' anthropic httpx2 python-dotenv \
-  google-auth google-auth-oauthlib google-api-python-client
+  google-auth google-auth-oauthlib google-api-python-client OpenCC
 ```
 
 The project does not currently include a fully pinned dependency file. To record your installed environment:

@@ -7,11 +7,14 @@ import os
 import sys
 import time
 from contextlib import contextmanager
+from functools import cache
+from threading import RLock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
 from typing import Any
 from pathlib import Path
 from dotenv import load_dotenv
+from opencc import OpenCC
 
 from google_auth import get_credentials
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
@@ -22,16 +25,45 @@ load_dotenv(Path(__file__).with_name(".env"))
 mcp = MCPServer("Alpha Personal")
 
 
+_TASKS_LOCK = RLock()
+_LIST_IDS: dict[str, str] = {}
+_TO_SIMPLIFIED = OpenCC("t2s")
+
+
+@contextmanager
+def timed_step(name: str):
+    started = time.perf_counter()
+    try:
+        yield
+    finally:
+        print(f"[server 耗时] {name} {time.perf_counter() - started:.2f}s",
+              file=sys.stderr, flush=True)
+
+
+@cache
+def get_tasks_service() -> Any:
+    # 调用方持有 _TASKS_LOCK：串行使用非线程安全的 HTTP transport，
+    # 也确保首次并发请求不会重复创建 service。
+    with timed_step("get_credentials"):
+        creds = get_credentials()
+    with timed_step("build"):
+        return build("tasks", "v1", credentials=creds, cache_discovery=False)
+
+
 def _find_list_id(tasks: Any, list_name: str) -> str:
-    """按名称查找清单；未找到时列出所有可用清单名称。"""
+    """名称统一转简体后查找；未找到时列出原始清单名称。"""
+    normalized_name = _TO_SIMPLIFIED.convert(list_name)
+    if normalized_name in _LIST_IDS:
+        return _LIST_IDS[normalized_name]
     page_token = None
     names: list[str] = []
     while True:
         response = tasks.tasklists().list(pageToken=page_token).execute()
         for task_list in response.get("items", []):
             names.append(task_list["title"])
-            if task_list["title"] == list_name:
-                return str(task_list["id"])
+            if _TO_SIMPLIFIED.convert(task_list["title"]) == normalized_name:
+                _LIST_IDS[normalized_name] = str(task_list["id"])
+                return _LIST_IDS[normalized_name]
         page_token = response.get("nextPageToken")
         if not page_token:
             break
@@ -43,7 +75,8 @@ def _find_list_id(tasks: Any, list_name: str) -> str:
 @mcp.tool()
 def list_items(list_name: str) -> str:
     """读取指定 Google Tasks 清单的任务标题和完成状态，包括已完成任务。"""
-    with build("tasks", "v1", credentials=get_credentials(), cache_discovery=False) as tasks:
+    with _TASKS_LOCK:
+        tasks = get_tasks_service()
         list_id = _find_list_id(tasks, list_name)
         page_token = None
         lines: list[str] = []
@@ -70,7 +103,8 @@ def add_items(list_name: str, items: list[str]) -> str:
         raise ToolError("items 必须是至少包含一个非空任务标题的列表")
 
     added: list[str] = []
-    with build("tasks", "v1", credentials=get_credentials(), cache_discovery=False) as tasks:
+    with _TASKS_LOCK:
+        tasks = get_tasks_service()
         list_id = _find_list_id(tasks, list_name)
         for title in items:
             try:
@@ -164,20 +198,9 @@ def complete_items(list_name: str, item_titles: list[str]) -> str:
 
     titles = list(dict.fromkeys(item_titles))
 
-    @contextmanager
-    def timed_step(name: str):
-        started = time.perf_counter()
-        try:
-            yield
-        finally:
-            elapsed = time.perf_counter() - started
-            print(f"[server 耗时] {name} {elapsed:.2f}s", file=sys.stderr, flush=True)
-
-    with timed_step("get_credentials"):
-        creds = get_credentials()
-    with timed_step("build"):
-        service = build("tasks", "v1", credentials=creds, cache_discovery=False)
-    with service as tasks:
+    with _TASKS_LOCK:
+        with timed_step("get_tasks_service"):
+            tasks = get_tasks_service()
         with timed_step("_find_list_id"):
             list_id = _find_list_id(tasks, list_name)
         matches: dict[str, list[str]] = {title: [] for title in titles}

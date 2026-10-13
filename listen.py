@@ -11,8 +11,9 @@ import numpy as np
 from numpy.typing import NDArray
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from opencc import OpenCC
 
-
+_t2s = OpenCC("t2s")  
 SAMPLE_RATE = 16000
 
 
@@ -68,7 +69,8 @@ def transcribe(audio: NDArray[np.float32]) -> str:
             "Dining Room、Living Room、客厅灯、餐厅灯。"
         ),
     )
-    return "".join(segment.text for segment in segments).strip()
+    text = "".join(segment.text for segment in segments).strip()
+    return _t2s.convert(text)
 
 
 def main() -> None:

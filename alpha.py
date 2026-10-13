@@ -24,7 +24,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, GetPromptResult, PaginatedRequestParams, TextContent
-
+from listen import _get_model
 
 ALLOWED_TOOLS = {
     "homeassistant__GetLiveContext",
@@ -50,7 +50,7 @@ ALPHA_RULES = """你是 Alpha，用户的家居与个人任务助手。
 用户指定其他时区或时间含义不明确时，先询问确认。
 """
 
-
+_get_model()
 async def load_tools(session: ClientSession) -> list[ToolParam]:
     """读取全部工具，包括非白名单工具，供合并时检查重名。"""
     tools: list[ToolParam] = []
@@ -194,9 +194,15 @@ async def agent_turn(
             system=system,
             tools=tools,
             messages=messages + current,
+            cache_control={"type": "ephemeral"}
         )
         if timings is not None:
             timings.append((f"Claude 第{request_index}次", time.perf_counter() - started))
+        print(
+            f"[缓存] Claude 第{request_index}次："
+            f"cache_read={response.usage.cache_read_input_tokens or 0} tokens ｜ "
+            f"cache_write={response.usage.cache_creation_input_tokens or 0} tokens"
+        )
         if response.stop_reason == "max_tokens":
             raise RuntimeError("回复被截断，请提高 max_tokens 后重试")
         if response.stop_reason not in {"end_turn", "tool_use"}:
@@ -267,7 +273,8 @@ def format_error(exc: BaseException) -> str:
 async def speak(text: str) -> None:
     """通过 macOS say 的标准输入朗读，避免把回答当命令参数。"""
     process = await asyncio.create_subprocess_exec(
-        "say", stdin=asyncio.subprocess.PIPE,
+        "say", "-v", os.environ.get("ALPHA_VOICE", "Meijia"),
+        stdin=asyncio.subprocess.PIPE,
     )
     try:
         await process.communicate(text.encode("utf-8"))
@@ -295,6 +302,7 @@ async def main(voice: bool = False) -> None:
         args=[str(directory / "personal_server.py")],
         cwd=str(directory),
     )
+    
     async with AsyncExitStack() as stack:
         http_client = await stack.enter_async_context(httpx2.AsyncClient(
             headers={"Authorization": f"Bearer {token}"},
