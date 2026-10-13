@@ -169,6 +169,51 @@ async def load_system(session: ClientSession) -> list[TextBlockParam]:
     }]
 
 
+def device_action_reply(name: str, arguments: dict, result: CallToolResult) -> str | None:
+    """只对明确成功的 HA 设备操作生成简短确认，其他结果交给模型。"""
+    actions = {
+        "intent__HassTurnOn": "打开",
+        "intent__HassTurnOff": "关闭",
+        "light__HassLightSet": "调整",
+    }
+    if name not in actions or result.is_error:
+        return None
+    payloads = []
+    if isinstance(result.structured_content, dict):
+        payloads.append(result.structured_content)
+    for content in result.content:
+        if isinstance(content, TextContent):
+            try:
+                payloads.append(json.loads(content.text))
+            except (ValueError, TypeError):
+                return None
+    if not payloads:
+        return None
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            return None
+        response = payload.get("response", payload)
+        if not isinstance(response, dict) or response.get("response_type") != "action_done":
+            return None
+        data = response.get("data", {})
+        if isinstance(data, dict) and (data.get("failed") or data.get("errors")):
+            return None
+    target = arguments.get("name")
+    if not isinstance(target, str) or not target.strip():
+        target = arguments.get("area") or "设备"
+    if not isinstance(target, str):
+        target = "设备"
+    if name == "light__HassLightSet":
+        brightness = arguments.get("brightness")
+        # 同时调整颜色等参数时使用通用确认，避免遗漏其他操作。
+        if type(brightness) in (int, float) and set(arguments) <= {
+            "name", "area", "floor", "domain", "brightness"
+        }:
+            return f"已把{target}调到 {brightness:g}%"
+        return f"已调整{target}的灯光"
+    return f"已{actions[name]}{target}"
+
+
 async def agent_turn(
     client: AsyncAnthropic,
     tool_owners: dict[str, str],
@@ -220,9 +265,11 @@ async def agent_turn(
             raise RuntimeError("模型要求调用工具，但没有返回工具调用")
 
         results: list[ToolResultBlockParam] = []
+        action_replies: list[str | None] = []
         for block in calls:
             print(f"[工具] {block.name} 参数：{json.dumps(block.input, ensure_ascii=False)}")
             tool_started = time.perf_counter()
+            action_reply = None
             try:
                 if block.name not in ALLOWED_TOOLS or block.name not in available_names:
                     raise ValueError(f"工具不在可用白名单中：{block.name}")
@@ -244,6 +291,8 @@ async def agent_turn(
                     if isinstance(content, TextContent)
                 )
                 is_error = result.is_error
+                if owner == "home_assistant":
+                    action_reply = device_action_reply(block.name, block.input, result)
             except Exception as exc:
                 text = f"工具执行失败：{format_error(exc)}。操作可能已生效，写入操作不要盲目重试。"
                 is_error = True
@@ -252,6 +301,7 @@ async def agent_turn(
                     timings.append(("工具", time.perf_counter() - tool_started))
 
             print(f"[结果] isError={is_error} {text[:100]}")
+            action_replies.append(action_reply)
             results.append({
                 "type": "tool_result",
                 "tool_use_id": block.id,
@@ -259,6 +309,11 @@ async def agent_turn(
                 "is_error": is_error,
             })
         current.append({"role": "user", "content": results})
+        if all(reply is not None for reply in action_replies):
+            answer = "，".join(reply for reply in action_replies if reply is not None) + "。"
+            current.append({"role": "assistant", "content": answer})
+            messages.extend(current)
+            return answer
 
     raise RuntimeError("达到最大调用次数，仍未生成最终回答")
 
