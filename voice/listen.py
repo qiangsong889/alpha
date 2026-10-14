@@ -24,6 +24,7 @@ from opencc import OpenCC
 
 _t2s = OpenCC("t2s")  
 SAMPLE_RATE = 16000
+# 录完后的正式转写和录音中的临时转写可能同时发生，用线程锁串行使用同一个模型。
 _TRANSCRIBE_LOCK = Lock()
 load_dotenv(ENV_FILE)
 
@@ -59,6 +60,7 @@ def record() -> NDArray[np.float32]:
             break
         print("请按回车开始，或输入 q 退出。")
     frame_samples = SAMPLE_RATE * 30 // 1000  # 480 个采样点
+    # 这里是线程安全的同步 Queue：音频回调线程放入音频，record 所在线程取出并判断 VAD。
     frames_queue: queue.Queue[tuple[NDArray[np.float32], float]] = queue.Queue()
     warnings: set[str] = set()
     chunks: list[NDArray[np.float32]] = []
@@ -68,6 +70,7 @@ def record() -> NDArray[np.float32]:
         if status:
             warnings.add(str(status))
         # 保持音频回调简短；主线程逐帧执行 VAD。
+        # copy 保存这次音频，避免音频库复用 indata 缓冲区后，队列里的旧数据随之改变。
         frames_queue.put((indata[:, 0].copy(), time.perf_counter()))
 
     speech_started = False
@@ -77,10 +80,12 @@ def record() -> NDArray[np.float32]:
     last_speech_at: float | None = None
     stop_reason = "无人声超时"
     print(f"录音中，静音 400 ms 后判断句尾，最长等待 {silence_ms} ms。")
+    # 临时 Whisper 转写比较慢，另开一个工作线程做；录音线程继续收音、判断是否又开口。
     executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vad-preview")
     preview = None
     preview_epoch = -1
     checked_epoch = -1
+    # 每检测到新人声就递增；转写完成时核对它，防止用旧片段判断后来一句是否已结束。
     speech_epoch = 0
     try:
         with sd.InputStream(
@@ -106,6 +111,7 @@ def record() -> NDArray[np.float32]:
                 while pending.size >= frame_samples:
                     frame = pending[:frame_samples]
                     pending = pending[frame_samples:]
+                    # 输入是 float32，WebRTC VAD 需要 PCM16 字节，所以先限制范围并转换类型。
                     frame_bytes = (np.clip(frame, -1, 1) * 32767).astype(np.int16).tobytes()
                     is_speech = vad.is_speech(frame_bytes, SAMPLE_RATE)
                     chunks.append(frame.copy())
@@ -119,6 +125,7 @@ def record() -> NDArray[np.float32]:
                     if speech_started:
                         speaking_samples += frame_samples
                         if preview is not None and preview.done():
+                            # done() 只检查状态，不等转写；完成后 result() 才取结果或抛出其异常。
                             try:
                                 preview_text = preview.result()
                                 if preview_epoch == speech_epoch:
@@ -136,6 +143,7 @@ def record() -> NDArray[np.float32]:
                         if (silent_samples * 1000 >= SAMPLE_RATE * 400
                                 and preview is None and checked_epoch != speech_epoch):
                             preview_epoch = speech_epoch
+                            # submit 返回 future，不在这里等结果，下一轮录音循环再检查 done()。
                             preview = executor.submit(transcribe, np.concatenate(chunks))
                         if silent_samples * 1000 >= SAMPLE_RATE * silence_ms:
                             stop_reason = "连续静音"
@@ -146,6 +154,7 @@ def record() -> NDArray[np.float32]:
                             finished = True
                             break
     finally:
+        # 停止接收新转写任务；已开始的任务不会被强行终止，模型锁会协调后续正式转写。
         executor.shutdown(wait=False, cancel_futures=True)
 
     stopped_at = time.perf_counter()
@@ -160,11 +169,13 @@ def record() -> NDArray[np.float32]:
     if not speech_started:
         print("5 秒内未检测到人声，已放弃录音。")
         return np.empty(0, dtype=np.float32)
+    # 把各块声音按时间顺序拼成一维数组，给正式转写函数使用。
     return np.concatenate(chunks).astype(np.float32, copy=False)
 
 
 @lru_cache(maxsize=1)
 def _get_model() -> WhisperModel:
+    # 这个无参数函数只需要缓存一个返回对象，避免每句话都重新加载几百 MB 的模型。
     # 导入模块时不加载模型；第一次转写加载，以后复用。
     print("加载 Whisper small 模型（CPU / int8）；首次运行会下载模型，请稍候。")
     return WhisperModel("small", device="cpu", compute_type="int8")
@@ -183,6 +194,7 @@ def transcribe(audio: NDArray[np.float32]) -> str:
                 "Dining Room、Living Room、客厅灯、餐厅灯。"
             ),
         )
+        # segments 按需产生结果；遍历时才完成各段识别，因此也要在模型锁内读完。
         text = "".join(segment.text for segment in segments).strip()
         return _t2s.convert(text)
 

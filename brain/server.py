@@ -40,6 +40,8 @@ class InterruptedRequest(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    # async context manager：yield 前是服务启动；yield 期间 FastAPI 接请求；finally 是关闭。
+    # 大脑跨 HTTP 请求复用，因此多轮历史和 MCP 连接不会每次重新初始化。
     await brain.start()
     try:
         yield
@@ -57,6 +59,7 @@ async def health() -> dict[str, bool]:
 
 @app.post("/ask", response_model=AskResponse)
 async def ask(body: AskRequest) -> AskResponse:
+    # FastAPI 把请求 JSON 转成 AskRequest，并根据 Field 检查长度；这里只交给大脑处理。
     # 语音层被打断时会断开连接，但这里不会被取消：正在执行的工具调用会完整做完，
     # 避免“写到一半”的状态；之后语音层再通过 /interrupted 告诉大脑用户实际听到了哪里。
     try:

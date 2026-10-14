@@ -13,6 +13,7 @@ logger = logging.getLogger("alpha.cli")
 
 async def speak(text: str) -> None:
     """通过 macOS say 的标准输入朗读，避免把回答当命令参数。"""
+    # 启动系统朗读子进程；异步等它读完，不在事件循环中执行阻塞式命令。
     process = await asyncio.create_subprocess_exec(
         "say", "-v", os.environ.get("ALPHA_VOICE", "Meijia"),
         stdin=asyncio.subprocess.PIPE,
@@ -31,6 +32,7 @@ async def main(voice: bool = False) -> None:
     if voice:
         from voice.listen import _get_model
         _get_model()
+    # 大脑只创建一次，整个输入循环复用，才能保留多轮对话和个人 server 连接。
     brain = AlphaBrain()
     try:
         await brain.start()
@@ -40,6 +42,8 @@ async def main(voice: bool = False) -> None:
             try:
                 if voice:
                     from voice.listen import record, transcribe
+                    # record 和 transcribe 是同步函数，交给工作线程运行。
+                    # await 等线程结果时，事件循环仍可处理后台 MCP 消息。
                     audio = await asyncio.to_thread(record)
                     turn_started = time.perf_counter()
                     text = await asyncio.to_thread(transcribe, audio)
@@ -48,6 +52,7 @@ async def main(voice: bool = False) -> None:
                     print(f"识别文字：{user_text or '（未识别到文字）'}")
                     print(f"录音时长：{audio.size / 16000:.2f} 秒")
                 else:
+                    # input 会一直等键盘；放进线程，避免等用户输入时阻塞整个事件循环。
                     user_text = (await asyncio.to_thread(input, "你：")).strip()
                     turn_started = time.perf_counter()
             except EOFError:
@@ -78,6 +83,7 @@ async def main(voice: bool = False) -> None:
                 except Exception as exc:
                     print(f"朗读失败：{format_error(exc)}")
     finally:
+        # 退出命令、Ctrl+C 或异常离开循环，最终都释放大脑持有的客户端和 worker。
         await brain.close()
 
 
@@ -92,6 +98,7 @@ def run() -> None:
     logging.getLogger("alpha").setLevel(logging.INFO)
     logging.getLogger("alpha").propagate = False
     try:
+        # CLI 是同步入口；asyncio.run 创建事件循环，执行 main，并在结束时清理异步任务。
         asyncio.run(main(voice=options.voice))
     except KeyboardInterrupt:
         print("\n已退出")

@@ -8,6 +8,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
+from mcp.types import CallToolResult, TextContent
 
 from voice.audio import SpeechActivity, SpeechCandidate, StreamingPlayer, is_meaningful
 import voice.qwen_realtime as qwen
@@ -115,9 +116,122 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                         item_id="question", transcript="你好")
         self.assertEqual(self.sent(), [])
         await self.emit("input_audio_buffer.committed", item_id="question")
-        self.assertEqual(self.sent()[0]["type"], "response.create")
+        self.assertEqual(self.sent()[-1]["type"], "response.create")
         await self.emit("response.created", response={"id": "new"})
-        self.assertEqual(len(self.sent()), 1)
+        self.assertEqual(len(self.sent()), 2)
+
+    async def test_tool_call_runs_in_background_and_preserves_call_id(self):
+        worker = Mock()
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def call(name, arguments):
+            entered.set()
+            await release.wait()
+            return CallToolResult(content=[TextContent(type="text", text="已完成：牛奶")])
+
+        worker.call = AsyncMock(side_effect=call)
+        tool = {"name": "complete_items", "input_schema": {"type": "object"}}
+        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+                                     self.receiver.costs, "session", worker, [tool])
+        event = {"type": "response.function_call_arguments.done", "response_id": "r1",
+                 "name": "complete_items", "call_id": "call_milk",
+                 "arguments": '{"list_name":"购物清单","titles":["牛奶"]}'}
+        async with asyncio.TaskGroup() as tasks:
+            await receiver.handle(event, tasks)
+            await asyncio.wait_for(entered.wait(), 1)
+            # worker 尚未完成时，接收循环仍能处理其他事件。
+            await receiver.handle({"type": "response.done", "response": {
+                "id": "r1", "status": "completed", "output": [{
+                    "type": "function_call", "name": event["name"], "call_id": event["call_id"],
+                    "arguments": event["arguments"],
+                }],
+            }}, tasks)
+            self.assertEqual(self.sent(), [])
+            release.set()
+        worker.call.assert_awaited_once_with("complete_items", {"list_name": "购物清单", "titles": ["牛奶"]})
+        events = self.sent()
+        result = events[0]["item"]
+        self.assertEqual(result["type"], "function_call_output")
+        self.assertEqual(result["call_id"], "call_milk")
+        self.assertEqual(json.loads(result["output"]), {"is_error": False, "text": "已完成：牛奶"})
+        self.assertEqual(events[-1]["type"], "response.create")
+        clock = events[-2]["item"]
+        self.assertEqual(clock["role"], "user")
+        self.assertIn("[当前时间：", clock["content"][0]["text"])
+        self.assertIn("America/Los_Angeles", clock["content"][0]["text"])
+
+    async def test_tool_errors_are_returned_without_executing_forbidden_calls(self):
+        for name, arguments, message in (("delete_all", "{}", "白名单"),
+                                         ("list_items", "[]", "JSON 对象"),
+                                         ("list_items", "{", "JSONDecodeError")):
+            worker = Mock(call=AsyncMock())
+            self.ws.send.reset_mock()
+            receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+                                         self.receiver.costs, "session", worker,
+                                         [{"name": "list_items", "input_schema": {}}])
+            async with asyncio.TaskGroup() as tasks:
+                await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                       "name": name, "call_id": "call", "arguments": arguments}, tasks)
+            worker.call.assert_not_awaited()
+            output = json.loads(self.sent()[0]["item"]["output"])
+            self.assertTrue(output["is_error"])
+            self.assertIn(message, output["text"])
+
+    async def test_tool_mcp_error_is_sent_to_model(self):
+        worker = Mock(call=AsyncMock(return_value=CallToolResult(
+            is_error=True, content=[TextContent(type="text", text="找不到清单")],
+        )))
+        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+                                     self.receiver.costs, "session", worker,
+                                     [{"name": "list_items", "input_schema": {}}])
+        async with asyncio.TaskGroup() as tasks:
+            await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                   "name": "list_items", "call_id": "call", "arguments": "{}"}, tasks)
+        self.assertEqual(json.loads(self.sent()[0]["item"]["output"]),
+                         {"is_error": True, "text": "找不到清单"})
+
+    async def test_parallel_tools_create_one_continuation(self):
+        worker = Mock(call=AsyncMock(return_value=CallToolResult(
+            content=[TextContent(type="text", text="完成")],
+        )))
+        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+                                     self.receiver.costs, "session", worker,
+                                     [{"name": "list_items", "input_schema": {}}])
+        async with asyncio.TaskGroup() as tasks:
+            for call_id in ("first", "second"):
+                await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                       "name": "list_items", "call_id": call_id, "arguments": "{}"}, tasks)
+            await receiver.handle({"type": "response.done", "response": {
+                "id": "r", "status": "completed",
+            }}, tasks)
+        outputs = [e["item"] for e in self.sent() if e.get("item", {}).get("type") == "function_call_output"]
+        self.assertEqual({item["call_id"] for item in outputs}, {"first", "second"})
+        self.assertEqual(sum(e["type"] == "response.create" for e in self.sent()), 1)
+
+    async def test_worker_exception_is_returned_with_call_id(self):
+        worker = Mock(call=AsyncMock(side_effect=TimeoutError("服务超时")))
+        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+                                     self.receiver.costs, "session", worker,
+                                     [{"name": "add_items", "input_schema": {}}])
+        async with asyncio.TaskGroup() as tasks:
+            await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                   "name": "add_items", "call_id": "failed", "arguments": "{}"}, tasks)
+        result = self.sent()[0]["item"]
+        self.assertEqual(result["call_id"], "failed")
+        output = json.loads(result["output"])
+        self.assertTrue(output["is_error"])
+        self.assertIn("服务超时", output["text"])
+
+    async def test_new_meaningful_turn_suppresses_old_tool_continuation(self):
+        old, new = SpeechCandidate("old", 0), SpeechCandidate("new", 100)
+        receiver = self.receiver
+        receiver.candidate = new
+        receiver.last_meaningful_candidate = new
+        receiver.tool_candidates["old-response"] = old
+        receiver.tool_pending["old-response"] = 0
+        receiver.finished_responses["old-response"] = "completed"
+        await receiver.maybe_respond()
+        self.assertEqual(self.sent(), [])
 
     async def test_pending_answer_cancelled_after_new_meaningful_input(self):
         self.receiver.candidate = SpeechCandidate("first", 0, committed=True, meaningful=True)
@@ -178,6 +292,19 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CostAndProtocolTests(unittest.TestCase):
+    def test_tools_use_qwen_schema_and_are_checked_on_session_update(self):
+        tools = [{"name": "list_items", "description": "列出条目", "input_schema": {
+            "type": "object", "properties": {"list_name": {"type": "string"}},
+        }}]
+        config = qwen.session_config("Tina", tools)
+        self.assertEqual(config["tools"][0], {"type": "function", "function": {
+            "name": "list_items", "description": "列出条目", "parameters": tools[0]["input_schema"],
+        }})
+        qwen.verify_session(config, tools)
+        with self.assertRaises(qwen.QwenProtocolError):
+            qwen.verify_session({**config, "tools": []}, tools)
+        self.assertNotIn("[当前时间：", config["instructions"])
+
     def test_price_detail_and_deduplication(self):
         response = {"id": "reply", "usage": {
             "input_tokens_details": {"text_tokens": 960, "audio_tokens": 168},

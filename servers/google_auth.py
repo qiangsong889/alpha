@@ -16,6 +16,8 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
 
+# scopes 是应用向用户请求的权限范围；最终是否授权，由登录的 Google 用户确认。
+# 这里获取的是该用户自己的 Tasks/日程权限，不是项目拥有者的所有数据。
 SCOPES = [
     "https://www.googleapis.com/auth/tasks",
     "https://www.googleapis.com/auth/calendar.events",
@@ -29,6 +31,7 @@ def get_credentials() -> Credentials:
     """复用或刷新已有凭据；没有可用凭据时，通过浏览器授权。"""
     creds = None
     if TOKEN_PATH.exists():
+        # token.json 保存之前同意授权的用户凭据，存在时优先复用，不必每次打开登录页。
         try:
             creds = Credentials.from_authorized_user_file(str(TOKEN_PATH))
         except ValueError:
@@ -40,6 +43,7 @@ def get_credentials() -> Credentials:
         creds = None
 
     if creds is not None and creds.expired and creds.refresh_token:
+        # access token 过期不一定要重新登录；refresh token 可换取新的 access token。
         try:
             creds.refresh(Request())
         except RefreshError:
@@ -47,6 +51,7 @@ def get_credentials() -> Credentials:
             creds = None
 
     if creds is None or not creds.valid:
+        # credentials.json 标识“哪个应用在申请权限”，与用户授权后保存的 token.json 不同。
         flow = InstalledAppFlow.from_client_secrets_file(
             str(CREDENTIALS_PATH), SCOPES
         )
@@ -60,6 +65,7 @@ def get_credentials() -> Credentials:
     if not creds.has_scopes(SCOPES):
         raise RuntimeError("授权未包含 Tasks 和 Calendar events 所需的全部权限")
 
+    # 刷新或首次授权后都保存更新后的凭据；只允许当前系统用户读写这个文件。
     TOKEN_PATH.write_text(creds.to_json(), encoding="utf-8")
     TOKEN_PATH.chmod(0o600)
     return creds
@@ -70,6 +76,7 @@ def main() -> None:
 
     print("任务列表：")
     with build("tasks", "v1", credentials=creds) as tasks:
+        # build 创建同步 API 客户端；list 构造请求，execute 才真的向 Google 发请求并等结果。
         page_token = None
         while True:
             result = tasks.tasklists().list(pageToken=page_token).execute()

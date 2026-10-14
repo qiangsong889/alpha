@@ -27,6 +27,8 @@ logger = logging.getLogger("alpha.brain")
 
 def device_action_reply(name: str, arguments: dict, result: CallToolResult) -> str | None:
     """只对明确成功的 HA 设备操作生成简短确认，其他结果交给模型。"""
+    # 只有明确成功的设备操作才由代码直接说确认语，省掉再请求一次 Claude 的时间。
+    # 查询、个人清单、失败或无法判断的结果返回 None，继续交给模型组织回答。
     actions = {
         "intent__HassTurnOn": "打开",
         "intent__HassTurnOff": "关闭",
@@ -71,6 +73,7 @@ def device_action_reply(name: str, arguments: dict, result: CallToolResult) -> s
 
 
 class AlphaBrain:
+    # 大脑不读取麦克风、不直接朗读；CLI 或 HTTP 语音层都只需要调用 start/ask/close。
     def __init__(self, *, model: str | None = None):
         self._model_override = model
         self.model = ""
@@ -81,6 +84,7 @@ class AlphaBrain:
         self.http_client: httpx2.AsyncClient | None = None
         self.worker: PersonalWorker | None = None
         self.worker_task: asyncio.Task[None] | None = None
+        # 放在实例上的对话历史和目录会跨 ask 保留，而不是每句话都重新建立一份。
         self.messages: list[MessageParam] = []
         self.personal_tools: list[ToolParam] | None = None
         self.ha_catalog: tuple[list[ToolParam], list[TextBlockParam]] | None = None
@@ -90,6 +94,8 @@ class AlphaBrain:
         self.last_timings: list[tuple[str, float]] = []
         self._stack: AsyncExitStack | None = None
         self._started = False
+        # 同一大脑一次处理一个 ask，避免两个请求交错修改同一份历史。
+        # 这是异步锁：等锁的任务暂停，事件循环中的其他任务仍可运行。
         self._lock = asyncio.Lock()
 
     @property
@@ -97,6 +103,7 @@ class AlphaBrain:
         return self.ha_catalog is not None
 
     def _prepare_catalog(self) -> None:
+        # 合并描述给模型，同时保留路由表供客户端执行工具；模型不负责选择具体连接对象。
         self.tools, self.tool_owners = merge_tools({
             "personal": self.personal_tools if self.personal_tools is not None else [],
             "home_assistant": self.ha_catalog[0] if self.ha_catalog is not None else [],
@@ -120,6 +127,7 @@ class AlphaBrain:
                 command=str(VENV_PYTHON),
                 args=["-m", "servers.personal_server"], cwd=str(PROJECT_ROOT),
             )
+            # 统一管理不同客户端和 worker 的退出清理，按登记的逆序释放资源。
             stack = AsyncExitStack()
             await stack.__aenter__()
             self._stack = stack
@@ -130,6 +138,7 @@ class AlphaBrain:
                 ))
                 self.personal_tools = await load_personal_catalog(self.personal_server)
                 self.worker = PersonalWorker(self.personal_server)
+                # run 长期等队列，必须安排为后台任务；直接 await 会停在这里，无法完成启动。
                 self.worker_task = asyncio.create_task(self.worker.run(), name="personal-worker")
                 stack.push_async_callback(stop_worker, self.worker_task)
                 self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
@@ -147,6 +156,7 @@ class AlphaBrain:
                 raise
 
     async def ask(self, request: str) -> str:
+        # 一次用户提问的入口：确认启动状态、重试失败的目录发现、注入时间、进入工具循环。
         async with self._lock:
             if (not self._started or self.http_client is None or self.personal_server is None
                     or self.reminder_tz is None):
@@ -161,6 +171,7 @@ class AlphaBrain:
                     self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
                 self._prepare_catalog()
             current_time = datetime.now(self.reminder_tz).isoformat(timespec="seconds")
+            # 时间放进本轮用户消息；system 的静态规则保持稳定，便于利用提示缓存。
             timed_request = (
                 f"[当前本地时间：{current_time}；时区：{self.reminder_tz.key}]\n{request}"
             )
@@ -176,6 +187,7 @@ class AlphaBrain:
             if not self.messages or self.messages[-1]["role"] != "assistant":
                 return False
             heard = spoken.strip()
+            # 修改的是对话记忆，不是撤销已执行的工具；让后续推理知道用户只听到了前半句。
             self.messages[-1] = {
                 "role": "assistant",
                 "content": (f"{heard}……" if heard else "")
@@ -184,6 +196,7 @@ class AlphaBrain:
             return True
 
     async def close(self) -> None:
+        # 即使使用者异常退出，也应调用 close；清理 callback 会停止后台 worker。
         async with self._lock:
             self._started = False
             stack, self._stack = self._stack, None
@@ -195,6 +208,7 @@ class AlphaBrain:
                 self.worker_task = None
 
     async def _agent_turn(self, user_text: str, timings: list[tuple[str, float]]) -> str:
+        # 一轮用户输入可能需要多次 Claude 请求：先决策工具 → 执行工具 → 再生成回答。
         client = self.client
         worker = self.worker
         http_client = self.http_client
@@ -206,8 +220,10 @@ class AlphaBrain:
         current: list[MessageParam] = [{"role": "user", "content": user_text}]
         available_names = {tool["name"] for tool in tools}
         for request_index in range(1, 11):
+            # 设置轮数上限，避免模型一直调用工具而不结束；每次请求保留历史和本轮中间消息。
             started = time.perf_counter()
             response = await client.messages.create(
+                # await 等这次 Claude 返回，但不阻止 MCP worker 等其他任务继续执行。
                 model=model,
                 max_tokens=4096,
                 system=system,
@@ -229,6 +245,7 @@ class AlphaBrain:
 
             current.append({"role": "assistant", "content": response.content})
             if response.stop_reason == "end_turn":
+                # end_turn 才是模型结束本轮；tool_use 则需要客户端执行动作后再提供结果。
                 messages.extend(current)
                 return "".join(
                     block.text for block in response.content if block.type == "text"
@@ -250,6 +267,7 @@ class AlphaBrain:
                     if not isinstance(block.input, dict):
                         raise ValueError("工具参数必须是对象")
                     owner = tool_owners.get(block.name)
+                    # 根据启动时建立的路由表分发，不把工具名当 Python 代码直接执行。
                     if owner == "home_assistant":
                         result = await call_ha_tool(
                             block.name, block.input, url=ha_url, http_client=http_client
@@ -277,12 +295,14 @@ class AlphaBrain:
                 logger.info("[结果] isError=%s %s", is_error, text[:100])
                 action_replies.append(action_reply)
                 results.append({
+                    # tool_use_id 必须对应模型发来的 block.id，模型才能把结果配回原调用。
                     "type": "tool_result",
                     "tool_use_id": block.id,
                     "content": text,
                     "is_error": is_error,
                 })
             current.append({"role": "user", "content": results})
+            # Claude 协议中工具结果放在 user 消息里；它是程序回传，不是用户又输入了一句。
             if all(reply is not None for reply in action_replies):
                 answer = "，".join(reply for reply in action_replies if reply is not None) + "。"
                 current.append({"role": "assistant", "content": answer})

@@ -48,10 +48,13 @@ def parse_body(body: str, content_type: str) -> dict[str, Any]:
 
 
 def rpc(method: str, params: dict[str, Any] | None = None, request_id: int = 1) -> dict[str, Any]:
+    # 这个调试脚本直接组装 JSON-RPC 请求，展示 SDK 平时替你处理的协议字段。
+    # id 用于把响应配回请求；method 是协议方法，params 是它需要的参数。
     url = os.environ["HA_URL"].rstrip("/") + "/api/mcp"
     payload: dict[str, Any] = {"jsonrpc": "2.0", "id": request_id, "method": method}
     if params is not None:
         payload["params"] = params
+    # JSON-RPC 是消息格式，HTTP 是这里选用的传输方式，两者不是同一层概念。
     request = urllib.request.Request(
         url,
         data=json.dumps(payload).encode("utf-8"),
@@ -63,6 +66,7 @@ def rpc(method: str, params: dict[str, Any] | None = None, request_id: int = 1) 
         },
     )
     try:
+        # urllib 是同步网络调用：当前线程会等到响应。这个独立探测脚本不运行异步循环。
         with urllib.request.urlopen(request, timeout=15) as response:
             body = response.read().decode("utf-8")
             message = parse_body(body, response.headers.get("Content-Type", ""))
@@ -72,6 +76,7 @@ def rpc(method: str, params: dict[str, Any] | None = None, request_id: int = 1) 
         raise SystemExit(f"连不上 {url}：{exc.reason}")
 
     if "error" in message:
+        # JSON-RPC 的 error 表示协议请求失败；工具结果里的 isError 则是工具执行失败。
         raise SystemExit(f"JSON-RPC 错误：{json.dumps(message['error'], ensure_ascii=False)}")
     result: dict[str, Any] = message["result"]
     return result

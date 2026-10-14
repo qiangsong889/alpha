@@ -27,10 +27,12 @@ async def load_tools(session: ClientSession) -> list[ToolParam]:
     tools: list[ToolParam] = []
     cursor = None
     while True:
+        # 工具目录也可能分页；next_cursor 为空才代表已经读完全部工具。
         result = await session.list_tools(
             params=PaginatedRequestParams(cursor=cursor) if cursor else None
         )
         for tool in result.tools:
+            # MCP schema 转成 Claude 所需的字段名；这里只转换描述，不执行工具。
             tools.append({
                 "name": tool.name,
                 "description": tool.description or "",
@@ -45,11 +47,13 @@ def merge_tools(
     catalogs: dict[str, list[ToolParam]],
 ) -> tuple[list[ToolParam], dict[str, str]]:
     tools: list[ToolParam] = []
+    # owners 是“工具名 → 所属服务器”的路由表，执行时据此选择正确的 MCP 连接。
     owners: dict[str, str] = {}
     for server_name, catalog in catalogs.items():
         for tool in catalog:
             name = tool["name"]
             if name in owners:
+                # 白名单过滤之前就检查重名，防止两个 server 的同名工具被悄悄覆盖。
                 raise RuntimeError(f"工具重名：{name}（{owners[name]} / {server_name}）")
             owners[name] = server_name
             if name in ALLOWED_TOOLS:
@@ -62,6 +66,7 @@ async def call_ha_tool(
 ) -> CallToolResult:
     """每次调用新建 transport 和会话，退出时关闭，复用 HTTP 客户端。"""
     async with streamable_http_client(url, http_client=http_client) as (read, write):
+        # HTTP 客户端可以长期复用，但这里每次新建 MCP transport/session，隔离 HA 重启影响。
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, arguments=arguments)
@@ -75,6 +80,7 @@ async def call_personal_tool(
 ) -> CallToolResult:
     """每次调用启动子进程、完成握手，退出时清理会话和进程。"""
     async with stdio_client(server) as (read, write):
+        # 这是每次启动子进程的版本；需要长期复用连接时，主流程改用 PersonalWorker。
         async with ClientSession(read, write) as session:
             await session.initialize()
             result = await session.call_tool(name, arguments=arguments)
@@ -87,6 +93,7 @@ async def load_personal_catalog(
     server: StdioServerParameters,
 ) -> list[ToolParam] | None:
     try:
+        # 只在此连接里读取目录；离开 async with 会关闭会话和这次启动的子进程。
         async with stdio_client(server) as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
@@ -101,6 +108,7 @@ def catalog_system(
     ha_catalog: tuple[list[ToolParam], list[TextBlockParam]] | None,
     personal_tools: list[ToolParam] | None,
 ) -> list[TextBlockParam]:
+    # HA 目录中的提示已包含 Alpha 规则和 Assist 内容；发现失败时退回基础规则。
     text = ha_catalog[1][0]["text"] if ha_catalog is not None else (
         ALPHA_RULES + "\n家居设备暂时不可用。"
     )
@@ -125,6 +133,7 @@ async def load_ha_catalog(
 
 
 async def load_system(session: ClientSession) -> list[TextBlockParam]:
+    # Assist prompt 提供 HA 暴露的设备背景；工具目录描述“可调用什么”，prompt 补充上下文。
     prompt = await session.get_prompt("Assist")
     if not isinstance(prompt, GetPromptResult):
         raise RuntimeError("Assist prompt 未返回完整内容")

@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+# __file__ 指向 core/paths.py；resolve 得到绝对路径，两次 parent 得到 alpha 目录。
+# 所有模块复用这里的路径，终端从哪里启动不会改变 .env、凭据和 Python 解释器的位置。
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"

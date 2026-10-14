@@ -35,6 +35,8 @@ HA_DEVICE_TOOLS = {
 
 
 def session_config(voice: str, ha_tools: list | None = None, assist_prompt: str = "") -> Session:
+    # 本函数只返回配置；等 main 调用 session.update 后才发给服务端。
+    # 自动回答和自动打断关闭后，由客户端根据 VAD、转写和工具状态决定下一步。
     return {
         "type": "realtime",
         "instructions": (
@@ -69,6 +71,8 @@ def session_config(voice: str, ha_tools: list | None = None, assist_prompt: str 
 
 
 async def text_to_audio(connection: AsyncRealtimeConnection, text: str) -> bytes:
+    # 文字测试路径：先添加一条用户消息，再请求模型回答，最后拼成完整音频返回。
+    # 实时麦克风路径则边收到音频边交给 StreamingPlayer，不需要等完整回答。
     print(f"你：{text}")
     started = time.perf_counter()
     await connection.conversation.item.create(item={
@@ -105,6 +109,7 @@ async def text_to_audio(connection: AsyncRealtimeConnection, text: str) -> bytes
 
 
 async def send_microphone(connection: AsyncRealtimeConnection, activity: SpeechActivity) -> None:
+    # 外层只负责设备故障重试；一次真实收音由 send_microphone_once 管理。
     while True:
         try:
             await send_microphone_once(connection, activity)
@@ -118,6 +123,7 @@ async def send_microphone(connection: AsyncRealtimeConnection, activity: SpeechA
 
 async def send_microphone_once(connection: AsyncRealtimeConnection, activity: SpeechActivity) -> None:
     loop = asyncio.get_running_loop()
+    # 麦克风线程产生音频，异步发送任务消费；容量 100 × 20ms，防止网络慢时无限积压。
     audio_queue: asyncio.Queue[bytes | Exception] = asyncio.Queue(maxsize=100)
     accepting = True
 
@@ -150,9 +156,11 @@ async def send_microphone_once(connection: AsyncRealtimeConnection, activity: Sp
         except ValueError as exc:
             raise MicrophoneUnavailable(str(exc)) from exc
         with stream:
+            # 普通 with 打开/关闭本地设备；它内部可以 await，不需要因此改成 async with。
             print("麦克风已开启，请用中文说话。Ctrl+C 退出，建议戴耳机。")
             while True:
                 try:
+                    # 队列空时当前发送任务暂停；模型接收任务和播放仍然可以工作。
                     chunk = await asyncio.wait_for(audio_queue.get(), timeout=1)
                 except TimeoutError as exc:
                     raise MicrophoneUnavailable("1 秒内没有收到麦克风音频") from exc
@@ -160,6 +168,7 @@ async def send_microphone_once(connection: AsyncRealtimeConnection, activity: Sp
                     raise MicrophoneUnavailable("麦克风流已停止")
                 if isinstance(chunk, Exception):
                     raise chunk
+                # base64 让原始音频能放进 JSON 消息，这一步没有做语音识别。
                 await connection.input_audio_buffer.append(
                     audio=base64.b64encode(chunk).decode("ascii")
                 )
@@ -172,6 +181,7 @@ async def execute_ha_calls(
     available_tools: set[str], url: str, http_client: httpx2.AsyncClient, log,
 ) -> None:
     for call in calls:
+        # 模型只是提出调用请求；客户端检查白名单、解析参数，再真正请求 HA 的 MCP server。
         log(f"[工具] {call.name} 参数：{call.arguments}")
         started = time.perf_counter()
         try:
@@ -187,6 +197,7 @@ async def execute_ha_calls(
             text = f"工具执行失败：{format_error(exc)}。操作可能已生效，写入操作不要盲目重试。"
             is_error = True
         log(f"[工具结果] is_error={is_error} {text[:100]} ｜ {time.perf_counter() - started:.2f}s")
+        # call_id 让模型知道这个输出属于哪一次调用；错误也回传，交给模型说明结果。
         await connection.conversation.item.create(item={
             "type": "function_call_output",
             "call_id": call.call_id,
@@ -199,6 +210,8 @@ async def receive_microphone_answers(
     *, ha_tools: set[str] | None = None, ha_url: str = "",
     http_client: httpx2.AsyncClient | None = None,
 ) -> None:
+    # 一个长期任务负责接收各种事件，局部变量跨事件保存“当前说话和回答”的状态。
+    # 发声开始、音频提交、转写完成是不同事件，不能当成同一件事。
     threshold_ms = int(os.environ.get("INTERRUPT_MS", "400"))
     if not 300 <= threshold_ms <= 500:
         raise ValueError("INTERRUPT_MS 必须在 300 到 500 之间")
@@ -228,6 +241,7 @@ async def receive_microphone_answers(
         log(f"客户端发送 conversation.item.delete（无意义条目 {item_id}）")
 
     async def maybe_respond() -> None:
+        # 只有有效文字和已提交音频都到齐，而且没有旧回答/工具正在处理，才请求新回答。
         nonlocal response_pending, continuation_ready
         if (candidate is not None and candidate.committed and candidate.meaningful is True
                 and not candidate.responded and response_id is None and not response_pending
@@ -246,6 +260,7 @@ async def receive_microphone_answers(
             await connection.response.create()
 
     async def confirm(target: SpeechCandidate, reason: str) -> None:
+        # 有意义的转写确认用户要说话后，才清空本地缓冲并取消旧回答。
         if candidate is not target or target.confirmed:
             return
         target.confirmed = True
@@ -256,6 +271,7 @@ async def receive_microphone_answers(
             log(f"客户端发送 response.cancel（{response_id}）")
             await connection.response.cancel(response_id=response_id)
         if item is not None:
+            # 截断服务端历史到估计已播放位置，避免模型把用户没听到的部分当作已说完。
             item_id, content_index, played_ms = item
             await connection.conversation.item.truncate(
                 item_id=item_id, content_index=content_index, audio_end_ms=played_ms,
@@ -263,6 +279,7 @@ async def receive_microphone_answers(
         await maybe_respond()
 
     def pause_candidate(target: SpeechCandidate) -> None:
+        # 本地持续人声只触发暂停，保留旧回答；若后续识别成噪音，还能继续播放。
         if (candidate is not target or target.paused or target.confirmed
                 or target.meaningful is not None):
             return
@@ -284,6 +301,7 @@ async def receive_microphone_answers(
             await asyncio.sleep(0.02)
 
     async def run_tools(calls: list, origin: SpeechCandidate | None) -> None:
+        # 此函数会作为后台任务运行，因此等待 HA 时接收循环仍可处理用户打断。
         nonlocal tool_busy, continuation_ready, tool_continuation
         try:
             if http_client is None:
@@ -301,7 +319,9 @@ async def receive_microphone_answers(
 
     try:
         async with asyncio.TaskGroup() as timers:
+            # timers 统一管理人声确认和工具调用任务；异常退出时清理同组任务。
             async for event in connection:
+                # 每次收到一个服务端事件，按 type 更新状态或处理一小段音频。
                 if event.type == "error":
                     # 取消请求可能与 response.done 交错，此错误无需结束会话。
                     if event.error.code == "response_cancel_not_active":
@@ -377,6 +397,7 @@ async def receive_microphone_answers(
                         interrupted_responses.add(response_id)
                         await connection.response.cancel(response_id=response_id)
                 elif event.type == "response.output_audio.delta":
+                    # 一小块音频解码后入队；player.callback 在音频线程真正把它送到扬声器。
                     if event.response_id in interrupted_responses:
                         continue
                     chunk = base64.b64decode(event.delta)
@@ -411,6 +432,7 @@ async def receive_microphone_answers(
                     if new_calls:
                         handled_calls.update(call.call_id for call in new_calls)
                         tool_busy = True
+                        # 不在接收循环里 await 整次工具执行，否则期间收不到后续打断消息。
                         timers.create_task(run_tools(new_calls, candidate))
                     await maybe_respond()
             raise RuntimeError("Realtime 连接已关闭")
@@ -434,6 +456,7 @@ async def main() -> None:
         headers={"Authorization": f"Bearer {ha_token}"},
         timeout=httpx2.Timeout(30.0, read=300.0),
     ) as http_client:
+        # HA 目录只在启动时读取；模型看到描述后选择工具，实际执行通过 execute_ha_calls。
         ha_catalog = await load_ha_catalog(ha_url, http_client) if ha_root and ha_token else None
         ha_tools = []
         assist_prompt = ""
@@ -473,17 +496,21 @@ async def main() -> None:
             player = StreamingPlayer()
             activity = SpeechActivity()
             async with asyncio.TaskGroup() as tasks:
+                # 三个协程并发协作：持续发送录音、持续接收事件、维持播放器输出流。
+                # create_task 安排执行并马上返回，不会逐个等这些长期任务结束。
                 tasks.create_task(send_microphone(connection, activity))
                 tasks.create_task(receive_microphone_answers(
                     connection, player, activity,
                     ha_tools={tool["name"] for tool in ha_tools},
                     ha_url=ha_url, http_client=http_client,
                 ))
+                # run 打开并维持音频设备；实际播放由音频库调用 player.callback 完成。
                 tasks.create_task(player.run())
 
 
 if __name__ == "__main__":
     try:
+        # 从同步脚本进入异步程序：创建事件循环并执行 main，退出时再关闭循环。
         asyncio.run(main())
     except (KeyboardInterrupt, EOFError):
         print("\n已退出")
