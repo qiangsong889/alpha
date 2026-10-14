@@ -12,16 +12,17 @@ from threading import RLock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
 from typing import Any
-from pathlib import Path
 from dotenv import load_dotenv
+
+from core.paths import ENV_FILE
 from opencc import OpenCC
 
-from google_auth import get_credentials
+from servers.google_auth import get_credentials
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-load_dotenv(Path(__file__).with_name(".env"))
+load_dotenv(ENV_FILE)
 mcp = MCPServer("Alpha Personal")
 
 

@@ -6,25 +6,26 @@
 
 import time
 import os
-from pathlib import Path
 from dotenv import load_dotenv
+
+from core.paths import ENV_FILE
 import queue
 import re
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
-import webrtcvad
+import webrtcvad  # type: ignore[import-untyped]
 from functools import lru_cache
 
 import numpy as np
 from numpy.typing import NDArray
-import sounddevice as sd
-from faster_whisper import WhisperModel
+import sounddevice as sd  # type: ignore[import-untyped]
+from faster_whisper import WhisperModel  # type: ignore[import-untyped]
 from opencc import OpenCC
 
 _t2s = OpenCC("t2s")  
 SAMPLE_RATE = 16000
 _TRANSCRIBE_LOCK = Lock()
-load_dotenv(Path(__file__).with_name(".env"))
+load_dotenv(ENV_FILE)
 
 
 def looks_complete(text: str) -> bool:

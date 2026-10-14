@@ -78,7 +78,7 @@ def rpc(method: str, params: dict[str, Any] | None = None, request_id: int = 1) 
 
 
 def main(argv: list[str]) -> None:
-    load_env(Path(__file__).with_name(".env"))
+    load_env(Path(__file__).resolve().parent.parent / ".env")
     for key in ("HA_URL", "HA_TOKEN"):
         if not os.environ.get(key):
             raise SystemExit(f"缺少环境变量 {key}（可以写进 alpha/.env）")

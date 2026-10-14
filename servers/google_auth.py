@@ -6,7 +6,8 @@
 """
 
 from datetime import datetime, timezone
-from pathlib import Path
+
+from core.paths import GOOGLE_CREDENTIALS, GOOGLE_TOKEN
 
 from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
@@ -20,8 +21,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/calendar.events",
 ]
 
-TOKEN_PATH = Path(__file__).with_name("token.json")
-CREDENTIALS_PATH = Path(__file__).with_name("credentials.json")
+TOKEN_PATH = GOOGLE_TOKEN
+CREDENTIALS_PATH = GOOGLE_CREDENTIALS
 
 
 def get_credentials() -> Credentials:

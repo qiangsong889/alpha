@@ -17,7 +17,7 @@ from mcp.types import GetPromptResult, TextContent
 
 
 async def main() -> None:
-    load_dotenv(Path(__file__).with_name(".env"))
+    load_dotenv(Path(__file__).resolve().parent.parent / ".env")
     ha_url = os.environ.get("HA_URL", "").strip()
     token = os.environ.get("HA_TOKEN", "").strip()
     if not ha_url or not token:

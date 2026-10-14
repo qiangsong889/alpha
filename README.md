@@ -52,7 +52,7 @@ User → Alpha CLI → Claude
            │         │
            │ ← Tool call decision
            ├─ session_ha → Home Assistant MCP (Streamable HTTP)
-           └─ session_personal → personal_server.py (stdio)
+           └─ session_personal → servers/personal_server.py (stdio)
                                          ↓ Google API
                                      Google Tasks
 ```
@@ -90,10 +90,10 @@ ANTHROPIC_MODEL=a-claude-model-id-available-to-your-account
 
 Set `HA_URL` to the root address; the code appends `/api/mcp`. The server must provide an `Assist` prompt. `ANTHROPIC_MODEL` overrides the code's default, `claude-sonnet-5`; use a model ID available to your account.
 
-Complete Google authorization using the steps below before starting Alpha. Alpha launches `personal_server.py` using this directory's `.venv/bin/python`; Alpha attempts discovery of both servers at startup, then closes their discovery connections. If either server is unavailable, it continues with the other server and retries the missing catalog on subsequent user turns until successful. Verify the Home Assistant connection, then start a conversation:
+Complete Google authorization using the steps below before starting Alpha. Alpha launches `python -m servers.personal_server` from the project root using `.venv/bin/python`; Alpha attempts discovery of both servers at startup, then closes their discovery connections. If either server is unavailable, it continues with the other server and retries the missing catalog on subsequent user turns until successful. Verify the Home Assistant connection, then start a conversation:
 
 ```bash
-python ha_client.py
+python devtools/ha_client.py
 python alpha.py
 ```
 
@@ -123,7 +123,7 @@ https://www.googleapis.com/auth/calendar.events
 Run:
 
 ```bash
-python google_auth.py
+python -m servers.google_auth
 ```
 
 On the first run, a browser opens for Google sign-in and permission approval. A temporary local server receives the authorization callback on an available port. Credentials are saved to `token.json` and reused or refreshed on subsequent runs.
@@ -134,7 +134,7 @@ Names such as `My Tasks` in this script's output represent task lists, not indiv
 
 ## Test Tasks Tools with MCP Inspector
 
-Run `google_auth.py` first to complete authorization. Then launch Inspector with Node.js and npm available:
+Run `python -m servers.google_auth` first to complete authorization. Then launch Inspector with Node.js and npm available:
 
 ```bash
 npx @modelcontextprotocol/inspector
@@ -147,11 +147,11 @@ Open the web address printed in the terminal and add a server:
 | Server ID | `personal_server` |
 | Transport | `stdio (local process)` |
 | Command | Absolute path to this project's `.venv/bin/python` |
-| Arguments | Absolute path to `personal_server.py`, one argument per line |
+| Arguments | `-m` and `servers.personal_server`, one argument per line; set environment variable `PYTHONPATH` to the project root |
 | Working directory | Absolute path to the `alpha` directory |
 | Environment | Leave empty |
 
-Inspector launches the server. You do not need to start `personal_server.py` separately.
+Inspector launches the server. You do not need to start `servers/personal_server.py` separately.
 
 After connecting, list the tools and call `list_items`:
 
@@ -174,16 +174,37 @@ The SDK wraps returned text in an MCP tool result. Expected failures use `ToolEr
 
 ## Files
 
-| File | Purpose |
-| --- | --- |
-| `alpha.py` | Claude + Home Assistant CLI agent |
-| `ha_client.py` | Verify the Home Assistant MCP connection, tools, and Assist prompt |
-| `personal_server.py` | Google Tasks and Calendar stdio MCP server |
-| `personal_worker.py` | Queued personal MCP calls, persistent session, timeout, and reconnect loop |
-| `google_auth.py` | Google credential management and Tasks / Calendar API verification |
-| `mcp_probe.py` | Probe Home Assistant MCP using raw JSON-RPC |
-| `mcp_probe_browser.js` | Browser-side MCP probe script |
-| `.gitignore` | Exclude local credentials, environments, caches, and logs |
+Run every command from the project root (`alpha/`) with the project virtual environment. Entry points run as modules (`python -m package.module`) so that packages import each other.
+
+```
+alpha/
+├─ alpha.py                  Compatibility launcher → apps.cli
+├─ apps/
+│  └─ cli.py                 Text / voice terminal loop around AlphaBrain   (python -m apps.cli [--voice])
+├─ brain/
+│  ├─ agent.py               AlphaBrain: Claude agent loop, tools, history, time context, interruption sync
+│  └─ server.py              AlphaBrain as a local HTTP service              (python -m brain.server)
+├─ core/
+│  ├─ paths.py               Single source of truth for file paths (.env, venv, Google credentials)
+│  └─ rules.py               Shared Alpha system rules
+├─ integrations/
+│  ├─ mcp_client.py          MCP discovery, allowlist, HA calls, prompt assembly
+│  └─ personal_worker.py     Background task holding the personal MCP session (queue + reconnect)
+├─ servers/
+│  ├─ personal_server.py     Google Tasks / Calendar stdio MCP server        (launched by Alpha)
+│  └─ google_auth.py         Google OAuth credentials + API check          (python -m servers.google_auth)
+├─ voice/
+│  ├─ audio.py               Playback, device selection, local VAD, speech filtering
+│  ├─ listen.py              Push-to-talk recording + Whisper transcription (python -m voice.listen)
+│  ├─ qwen_realtime.py       Qwen Omni realtime voice layer                 (python -m voice.qwen_realtime)
+│  └─ openai_realtime.py     OpenAI Realtime version, kept for reference   (python -m voice.openai_realtime)
+├─ devtools/
+│  ├─ ha_client.py           Verify the HA MCP connection                   (python devtools/ha_client.py)
+│  └─ mcp_probe.py           Raw JSON-RPC probe for HA MCP                   (python devtools/mcp_probe.py)
+└─ tests/                    Unit tests, no real services                   (python -m unittest discover -s tests -t .)
+```
+
+Secrets stay in the project root and are git-ignored: `.env`, `credentials.json`, `token.json`.
 
 ## Limitations and Next Steps
 
@@ -236,9 +257,9 @@ python alpha.py --voice
 
 Press Enter to start recording. VAD mode 2 stops after the configured `SILENCE_MS` of consecutive non-speech following detected speech (default: 1500 ms; rounded up to a 30 ms frame boundary). Recording is discarded after 5 seconds without speech and capped at 15 seconds after speech begins. Alpha transcribes the recording, prints the recognized text and timing, runs the agent, and reads its answer using macOS `say`. Enter `q` at the recording prompt to exit. Without `--voice`, Alpha retains its text input mode. Allow microphone access for your terminal when macOS requests it; the system speech settings determine the voice used for playback.
 
-`listen.py` exposes `record() -> numpy.ndarray` and `transcribe(audio) -> str`. Audio is mono float32 at 16 kHz. The small Whisper model runs on CPU with int8 computation and is loaded lazily, then reused; its first use downloads the model if needed. Recording and transcription run in worker threads in Alpha. Run `python listen.py` to test speech recognition independently.
+`listen.py` exposes `record() -> numpy.ndarray` and `transcribe(audio) -> str`. Audio is mono float32 at 16 kHz. The small Whisper model runs on CPU with int8 computation and is loaded lazily, then reused; its first use downloads the model if needed. Recording and transcription run in worker threads in Alpha. Run `python -m voice.listen` to test speech recognition independently.
 
-Set `SILENCE_MS=1000` in `.env` to adjust VAD stopping. To compare 1300 ms, run `SILENCE_MS=1300 python listen.py`. Test both “关客厅灯” and “把牛奶……还有鸡蛋，加到购物清单”. Each recording prints the wall-clock wait since the last detected speech frame, silence duration in audio samples, and stop reason.
+Set `SILENCE_MS=1000` in `.env` to adjust VAD stopping. To compare 1300 ms, run `SILENCE_MS=1300 python -m voice.listen`. Test both “关客厅灯” and “把牛奶……还有鸡蛋，加到购物清单”. Each recording prints the wall-clock wait since the last detected speech frame, silence duration in audio samples, and stop reason.
 
 ### Two-stage Speech End Detection
 
@@ -246,7 +267,7 @@ After 400 ms of silence (420 ms at 30 ms frame boundaries), a background transcr
 
 ## Realtime Interruption Confirmation
 
-Run `python realtime.py` with `OPENAI_API_KEY` configured. The script uses streaming microphone input and output, with a two-stage interruption policy:
+Run `python -m voice.openai_realtime` with `OPENAI_API_KEY` configured. The script uses streaming microphone input and output, with a two-stage interruption policy:
 
 - `speech_started` lowers output volume to 20% while playback continues.
 - At 400 ms of local VAD speech, playback pauses without consuming or clearing queued audio. Generation continues until transcription resolves the turn.
@@ -254,3 +275,71 @@ Run `python realtime.py` with `OPENAI_API_KEY` configured. The script uses strea
 - Short noise restores volume without cancelling the response. Local VAD is used because semantic VAD may delay its end-of-speech event.
 
 Set `INTERRUPT_MS` to an integer from 300 to 500 (default: 400). Local VAD processes 20 ms frames and tolerates gaps shorter than 100 ms. It is a heuristic, not a guarantee that every noise burst will be rejected. Input transcription uses `gpt-4o-mini-transcribe`; automatic response creation and interruption are disabled, so the client triggers responses only when audio is committed and transcription is meaningful. The latency log measures receipt of `speech_stopped` to the first returned audio chunk, rather than acoustic end-of-speech to audible playback.
+
+### Home Assistant Tools in Realtime
+
+`realtime.py` loads HA tools and the Assist prompt at startup using `HA_URL` and `HA_TOKEN`. It exposes only `intent__HassTurnOn`, `intent__HassTurnOff`, `light__HassLightSet`, and `homeassistant__GetLiveContext`. Tool schemas use Realtime's `type: function` and `parameters` format. If HA discovery fails, the conversation continues with no home tools.
+
+Completed `response.done` events containing function calls dispatch HA operations in a background task so audio events remain responsive. Calls are checked against both the allowlist and discovered tools. Results, including errors, are sent as `function_call_output` items tied to their `call_id`; one continuation response is requested after the batch. Cancelled responses are not executed, and repeated call IDs are not replayed. Already executed device operations are not undone by a voice interruption.
+
+## Qwen Omni Voice MVP
+
+`realtime_qwen.py` tests `qwen3.8-omni-flash-realtime` independently of the OpenAI conversation pipeline. Both scripts import playback, device selection, local VAD, and speech filtering from `audio.py`. Configure `.env`:
+
+```dotenv
+DASHSCOPE_API_KEY=your-regional-model-studio-key
+QWEN_WORKSPACE_ID=your-workspace-id
+QWEN_REGION=singapore
+QWEN_VOICE=Tina
+INTERRUPT_MS=400
+QWEN_SESSION_SECONDS=1800
+```
+
+The key and workspace must belong to the same selected region. `QWEN_REGION` accepts `singapore` or `beijing`. This model requires a workspace-specific WebSocket endpoint, which the script constructs. Existing `REALTIME_INPUT_DEVICE` and `REALTIME_OUTPUT_DEVICE` settings also apply.
+
+```bash
+python -m voice.qwen_realtime
+```
+
+Speak directly in Mandarin; press Ctrl+C to exit. Input is mono PCM16 at 16 kHz, output is 24 kHz. Wear headphones to reduce feedback. This script does not connect HA tools.
+
+The client disables automatic responses and interruption. Speech onset ducks playback to 20%; sustained local VAD (default 400 ms, configurable from 300 to 500) pauses playback without clearing it. Meaningless transcriptions resume the buffered answer and delete the noise item. Meaningful transcriptions clear playback, cancel an active response, and truncate its audio history to the estimated heard duration. A new response is requested only after meaningful transcription and audio commitment; cancellation completes before another response starts.
+
+Logs include transcripts, end-of-speech-to-first-audio latency, usage, per-response cost, and cumulative cost in USD. Prices use the official Qwen3.8 table checked on 2026-10-13: Singapore input text/audio $0.23/$0.93 and output text/audio $0.70/$1.87 per million tokens; Beijing $0.212/$0.848 and $0.636/$1.696. Both output text and audio are charged. Estimates exclude free quotas and discounts. Missing usage details are reported as unpriced, rather than treated as free.
+
+Closed connections, network failures, and session-expiration errors trigger reconnection and a fresh `session.update`. The script also deliberately rotates sessions every 1800 seconds by default; `QWEN_SESSION_SECONDS` controls this interval. New connections start fresh conversation history; cumulative cost survives reconnections. Invalid configuration/authentication errors are reported instead of retried indefinitely.
+
+Compatibility needs live verification: the official server example includes `create_response` and `interrupt_response`, but the client parameter reference does not explicitly document these switches, `conversation.item.delete`, or `conversation.item.truncate`. Delete/truncate are compatibility attempts, not confirmed Qwen capabilities. The script checks that the server echoes both switches as false and reports rejected commands rather than silently claiming noise recovery/history truncation works. Offline tests verify the client state machine, not server support or microphone behavior.
+
+```bash
+.venv/bin/python -m unittest test_realtime_audio test_brain
+```
+
+Official references: [client events](https://www.alibabacloud.com/help/en/model-studio/client-events), [server events](https://www.alibabacloud.com/help/en/model-studio/server-events), [model and prices](https://www.alibabacloud.com/help/en/model-studio/qwen3-8-omni-flash-realtime).
+
+## Reusing AlphaBrain
+
+The CLI calls a reusable brain; importing it does not initialize audio, clients, or models. Conversation history, cached catalogs, HA availability, routing, and last-request timings belong to the brain instance.
+
+```python
+from brain import AlphaBrain
+
+async def handle_requests():
+    brain = AlphaBrain()
+    try:
+        await brain.start()
+        answer = await brain.ask("关闭客厅灯")
+        print(answer)
+    finally:
+        await brain.close()
+```
+
+`ask()` injects current local time, retries catalogs that failed discovery, and preserves the existing tool loop and successful-device shortcut. `close()` stops the personal worker and closes the clients. Calls are serialized to keep history consistent. Use `python -m apps.cli` or the existing `python alpha.py`; both retain `--voice`.
+
+Brain and MCP debug output uses the `alpha.brain`, `alpha.mcp`, and `alpha.personal_worker` logging namespaces. CLI timing uses `alpha.cli`. The CLI enables INFO logs on stderr; library imports do not configure global logging. Other voice layers can configure these loggers independently.
+
+Regression tests (no external API requests):
+
+```bash
+.venv/bin/python -m unittest test_brain -v
+```

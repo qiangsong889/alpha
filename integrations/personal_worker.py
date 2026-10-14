@@ -1,11 +1,15 @@
 """在一个后台任务中持有 personal MCP 会话，串行处理请求并重连。"""
 
 import asyncio
+import logging
 from typing import Any
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.types import CallToolResult
+
+
+logger = logging.getLogger("alpha.personal_worker")
 
 
 class PersonalWorker:
@@ -58,7 +62,7 @@ class PersonalWorker:
                         current.set_exception(exc)
                     current = None
                     # 不重放当前请求；服务恢复后继续处理队列中的新请求。
-                    print(f"个人服务连接失败，1 秒后重连：{exc}")
+                    logger.warning("个人服务连接失败，1 秒后重连：%s", exc)
                     await asyncio.sleep(1)
         finally:
             self.closed = True
