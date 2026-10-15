@@ -7,6 +7,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
+OPERATIONS_DB = PROJECT_ROOT / "data" / "operations.db"
 
 # Google OAuth：客户端凭据和授权后保存的令牌（都不进 git）。
 GOOGLE_CREDENTIALS = PROJECT_ROOT / "credentials.json"

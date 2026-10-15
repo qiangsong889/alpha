@@ -9,19 +9,13 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, GetPromptResult, PaginatedRequestParams, TextContent
 from core.rules import ALPHA_RULES
+from integrations.tool_gateway import ToolNotSent
+from integrations.tool_policy import TOOL_POLICY
 
 logger = logging.getLogger("alpha.mcp")
 
-ALLOWED_TOOLS = {
-    "homeassistant__GetLiveContext",
-    "intent__HassTurnOn",
-    "intent__HassTurnOff",
-    "light__HassLightSet",
-    "list_items",
-    "add_items",
-    "create_reminder",
-    "complete_items",
-}
+# 保留旧导出供 Brain 使用，工具名由同一份策略表定义，不再维护两张白名单。
+ALLOWED_TOOLS = set(TOOL_POLICY)
 
 
 def device_action_succeeded(name: str, result: CallToolResult) -> bool:
@@ -92,15 +86,24 @@ def merge_tools(
 
 async def call_ha_tool(
     name: str, arguments: dict, *, url: str, http_client: httpx2.AsyncClient,
+    classify_not_sent: bool = False,
 ) -> CallToolResult:
     """每次调用新建 transport 和会话，退出时关闭，复用 HTTP 客户端。"""
-    async with streamable_http_client(url, http_client=http_client) as (read, write):
-        # HTTP 客户端可以长期复用，但这里每次新建 MCP transport/session，隔离 HA 重启影响。
-        async with ClientSession(read, write) as session:
-            await session.initialize()
-            result = await session.call_tool(name, arguments=arguments)
-            if not isinstance(result, CallToolResult):
-                raise RuntimeError("HA 工具未返回完整结果")
+    tool_started = False
+    try:
+        async with streamable_http_client(url, http_client=http_client) as (read, write):
+            # HTTP 客户端可复用；每次新建会话，隔离 HA 重启影响。
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                # 从进入 call_tool 开始，就不能再断言请求没有发出。
+                tool_started = True
+                result = await session.call_tool(name, arguments=arguments)
+                if not isinstance(result, CallToolResult):
+                    raise RuntimeError("HA 工具未返回完整结果")
+    except Exception as exc:
+        if classify_not_sent and not tool_started:
+            raise ToolNotSent(f"HA 工具请求尚未发出：{format_error(exc)}") from exc
+        raise
     return result
 
 

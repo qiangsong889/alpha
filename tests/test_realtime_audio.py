@@ -3,8 +3,11 @@
 import asyncio
 import base64
 import json
+import sqlite3
 import unittest
 from decimal import Decimal
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
@@ -12,6 +15,9 @@ from mcp.types import CallToolResult, TextContent
 
 from voice.audio import SpeechActivity, SpeechCandidate, StreamingPlayer, is_meaningful
 import voice.qwen_realtime as qwen
+import integrations.tool_executor as executor_module
+from integrations.operations import OperationStore
+from integrations.tool_gateway import ToolGateway
 
 
 class AudioTests(unittest.TestCase):
@@ -107,8 +113,20 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         self.player = StreamingPlayer()
         self.player.ready = True
         self.activity = SpeechActivity(16000)
-        self.receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        self.receiver = self.make_receiver(self.ws, self.player, self.activity,
                                           qwen.CostTracker("singapore"), "session")
+
+    def make_receiver(self, ws, player, activity, costs, session_id, worker=None, tools=None,
+                      *, ha_url="", http_client=None):
+        store = OperationStore(":memory:")
+        self.addCleanup(store.close)
+        gateway = ToolGateway(store, executor_module.make_executor(
+            ha_url=ha_url, http_client=http_client, worker=worker,
+        ))
+        window = qwen.CommitWindow(gateway, window_s=.05)
+        self.addAsyncCleanup(window.close)
+        return qwen.QwenReceiver(ws, player, activity, costs, session_id, gateway=gateway,
+                                 commit_window=window, tools=tools)
 
     def sent(self):
         return [json.loads(call.args[0]) for call in self.ws.send.call_args_list]
@@ -143,10 +161,10 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.sent()[-1]["type"], "response.create")
 
     async def test_real_tool_success_allows_completion_across_followup_response(self):
-        worker = Mock(call=AsyncMock(return_value=CallToolResult(
+        worker = Mock(closed=False, call=AsyncMock(return_value=CallToolResult(
             content=[TextContent(type="text", text="已添加牛奶")],
         )))
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", worker,
                                      [{"name": "add_items", "input_schema": {}}])
         async with asyncio.TaskGroup() as tasks:
@@ -156,14 +174,25 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                 "id": "tool-response", "status": "completed",
             }}, tasks)
         await receiver.handle({"type": "response.created", "response": {"id": "answer"}}, None)
+        # pending 的工具后续回答只确认登记；真正的成功报告在窗口执行后才生成。
+        await receiver.handle({"type": "response.done", "response": {
+            "id": "answer", "status": "completed", "output": [{
+                "type": "message", "content": [{"type": "text", "text": "好的，记下了"}],
+            }],
+        }}, None)
+        worker.call.assert_not_awaited()
+        report = await asyncio.wait_for(receiver.commit_window.reports.get(), 1)
+        receiver.commit_window.reports.put_nowait(report)
+        await receiver.maybe_respond()
+        await receiver.handle({"type": "response.created", "response": {"id": "report"}}, None)
         with patch("builtins.print") as printed:
             await receiver.handle({"type": "response.done", "response": {
-                "id": "answer", "status": "completed", "output": [{
+                "id": "report", "status": "completed", "output": [{
                     "type": "message", "content": [{"type": "text", "text": "已经加了牛奶"}],
                 }],
             }}, None)
             self.assertFalse(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
-        self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), 1)
+        self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), 2)
         # 下一句用户请求不能借用上一句的成功记录。
         receiver.candidate = SpeechCandidate("next-user", 100, committed=True, meaningful=True, responded=True)
         receiver.requested_candidate = receiver.candidate
@@ -175,41 +204,157 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             }}, None)
             self.assertTrue(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
 
-    async def test_audit_waits_for_pending_write_and_does_not_blindly_retry_failure(self):
-        entered, release = asyncio.Event(), asyncio.Event()
-
-        async def call(*args):
-            entered.set()
-            await release.wait()
-            raise TimeoutError("结果不确定")
-
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
-                                     self.receiver.costs, "session", Mock(call=AsyncMock(side_effect=call)),
+    async def test_pending_write_claim_correction_states_facts_without_repeating_tool(self):
+        worker = Mock(closed=False, call=AsyncMock())
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
+                                     self.receiver.costs, "session", worker,
                                      [{"name": "create_reminder", "input_schema": {}}])
         with patch("builtins.print") as printed:
             async with asyncio.TaskGroup() as tasks:
                 await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
                                        "call_id": "call", "name": "create_reminder", "arguments": "{}"}, tasks)
-                await entered.wait()
                 await receiver.handle({"type": "response.done", "response": {
                     "id": "r", "status": "completed", "output": [{
                         "type": "message", "content": [{"text": "已经设好了"}],
                     }],
                 }}, tasks)
-                self.assertFalse(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
-                release.set()
             self.assertTrue(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
         corrections = [event["item"] for event in self.sent() if event.get("item", {}).get("role") == "system"]
-        self.assertIn("禁止盲目重复写入", corrections[0]["content"][0]["text"])
+        self.assertIn("还没有执行", corrections[0]["content"][0]["text"])
+        self.assertIn("不得再次调用工具", corrections[0]["content"][0]["text"])
+        worker.call.assert_not_awaited()
         self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), 1)
+
+    async def test_delayed_report_waits_for_current_response_and_preserves_failures(self):
+        receiver = self.receiver
+        receiver.gateway.executor = AsyncMock(side_effect=TimeoutError("响应丢失"))
+        op = await receiver.gateway.submit("session:<no-user-item>", "create_reminder", {})
+        receiver.commit_window.add(op)
+        receiver.commit_window.turn_finished()
+        report = await asyncio.wait_for(receiver.commit_window.reports.get(), 1)
+        receiver.commit_window.reports.put_nowait(report)
+        receiver.response_pending = True
+        watcher = asyncio.create_task(receiver.watch_reports())
+        self.addAsyncCleanup(self.cancel_task, watcher)
+        await asyncio.sleep(0)
+        self.assertEqual(self.sent(), [])
+        # 先前已请求的正常回答不能被误认为是报告回答。
+        await self.emit("response.created", response={"id": "normal"})
+        self.assertIsNone(receiver.report_response)
+        await self.emit("response.done", response={"id": "normal", "status": "completed"})
+        await asyncio.sleep(0)
+        events = self.sent()
+        self.assertEqual(sum(e["type"] == "response.create" for e in events), 1)
+        text = events[0]["item"]["content"][0]["text"]
+        self.assertIn("unknown", text)
+        self.assertIn("不要重试", text)
+        self.assertIn("只根据这份执行结果", text)
+
+    @staticmethod
+    async def cancel_task(task):
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    async def test_noise_transcription_after_final_done_still_starts_commit_window(self):
+        receiver = self.receiver
+        receiver.gateway.executor = AsyncMock(return_value=executor_module.ExecutorResult(True, "已添加"))
+        original = SpeechCandidate("user", 0, meaningful=True, committed=True, responded=True)
+        receiver.candidate = receiver.last_meaningful_candidate = original
+        receiver.requested_candidate = original
+        op = await receiver.gateway.submit("session:user", "add_items", {"items": ["牛奶"]})
+        receiver.commit_window.add(op)
+        receiver.current_response = "ack"
+        receiver.response_turns["ack"] = "user"
+        async with asyncio.TaskGroup() as tasks:
+            # 回答结束前出现一声噪音，转写比 response.done 更晚到达。
+            await receiver.handle({"type": "input_audio_buffer.speech_started",
+                                   "item_id": "noise", "audio_start_ms": 100}, tasks)
+            await self.emit("response.done", response={"id": "ack", "status": "completed"})
+            await asyncio.sleep(.08)
+            receiver.gateway.executor.assert_not_awaited()
+            await self.emit("conversation.item.input_audio_transcription.completed",
+                            item_id="noise", transcript="咳")
+            report = await asyncio.wait_for(receiver.commit_window.reports.get(), .3)
+            self.assertEqual(report.operations[0].status, "succeeded")
+
+    async def test_old_response_done_does_not_resume_window_after_new_meaningful_input(self):
+        receiver = self.receiver
+        executor = AsyncMock(return_value=executor_module.ExecutorResult(True, "成功"))
+        receiver.gateway.executor = executor
+        op = await receiver.gateway.submit("session:old", "add_items", {})
+        receiver.commit_window.add(op)
+        receiver.commit_window.turn_finished()
+        receiver.commit_window.speech_started()
+        receiver.commit_window.speech_accepted()
+        receiver.candidate = SpeechCandidate("new", 100, meaningful=True)
+        receiver.response_turns["old-answer"] = "old"
+        await self.emit("response.done", response={"id": "old-answer", "status": "completed"})
+        await asyncio.sleep(.08)
+        executor.assert_not_awaited()
+
+    async def test_disconnect_returns_unfinished_report_to_shared_window(self):
+        receiver = self.receiver
+        receiver.gateway.executor = AsyncMock(return_value=executor_module.ExecutorResult(True, "已添加牛奶"))
+        op = await receiver.gateway.submit("turn", "add_items", {})
+        receiver.commit_window.add(op)
+        receiver.commit_window.turn_finished()
+        report = await asyncio.wait_for(receiver.commit_window.reports.get(), 1)
+        receiver.active_report = report
+        entered = asyncio.Event()
+
+        class Socket:
+            send = AsyncMock()
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                entered.set()
+                await asyncio.Future()
+
+        receiver.ws = Socket()
+        task = asyncio.create_task(receiver.run())
+        await asyncio.wait_for(entered.wait(), 1)
+        await self.cancel_task(task)
+        self.assertIsNone(receiver.active_report)
+        self.assertIs(receiver.commit_window.reports.get_nowait(), report)
+        self.assertEqual(receiver.gateway.store.get(op.id).status, "succeeded")
+
+    async def test_speech_events_pause_noise_restart_and_accept_pause_window(self):
+        receiver = self.receiver
+        receiver.gateway.executor = AsyncMock(return_value=executor_module.ExecutorResult(True, "成功"))
+        op = await receiver.gateway.submit("turn", "add_items", {})
+        receiver.commit_window.add(op)
+        receiver.commit_window.turn_finished()
+        async with asyncio.TaskGroup() as tasks:
+            await receiver.handle({"type": "input_audio_buffer.speech_started",
+                                   "item_id": "noise", "audio_start_ms": 0}, tasks)
+            await asyncio.sleep(.08)
+            receiver.gateway.executor.assert_not_awaited()
+            await receiver.handle({"type": "conversation.item.input_audio_transcription.completed",
+                                   "item_id": "noise", "transcript": "咳"}, tasks)
+            report = await asyncio.wait_for(receiver.commit_window.reports.get(), 1)
+            self.assertEqual(report.operations[0].status, "succeeded")
+            await receiver.handle({"type": "input_audio_buffer.speech_started",
+                                   "item_id": "user", "audio_start_ms": 100}, tasks)
+            await receiver.handle({"type": "conversation.item.input_audio_transcription.completed",
+                                   "item_id": "user", "transcript": "再加一个鸡蛋"}, tasks)
+            other = await receiver.gateway.submit("turn2", "add_items", {"items": ["鸡蛋"]})
+            receiver.commit_window.add(other)
+            await asyncio.sleep(.08)
+            self.assertEqual(receiver.gateway.executor.await_count, 1)
+            receiver.commit_window.turn_finished()
+            self.assertEqual((await asyncio.wait_for(receiver.commit_window.reports.get(), 1)).operations[0].id,
+                             other.id)
 
     async def test_read_only_success_does_not_prove_a_write_happened(self):
         receiver = self.receiver
         receiver.candidate = SpeechCandidate("user", 0, responded=True, meaningful=True)
         receiver.requested_candidate = receiver.candidate
-        receiver.worker = Mock(call=AsyncMock(return_value=CallToolResult(
+        worker = Mock(closed=False, call=AsyncMock(return_value=CallToolResult(
             content=[TextContent(type="text", text="清单里有牛奶")],
         )))
+        receiver.gateway.executor = executor_module.make_executor(ha_url="", http_client=None, worker=worker)
         receiver.tool_names = {"list_items"}
         with patch("builtins.print") as printed:
             async with asyncio.TaskGroup() as tasks:
@@ -282,7 +427,7 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.sent()), 2)
 
     async def test_tool_call_runs_in_background_and_preserves_call_id(self):
-        worker = Mock()
+        worker = Mock(closed=False)
         entered, release = asyncio.Event(), asyncio.Event()
 
         async def call(name, arguments):
@@ -291,11 +436,11 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             return CallToolResult(content=[TextContent(type="text", text="已完成：牛奶")])
 
         worker.call = AsyncMock(side_effect=call)
-        tool = {"name": "complete_items", "input_schema": {"type": "object"}}
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        tool = {"name": "list_items", "input_schema": {"type": "object"}}
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", worker, [tool])
         event = {"type": "response.function_call_arguments.done", "response_id": "r1",
-                 "name": "complete_items", "call_id": "call_milk",
+                 "name": "list_items", "call_id": "call_milk",
                  "arguments": '{"list_name":"购物清单","titles":["牛奶"]}'}
         async with asyncio.TaskGroup() as tasks:
             await receiver.handle(event, tasks)
@@ -309,7 +454,7 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             }}, tasks)
             self.assertEqual(self.sent(), [])
             release.set()
-        worker.call.assert_awaited_once_with("complete_items", {"list_name": "购物清单", "titles": ["牛奶"]})
+        worker.call.assert_awaited_once_with("list_items", {"list_name": "购物清单", "titles": ["牛奶"]})
         events = self.sent()
         result = events[0]["item"]
         self.assertEqual(result["type"], "function_call_output")
@@ -325,9 +470,9 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         for name, arguments, message in (("delete_all", "{}", "白名单"),
                                          ("list_items", "[]", "JSON 对象"),
                                          ("list_items", "{", "JSONDecodeError")):
-            worker = Mock(call=AsyncMock())
+            worker = Mock(closed=False, call=AsyncMock())
             self.ws.send.reset_mock()
-            receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+            receiver = self.make_receiver(self.ws, self.player, self.activity,
                                          self.receiver.costs, "session", worker,
                                          [{"name": "list_items", "input_schema": {}}])
             async with asyncio.TaskGroup() as tasks:
@@ -339,10 +484,10 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn(message, output["text"])
 
     async def test_tool_mcp_error_is_sent_to_model(self):
-        worker = Mock(call=AsyncMock(return_value=CallToolResult(
+        worker = Mock(closed=False, call=AsyncMock(return_value=CallToolResult(
             is_error=True, content=[TextContent(type="text", text="找不到清单")],
         )))
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", worker,
                                      [{"name": "list_items", "input_schema": {}}])
         async with asyncio.TaskGroup() as tasks:
@@ -351,21 +496,57 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(self.sent()[0]["item"]["output"]),
                          {"is_error": True, "text": "找不到清单"})
 
+    async def test_deferred_duplicate_is_cancelled_and_does_not_borrow_previous_success(self):
+        worker = Mock(closed=False, call=AsyncMock(return_value=CallToolResult(
+            content=[TextContent(type="text", text="已添加牛奶")],
+        )))
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
+                                      self.receiver.costs, "session", worker,
+                                      [{"name": "add_items", "input_schema": {}}])
+        for call_id in ("original", "duplicate"):
+            async with asyncio.TaskGroup() as tasks:
+                await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                       "name": "add_items", "call_id": call_id,
+                                       "arguments": '{"items":["牛奶"],"list_name":"购物清单"}'}, tasks)
+            if call_id == "original":
+                receiver.commit_window.turn_finished()
+                await asyncio.wait_for(receiver.commit_window.reports.get(), 1)
+        worker.call.assert_awaited_once()
+        outputs = [json.loads(event["item"]["output"]) for event in self.sent()]
+        self.assertIn("尚未执行", outputs[0]["text"])
+        self.assertIn("本次没有执行", outputs[1]["text"])
+        self.assertIn("那是之前的那次", outputs[1]["text"])
+        self.assertIn("先向用户确认", outputs[1]["text"])
+        self.assertFalse(receiver.turn_successes.get("<no-user-item>"))
+        self.assertNotIn("duplicate", receiver.turn_attempts.get("<no-user-item>", set()))
+        rows = receiver.gateway.store._db.execute("SELECT status FROM operations ORDER BY rowid").fetchall()
+        self.assertEqual([row["status"] for row in rows], ["succeeded", "cancelled"])
+
+    async def test_policy_missing_even_loaded_tool_is_refused(self):
+        self.receiver.tool_names.add("not-in-policy")
+        async with asyncio.TaskGroup() as tasks:
+            await self.receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                        "name": "not-in-policy", "call_id": "forbidden", "arguments": "{}"}, tasks)
+        output = json.loads(self.sent()[0]["item"]["output"])
+        self.assertTrue(output["is_error"])
+        self.assertIn("白名单", output["text"])
+        self.assertEqual(self.receiver.gateway.store._db.execute("SELECT COUNT(*) FROM operations").fetchone()[0], 0)
+
     async def test_ha_calls_route_to_http_instead_of_personal_worker(self):
-        worker = Mock(call=AsyncMock())
-        http_client = Mock()
+        worker = Mock(closed=False, call=AsyncMock())
+        http_client = Mock(is_closed=False)
         tools = [{"name": name, "input_schema": {}} for name in qwen.HA_DEVICE_TOOLS]
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", worker, tools,
                                      ha_url="http://ha/api/mcp", http_client=http_client)
         result = CallToolResult(content=[TextContent(type="text", text="操作成功")])
-        with patch.object(qwen, "call_ha_tool", AsyncMock(return_value=result)) as call_ha:
+        with patch.object(executor_module, "call_ha_tool", AsyncMock(return_value=result)) as call_ha:
             async with asyncio.TaskGroup() as tasks:
                 for name in sorted(qwen.HA_DEVICE_TOOLS):
                     await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
                                            "name": name, "call_id": name, "arguments": '{"name":"客厅灯"}'}, tasks)
             for name in qwen.HA_DEVICE_TOOLS:
-                call_ha.assert_any_await(name, {"name": "客厅灯"}, url="http://ha/api/mcp", http_client=http_client)
+                call_ha.assert_any_await(name, {"name": "客厅灯"}, url="http://ha/api/mcp", http_client=http_client, classify_not_sent=True)
             self.assertEqual(call_ha.await_count, 4)
         worker.call.assert_not_awaited()
         self.assertEqual({e["item"]["call_id"] for e in self.sent()}, qwen.HA_DEVICE_TOOLS)
@@ -374,10 +555,10 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         tool = {"name": "intent__HassTurnOn", "input_schema": {}}
         for tools in ([tool], []):
             self.ws.send.reset_mock()
-            receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+            receiver = self.make_receiver(self.ws, self.player, self.activity,
                                          self.receiver.costs, "session", tools=tools,
-                                         ha_url="http://ha/api/mcp", http_client=Mock())
-            with patch.object(qwen, "call_ha_tool", AsyncMock(side_effect=OSError("HA 正在重启"))) as call_ha:
+                                         ha_url="http://ha/api/mcp", http_client=Mock(is_closed=False))
+            with patch.object(executor_module, "call_ha_tool", AsyncMock(side_effect=OSError("HA 正在重启"))) as call_ha:
                 async with asyncio.TaskGroup() as tasks:
                     await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
                                            "name": tool["name"], "call_id": "ha-call", "arguments": "{}"}, tasks)
@@ -393,12 +574,12 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_mixed_ha_and_personal_tools_continue_once(self):
         result = CallToolResult(content=[TextContent(type="text", text="完成")])
-        worker = Mock(call=AsyncMock(return_value=result))
+        worker = Mock(closed=False, call=AsyncMock(return_value=result))
         tools = [{"name": name, "input_schema": {}} for name in ("list_items", "intent__HassTurnOff")]
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", worker, tools,
-                                     ha_url="http://ha/api/mcp", http_client=Mock())
-        with patch.object(qwen, "call_ha_tool", AsyncMock(return_value=result)) as call_ha:
+                                     ha_url="http://ha/api/mcp", http_client=Mock(is_closed=False))
+        with patch.object(executor_module, "call_ha_tool", AsyncMock(return_value=result)) as call_ha:
             async with asyncio.TaskGroup() as tasks:
                 for tool in tools:
                     await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
@@ -417,11 +598,11 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         }))])
         for tools_finish_first in (True, False):
             self.ws.send.reset_mock()
-            receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+            receiver = self.make_receiver(self.ws, self.player, self.activity,
                                          self.receiver.costs, "session",
                                          tools=[{"name": name, "input_schema": {}} for name in names],
-                                         ha_url="http://ha/api/mcp", http_client=Mock())
-            with patch.object(qwen, "call_ha_tool", AsyncMock(return_value=result)):
+                                         ha_url="http://ha/api/mcp", http_client=Mock(is_closed=False))
+            with patch.object(executor_module, "call_ha_tool", AsyncMock(return_value=result)):
                 async with asyncio.TaskGroup() as tasks:
                     for name in names:
                         await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
@@ -453,10 +634,10 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
     async def test_twelve_consecutive_silent_actions_complete_each_followup(self):
         name = "intent__HassTurnOff"
         result = CallToolResult(content=[], structured_content={"response_type": "action_done"})
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", tools=[{"name": name, "input_schema": {}}],
-                                     ha_url="http://ha/api/mcp", http_client=Mock())
-        with patch.object(qwen, "call_ha_tool", AsyncMock(return_value=result)) as call_ha:
+                                     ha_url="http://ha/api/mcp", http_client=Mock(is_closed=False))
+        with patch.object(executor_module, "call_ha_tool", AsyncMock(return_value=result)) as call_ha:
             for index in range(12):
                 response_id = f"action-{index}"
                 async with asyncio.TaskGroup() as tasks:
@@ -482,7 +663,7 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         await self.emit("response.created", response={"id": "silent"})
         event = {"type": "response.function_call_arguments.done", "response_id": "silent",
                  "name": "intent__HassTurnOff", "call_id": "duplicate", "arguments": "{}"}
-        with patch.object(qwen, "call_ha_tool", AsyncMock()) as call_ha:
+        with patch.object(executor_module, "call_ha_tool", AsyncMock()) as call_ha:
             async with asyncio.TaskGroup() as tasks:
                 await receiver.handle(event, tasks)
             self.assertNotIn("duplicate", receiver.tool_calls)
@@ -503,11 +684,11 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         ]
         for name, result in cases:
             self.ws.send.reset_mock()
-            receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+            receiver = self.make_receiver(self.ws, self.player, self.activity,
                                          self.receiver.costs, "session",
                                          tools=[{"name": name, "input_schema": {}}],
-                                         ha_url="http://ha/api/mcp", http_client=Mock())
-            with patch.object(qwen, "call_ha_tool", AsyncMock(return_value=result)):
+                                         ha_url="http://ha/api/mcp", http_client=Mock(is_closed=False))
+            with patch.object(executor_module, "call_ha_tool", AsyncMock(return_value=result)):
                 async with asyncio.TaskGroup() as tasks:
                     await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
                                            "name": name, "call_id": "call", "arguments": "{}"}, tasks)
@@ -517,10 +698,10 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.sent()[-1]["type"], "response.create")
 
     async def test_parallel_tools_create_one_continuation(self):
-        worker = Mock(call=AsyncMock(return_value=CallToolResult(
+        worker = Mock(closed=False, call=AsyncMock(return_value=CallToolResult(
             content=[TextContent(type="text", text="完成")],
         )))
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", worker,
                                      [{"name": "list_items", "input_schema": {}}])
         async with asyncio.TaskGroup() as tasks:
@@ -535,13 +716,13 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(e["type"] == "response.create" for e in self.sent()), 1)
 
     async def test_worker_exception_is_returned_with_call_id(self):
-        worker = Mock(call=AsyncMock(side_effect=TimeoutError("服务超时")))
-        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+        worker = Mock(closed=False, call=AsyncMock(side_effect=TimeoutError("服务超时")))
+        receiver = self.make_receiver(self.ws, self.player, self.activity,
                                      self.receiver.costs, "session", worker,
-                                     [{"name": "add_items", "input_schema": {}}])
+                                     [{"name": "list_items", "input_schema": {}}])
         async with asyncio.TaskGroup() as tasks:
             await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
-                                   "name": "add_items", "call_id": "failed", "arguments": "{}"}, tasks)
+                                   "name": "list_items", "call_id": "failed", "arguments": "{}"}, tasks)
         result = self.sent()[0]["item"]
         self.assertEqual(result["call_id"], "failed")
         output = json.loads(result["output"])
@@ -575,7 +756,7 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
     async def test_reconnect_reapplies_session_configuration(self):
         sockets = []
         tools = [{"name": "intent__HassTurnOn", "input_schema": {}}]
-        http_client = Mock()
+        http_client = Mock(is_closed=False)
 
         class Socket:
             def __init__(self):
@@ -593,8 +774,8 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                 return False
 
         async def receive(receiver):
-            self.assertIs(receiver.http_client, http_client)
-            self.assertEqual(receiver.ha_url, "http://ha/api/mcp")
+            self.assertIs(receiver.gateway, self.receiver.gateway)
+            self.assertIs(receiver.commit_window, self.receiver.commit_window)
             self.assertIn("intent__HassTurnOn", receiver.tool_names)
             if len(sockets) == 1:
                 qwen.raise_api_error({"message": "Turn queue overflow: capacity=8"})
@@ -613,7 +794,8 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                 patch.object(qwen.asyncio, "sleep", quick_retry):
             task = asyncio.create_task(qwen.reconnect_loop(
                 "wss://example", "test", self.player, self.receiver.costs, "Tina", "singapore",
-                tools=tools, assist_prompt="客厅灯", ha_url="http://ha/api/mcp", http_client=http_client))
+                tools=tools, assist_prompt="客厅灯", gateway=self.receiver.gateway,
+                commit_window=self.receiver.commit_window))
             await asyncio.wait_for(second_session.wait(), 2)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
@@ -629,13 +811,22 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         personal = {"name": "list_items", "input_schema": {}}
         ha = {"name": "intent__HassTurnOn", "input_schema": {}}
         prompt = [{"type": "text", "text": "基础规则\nHome Assistant Assist prompt：\n客厅灯"}]
+        db_dir = self.enterContext(TemporaryDirectory())
+        db_path = Path(db_dir) / "operations.db"
+        previous = OperationStore(db_path)
+        interrupted = previous.create("old-turn", "create_reminder", {})
+        previous.transition(interrupted.id, "pending", "approved")
+        previous.transition(interrupted.id, "approved", "executing")
+        previous.close()
         for configured, available in ((True, True), (True, False), (False, False)):
             worker = Mock(run=AsyncMock())
             environment = {"DASHSCOPE_API_KEY": "test", "QWEN_WORKSPACE_ID": "test"}
             if configured:
                 environment.update(HA_URL="http://ha", HA_TOKEN="test")
             catalog = ([ha], prompt) if available else None
-            with patch.dict(qwen.os.environ, environment, clear=True), \
+            with patch.object(qwen, "OPERATIONS_DB", db_path), \
+                    patch("builtins.print") as printed, \
+                    patch.dict(qwen.os.environ, environment, clear=True), \
                     patch.object(qwen, "load_dotenv"), \
                     patch.object(qwen, "PersonalWorker", return_value=worker), \
                     patch.object(qwen, "stop_worker", AsyncMock()) as stop, \
@@ -650,11 +841,20 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                 else:
                     load_ha.assert_not_awaited()
                 args, kwargs = reconnect.await_args
-                self.assertEqual([t["name"] for t in args[8]],
+                self.assertEqual([t["name"] for t in args[7]],
                                  ["list_items", "intent__HassTurnOn"] if available else ["list_items"])
                 self.assertEqual(kwargs["assist_prompt"], "客厅灯" if available else "")
-                self.assertTrue(kwargs["http_client"].is_closed)
+                with self.assertRaises(sqlite3.ProgrammingError):
+                    kwargs["gateway"].store.get("closed")
                 stop.assert_awaited_once()
+                checker = OperationStore(db_path)
+                try:
+                    self.assertEqual(checker.get(interrupted.id).status, "unknown")
+                finally:
+                    checker.close()
+                if available:
+                    self.assertTrue(any("[恢复]" in str(call) and interrupted.id in str(call)
+                                        for call in printed.call_args_list))
 
 
 class CostAndProtocolTests(unittest.TestCase):

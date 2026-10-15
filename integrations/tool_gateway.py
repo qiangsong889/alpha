@@ -1,4 +1,4 @@
-"""所有工具实际执行前的状态边界；暂不接入语音层或计划确认流程。"""
+"""所有工具实际执行前的状态边界；审批资格由调用它的协调层决定。"""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
