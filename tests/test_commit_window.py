@@ -127,6 +127,34 @@ class CommitWindowTests(unittest.IsolatedAsyncioTestCase):
         await self.window.close()
         self.assertEqual(self.store.get(op.id).status, "unknown")
 
+    async def test_take_all_stops_timer_without_cancelling_or_executing_records(self):
+        first, second = await self.add(), await self.add("鸡蛋")
+        self.window.turn_finished()
+        self.assertEqual([op.id for op in self.window.take_all()], [first.id, second.id])
+        self.assertEqual(self.window.take_all(), [])
+        await asyncio.sleep(.08)
+        self.executor.assert_not_awaited()
+        self.assertEqual(self.store.get(first.id).status, "pending")
+        self.assertEqual(self.store.get(second.id).status, "pending")
+
+    async def test_take_all_during_execution_only_transfers_unclaimed_items(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def execute(*args):
+            entered.set()
+            await release.wait()
+            return ExecutorResult(True, "已添加")
+
+        self.executor.side_effect = execute
+        first, second = await self.add(), await self.add("鸡蛋")
+        self.window.turn_finished()
+        await asyncio.wait_for(entered.wait(), 1)
+        self.assertEqual([op.id for op in self.window.take_all()], [second.id])
+        release.set()
+        self.assertEqual((await self.report()).operations[0].id, first.id)
+        self.assertEqual(self.store.get(second.id).status, "pending")
+        self.executor.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

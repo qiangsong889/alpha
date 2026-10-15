@@ -135,3 +135,25 @@ class OperationStore:
 
     def close(self) -> None:
         self._db.close()
+
+    def discard_unsubmitted(self) -> list[Operation]:
+        """程序重启不恢复旧计划；明确取消旧进程遗留的未发送操作。"""
+        with self._db:
+            rows = self._db.execute("SELECT * FROM operations WHERE status IN ('pending','approved')").fetchall()
+            self._db.execute("UPDATE operations SET status='cancelled', updated_at=? WHERE status IN ('pending','approved')", (time.time(),))
+        return [op for row in rows if (op := self.get(row["id"])) is not None]
+
+    def unresolved(self) -> list[Operation]:
+        rows = self._db.execute("SELECT * FROM operations WHERE status='unknown' ORDER BY updated_at DESC LIMIT 20").fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def record_verification(self, op_id: str, result: object, *, succeeded: bool = False) -> Operation:
+        """仅由可信查询结果调用；没有查到资源不能证明原请求未执行。"""
+        encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
+        with self._db:
+            self._db.execute("UPDATE operations SET status=?, result=?, updated_at=? WHERE id=? AND status='unknown'",
+                             ("succeeded" if succeeded else "unknown", encoded, time.time(), op_id))
+        op = self.get(op_id)
+        if op is None:
+            raise KeyError(op_id)
+        return op

@@ -3,11 +3,12 @@
 import asyncio
 import os
 import time
-from collections import deque
-from dataclasses import dataclass
+from collections import OrderedDict, deque
+from dataclasses import dataclass, field
 from threading import Lock
 
 import numpy as np
+from numpy.typing import NDArray
 import sounddevice as sd  # type: ignore[import-untyped]
 import webrtcvad  # type: ignore[import-untyped]
 
@@ -82,6 +83,23 @@ class SpeechActivity:
         self.last_voice_at = 0.0
 
 
+@dataclass
+class _PlaybackWaiter:
+    loop: asyncio.AbstractEventLoop
+    future: asyncio.Future[bool]
+    scheduled: bool = False
+
+
+@dataclass
+class _ItemPlayback:
+    pending_frames: int = 0
+    received: bool = False
+    finished: bool = False
+    deadline: float | None = None
+    result: bool | None = None
+    waiters: list[_PlaybackWaiter] = field(default_factory=list)
+
+
 class StreamingPlayer:
     """持续打开输出流，回调从缓冲区取音频；打断时清空缓冲区。"""
     def __init__(self):
@@ -89,7 +107,7 @@ class StreamingPlayer:
         # 两边访问同一份缓冲区，所以用线程 Lock 保护，避免同时修改队列或播放位置。
         self.lock = Lock()
         # 缓冲区存“收到但还没播完”的音频；offset 是第一块音频已经播放到的位置。
-        self.buffers = deque()
+        self.buffers: deque[NDArray[np.float32]] = deque()
         # 与音频块一一对应，保留每块属于哪个会话条目；新回答排队，不覆盖没播完的旧话。
         self._buffer_items: deque[tuple[str, int]] = deque()
         self.offset = 0
@@ -102,19 +120,50 @@ class StreamingPlayer:
         self.latency = 0.0
         self.gain = 1.0
         self.paused = False
+        # 每个 item 独立记录收到、交给声卡和结束的状态，不能用全局 buffers 是否为空判断。
+        # 按首次出现的顺序保留最近 200 个 item；更老但尚在播放/等待的记录暂不淘汰。
+        # 这只是有限的晚到音频保护，语音层仍须过滤已取消回答的音频事件。
+        self._playbacks: OrderedDict[str, _ItemPlayback] = OrderedDict()
+
+    def _trim_playbacks(self) -> None:
+        """调用方持有 lock。最近 200 条保留，其余只删除终态且没有等待者的记录。"""
+        if len(self._playbacks) <= 200:
+            return
+        for item_id in list(self._playbacks)[:-200]:
+            playback = self._playbacks[item_id]
+            if playback.waiters or playback.pending_frames:
+                continue
+            # 没有调用方等待时也能判定已过输出延迟的条目，避免它们永远积累。
+            self._mark_played(playback)
+            if playback.result is not None:
+                del self._playbacks[item_id]
 
     def append(self, audio: bytes, item_id: str, content_index: int) -> None:
         # 收到模型的一小块音频时调用。这里只入队，不等待扬声器把它播放完。
         # 模型返回 int16；输出流使用 float32，数值由整数范围缩放到约 -1～1。
-        samples = np.frombuffer(audio, dtype="<i2").astype(np.float32) / 32768
+        samples = np.frombuffer(audio, dtype="<i2").astype(np.float32)
+        samples /= 32768
         with self.lock:
+            playback = self._playbacks.setdefault(item_id, _ItemPlayback())
+            self._trim_playbacks()
+            if playback.result is not None or playback.finished:
+                # clear/finish 后晚到的块不能重新播放，也不能让旧条目重新获得完成资格。
+                return
             if not self.ready:
                 # 设备尚未打开或已断开时丢弃这一块，防止恢复后播放过时回答。
+                playback.result = False
+                self._notify_playback(playback)
+                self._trim_playbacks()
                 return
             if self.rate != 24000 and samples.size:
                 count = round(samples.size * self.rate / 24000)
                 samples = np.interp(np.arange(count) * 24000 / self.rate,
                                     np.arange(samples.size), samples).astype(np.float32)
+            if not samples.size:
+                return
+            playback.received = True
+            playback.pending_frames += samples.size
+            playback.deadline = None
             if self.item_id is None:
                 # 第一次入队时记录条目；后续条目的切换要等 callback 真正播放到它。
                 self.item_id = item_id
@@ -145,6 +194,12 @@ class StreamingPlayer:
                 written += count
                 # 记录当前条目的播放量；同一次 callback 跨条目时也不能把前一条的帧数算进来。
                 self.played_frames += count
+                playback = self._playbacks[item_id]
+                playback.pending_frames -= count
+                if playback.pending_frames == 0:
+                    # 只是交给声卡；完成通知要等到最后一次提交的输出延迟过去。
+                    playback.deadline = time.perf_counter() + max(0.0, self.latency)
+                    self._notify_playback(playback)
                 if self.offset == samples.size:
                     self.buffers.popleft()
                     self._buffer_items.popleft()
@@ -153,6 +208,78 @@ class StreamingPlayer:
             # gain=0.2 是降低音量；与 pause 不同，降低音量时仍然继续消费音频。
             if written:
                 self.last_submit_at = time.perf_counter()
+            self._trim_playbacks()
+
+    def finish(self, item_id: str) -> None:
+        """全部音频收到；即使缓冲区已被取空，也需要这一步才允许报告完成。"""
+        with self.lock:
+            playback = self._playbacks.setdefault(item_id, _ItemPlayback())
+            playback.finished = True
+            if not playback.received and playback.result is None:
+                playback.result = False
+            self._notify_playback(playback)
+            self._trim_playbacks()
+
+    async def wait_played(self, item_id: str) -> bool:
+        """等待该 item 播完；无音频、丢弃或被 clear 打断都返回 False。
+
+        语音接线时先在 response.audio.done / response.done 调用 finish(item_id)，
+        再调用本方法；一块音频也没收到时会立即返回 False，不会等待音频开始。
+        已收到音频时也支持提前等待，直到 finish 和实际播放完成两个条件都满足。
+        """
+        loop = asyncio.get_running_loop()
+        with self.lock:
+            playback = self._playbacks.get(item_id)
+            if playback is None or not playback.received:
+                return False
+            self._mark_played(playback)
+            if playback.result is not None:
+                self._trim_playbacks()
+                return playback.result
+            waiter = _PlaybackWaiter(loop, loop.create_future())
+            playback.waiters.append(waiter)
+            self._notify_playback(playback)
+            self._trim_playbacks()
+        try:
+            return await waiter.future
+        finally:
+            with self.lock:
+                playback.waiters.remove(waiter)
+                self._trim_playbacks()
+
+    @staticmethod
+    def _mark_played(playback: _ItemPlayback) -> None:
+        # 调用方持有 lock；结果一旦确定就不再改变，clear 不会推翻已经播放完成的条目。
+        if (playback.result is None and playback.received and playback.finished
+                and playback.pending_frames == 0 and playback.deadline is not None
+                and time.perf_counter() >= playback.deadline):
+            playback.result = True
+
+    def _notify_playback(self, playback: _ItemPlayback) -> None:
+        # 调用方持有 lock。这里可能在声卡线程，绝不能直接设置 asyncio.Future。
+        ready = playback.finished and playback.pending_frames == 0 and playback.deadline is not None
+        for waiter in playback.waiters:
+            if playback.result is not None or (ready and not waiter.scheduled):
+                waiter.scheduled = True
+                try:
+                    waiter.loop.call_soon_threadsafe(self._deliver_playback, playback, waiter)
+                except RuntimeError:
+                    if not waiter.loop.is_closed():
+                        raise
+
+    def _deliver_playback(self, playback: _ItemPlayback, waiter: _PlaybackWaiter) -> None:
+        # 只在对应的事件循环运行；call_later 等输出延迟，不阻塞声卡回调线程。
+        with self.lock:
+            if waiter.future.done():
+                return
+            self._mark_played(playback)
+            result = playback.result
+            deadline = playback.deadline
+        if result is not None:
+            waiter.future.set_result(result)
+        elif deadline is not None:
+            waiter.loop.call_later(max(0.0, deadline - time.perf_counter()),
+                                   self._deliver_playback, playback, waiter)
 
     def duck(self, enabled: bool) -> None:
         with self.lock:
@@ -171,6 +298,11 @@ class StreamingPlayer:
         # 真正打断时丢弃未播内容，并返回“哪个条目、哪段内容、听到了多少毫秒”。
         # 语音层用这个结果请求截断服务端历史，避免模型以为用户已经听完。
         with self.lock:
+            for playback in self._playbacks.values():
+                if playback.result is None:
+                    playback.result = False
+                playback.pending_frames = 0
+                self._notify_playback(playback)
             # 扣除估计仍在设备缓冲区的尾部，得到保守的已听时长。
             pending_frames = min(self.played_frames, max(0, round(
                 (self.latency - (time.perf_counter() - self.last_submit_at)) * self.rate
@@ -190,6 +322,7 @@ class StreamingPlayer:
             self.played_frames = 0
             self.gain = 1.0
             self.paused = False
+            self._trim_playbacks()
             return item
 
     async def run(self) -> None:

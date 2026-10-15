@@ -11,6 +11,7 @@ from functools import cache
 from threading import RLock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
+import hashlib
 from typing import Any
 from dotenv import load_dotenv
 
@@ -21,6 +22,8 @@ from servers.google_auth import get_credentials
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, TextContent
+from googleapiclient.errors import HttpError  # type: ignore[import-untyped]
 
 load_dotenv(ENV_FILE)
 mcp = MCPServer("Alpha Personal")
@@ -81,7 +84,7 @@ def _find_list_id(tasks: Any, list_name: str) -> str:
 
 
 @mcp.tool()
-def list_items(list_name: str) -> str:
+def list_items(list_name: str) -> CallToolResult:
     """读取指定 Google Tasks 清单的任务标题和完成状态，包括已完成任务。"""
     # @mcp.tool 把此函数注册为模型可发现的工具；函数名、参数和 docstring 提供工具描述。
     # 普通 with 获取线程锁；Google Python API 是同步调用，因此这里不用 async with。
@@ -90,6 +93,7 @@ def list_items(list_name: str) -> str:
         list_id = _find_list_id(tasks, list_name)
         page_token = None
         lines: list[str] = []
+        entries: list[dict[str, str]] = []
         while True:
             response = tasks.tasks().list(
                 tasklist=list_id, pageToken=page_token,
@@ -98,40 +102,108 @@ def list_items(list_name: str) -> str:
             for task in response.get("items", []):
                 status = "已完成" if task.get("status") == "completed" else "未完成"
                 lines.append(f"- {task.get('title') or '（无标题）'}：{status}")
+                entries.append({"task_id": task["id"], "title": task.get("title", ""),
+                                "status": task.get("status", "needsAction")})
             page_token = response.get("nextPageToken")
             if not page_token:
                 break
-    return f"{list_name}：\n" + ("\n".join(lines) or "暂无任务")
+    return _task_result(f"{list_name}：\n" + ("\n".join(lines) or "暂无任务"), {
+        "list_id": list_id, "list_name": list_name, "items": entries,
+    })
 
 
 @mcp.tool()
-def add_items(list_name: str, items: list[str]) -> str:
-    """向指定 Google Tasks 清单添加一个或多个任务，返回添加结果。"""
+def list_reminders(max_results: int = 10) -> CallToolResult:
+    """读取主日历未来的日程及其事件 ID；ID 用于精确定位，不要向用户朗读。"""
+    if type(max_results) is not int or not 1 <= max_results <= 20:
+        raise ToolError("max_results 必须是 1 到 20 的整数")
+    with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
+        response = calendar.events().list(calendarId="primary", maxResults=max_results,
+            timeMin=datetime.now(timezone.utc).isoformat(), singleEvents=True, orderBy="startTime").execute()
+    entries = [{"event_id": item["id"], "title": item.get("summary", "（无标题）"),
+                "start": item.get("start", {})} for item in response.get("items", [])]
+    text = "\n".join(f"{item['title']}：{item['start'].get('dateTime', item['start'].get('date', ''))}"
+                     for item in entries) or "暂无即将到来的日程"
+    return _task_result(text, {"items": entries})
+
+
+def _task_result(text: str, data: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+    return CallToolResult(content=[TextContent(type="text", text=text)],
+                          structured_content=data, is_error=is_error)
+
+
+@mcp.tool()
+def add_items(list_name: str, items: list[str], operation_id: str = "") -> CallToolResult:
+    """向指定 Google Tasks 清单添加任务，返回确认文字和本次新建条目的 ID。
+
+    创建中断时返回已确认创建的条目与未确定结果，不要整批重试。
+    """
+    if not isinstance(list_name, str) or not list_name.strip():
+        raise ToolError("list_name 必须是非空清单名称")
     if not isinstance(items, list) or not items or any(
         not isinstance(title, str) or not title.strip() for title in items
     ):
         raise ToolError("items 必须是至少包含一个非空任务标题的列表")
 
     # Google 每次 insert 只创建一个任务；记录已成功部分，失败时告诉模型不要全部重做。
-    added: list[str] = []
+    added: list[dict[str, str]] = []
     with _TASKS_LOCK:
         tasks = get_tasks_service()
         list_id = _find_list_id(tasks, list_name)
-        for title in items:
+        for index, title in enumerate(items):
             try:
-                tasks.tasks().insert(tasklist=list_id, body={"title": title}).execute()
+                body = {"title": title}
+                if operation_id:
+                    body["notes"] = f"alpha-operation:{operation_id}:{index}"
+                created = tasks.tasks().insert(tasklist=list_id, body=body).execute()
+                task_id = created.get("id") if isinstance(created, dict) else None
+                if not isinstance(task_id, str) or not task_id.strip():
+                    raise ValueError("Google 返回结果缺少新建任务 ID")
             except Exception as exc:
-                completed = "、".join(added) or "无"
-                raise ToolError(
-                    f'添加 "{title}" 失败。已添加到 {list_name}：{completed}。'
-                    "请只重试尚未添加的任务。"
-                ) from exc
-            added.append(title)
-    return f"已添加到 {list_name}：" + "、".join(added)
+                completed = "、".join(item["title"] for item in added) or "无"
+                text = (f'已确认添加到 {list_name}：{completed}。添加 "{title}" 的结果未知，'
+                        "可能已经生效，不要重试，先查询核实；后续条目尚未尝试。")
+                return _task_result(text, {
+                    "version": 1, "status": "unknown", "list_id": list_id,
+                    "list_name": list_name, "created": added,
+                    "unconfirmed": {"title": title}, "unattempted": items[index + 1:],
+                    "error": f"{type(exc).__name__}: {exc}",
+                }, is_error=True)
+            added.append({"task_id": task_id, "title": title})
+    text = f"已添加到 {list_name}：" + "、".join(item["title"] for item in added)
+    return _task_result(text, {
+        "version": 1, "status": "succeeded", "list_id": list_id,
+        "list_name": list_name, "created": added,
+    })
 
 
 @mcp.tool()
-def create_reminder(title: str, local_time: str, minutes_before: int = 0) -> str:
+def delete_task(list_id: str, task_id: str) -> CallToolResult:
+    """按精确的清单 ID 和任务 ID 删除一条任务，用于撤销本次新增。
+
+    ID 必须来自已确认的创建记录，不能用标题代替，也不能猜测 ID。
+    删除是一个新的写操作，不代表原来的添加没有发生。
+    """
+    for name, value in (("list_id", list_id), ("task_id", task_id)):
+        if not isinstance(value, str) or not value.strip():
+            raise ToolError(f"{name} 必须是非空 ID")
+    with _TASKS_LOCK:
+        tasks = get_tasks_service()
+        try:
+            tasks.tasks().delete(tasklist=list_id, task=task_id).execute()
+        except Exception as exc:
+            return _task_result("删除结果未知，可能已经生效。不要重试，先查询核实。", {
+                "version": 1, "status": "unknown", "list_id": list_id,
+                "task_id": task_id, "error": f"{type(exc).__name__}: {exc}",
+            }, is_error=True)
+    return _task_result("已删除指定任务", {
+        "version": 1, "status": "succeeded", "list_id": list_id, "task_id": task_id,
+    })
+
+
+@mcp.tool()
+def create_reminder(title: str, local_time: str, minutes_before: int = 0,
+                    operation_id: str = "") -> CallToolResult:
     """在 Google 主日历创建 15 分钟日程并设置弹窗提醒。
 
     local_time 必须是不带时区的本地 ISO 8601 时间，例如 2026-11-03T08:00:00。
@@ -192,11 +264,113 @@ def create_reminder(title: str, local_time: str, minutes_before: int = 0) -> str
             "overrides": [{"method": "popup", "minutes": minutes_before}],
         },
     }
+    if operation_id:
+        # Calendar 支持客户端指定事件 ID；哈希只含允许的 base32hex 字符。
+        body["id"] = _event_id(operation_id)
     # 这个 Calendar service 只在当前工具里用，with 退出时关闭它；不是 Tasks 的共享缓存。
     with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
-        calendar.events().insert(calendarId="primary", body=body).execute()
+        try:
+            created = calendar.events().insert(calendarId="primary", body=body).execute()
+        except Exception as exc:
+            return _task_result("创建提醒结果未知，可能已经生效，请先核实，不要重试。", {
+                "version": 1, "status": "unknown", "event_id": body.get("id"),
+                "error": f"{type(exc).__name__}: {exc}",
+            }, is_error=True)
     timing = "准时提醒" if minutes_before == 0 else f"提前 {minutes_before} 分钟提醒"
-    return f"已创建提醒：{title.strip()}，时间：{start.isoformat()}（{tz_name}），{timing}"
+    event_id = created.get("id") if isinstance(created, dict) else None
+    if not isinstance(event_id, str) or not event_id:
+        return _task_result("提醒可能已创建，但没有收到事件 ID，请先核实，不要重试。",
+                            {"version": 1, "status": "unknown"}, is_error=True)
+    return _task_result(f"已创建提醒：{title.strip()}，时间：{start.isoformat()}（{tz_name}），{timing}",
+                        {"version": 1, "status": "succeeded", "event_id": event_id,
+                         "title": title.strip(), "local_time": local_time})
+
+
+def _event_id(operation_id: str) -> str:
+    return hashlib.sha256(operation_id.encode()).hexdigest()
+
+
+@mcp.tool()
+def delete_reminder(event_id: str) -> CallToolResult:
+    """按创建回执的事件 ID 删除主日历提醒。仅供授权后的撤销使用。"""
+    if not event_id.strip():
+        raise ToolError("event_id 不能为空")
+    with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
+        try:
+            calendar.events().delete(calendarId="primary", eventId=event_id).execute()
+        except Exception as exc:
+            return _task_result("删除提醒结果未知，请先查询核实，不要重试。", {
+                "version": 1, "status": "unknown", "event_id": event_id,
+                "error": f"{type(exc).__name__}: {exc}",
+            }, is_error=True)
+    return _task_result("已删除指定提醒", {"version": 1, "status": "succeeded", "event_id": event_id})
+
+
+@mcp.tool()
+def inspect_reminder(event_id: str = "", operation_id: str = "") -> CallToolResult:
+    """按保存的事件 ID 或添加操作编号查询，不修改日历。"""
+    target = event_id or (_event_id(operation_id) if operation_id else "")
+    if not target:
+        raise ToolError("必须提供事件 ID 或操作编号")
+    with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
+        try:
+            event = calendar.events().get(calendarId="primary", eventId=target).execute()
+        except HttpError as exc:
+            if exc.resp.status not in {404, 410}:
+                raise
+            event = {"id": target, "status": "cancelled"}
+    present = event.get("status") != "cancelled"
+    return _task_result("提醒存在" if present else "没有查到有效提醒", {
+        "present": present, "event_id": target, "title": event.get("summary", ""),
+        "start": event.get("start", {}),
+    })
+
+
+@mcp.tool()
+def inspect_task(list_id: str, task_id: str) -> CallToolResult:
+    """按已保存的精确 ID 查询任务是否仍存在，不修改清单。"""
+    if not list_id.strip() or not task_id.strip():
+        raise ToolError("清单和任务 ID 不能为空")
+    with _TASKS_LOCK:
+        try:
+            task = get_tasks_service().tasks().get(tasklist=list_id, task=task_id).execute()
+        except HttpError as exc:
+            if exc.resp.status not in {404, 410}:
+                raise
+            task = {"deleted": True}
+    return _task_result("任务存在" if not task.get("deleted") else "任务已不存在", {
+        "present": not bool(task.get("deleted")), "list_id": list_id,
+        "task_id": task_id, "title": task.get("title", ""),
+    })
+
+
+@mcp.tool()
+def find_created_items(list_name: str, operation_id: str, items: list[str]) -> CallToolResult:
+    """用操作编号标记查询这次创建的任务，不能按同名任务猜测结果。"""
+    if not operation_id or not items:
+        raise ToolError("操作编号和原始条目不能为空")
+    with _TASKS_LOCK:
+        service = get_tasks_service()
+        list_id = _find_list_id(service, list_name)
+        found: dict[int, list[dict[str, str]]] = {index: [] for index in range(len(items))}
+        page_token = None
+        while True:
+            response = service.tasks().list(tasklist=list_id, pageToken=page_token,
+                                            showCompleted=True, showHidden=True, showDeleted=False).execute()
+            for task in response.get("items", []):
+                for index, title in enumerate(items):
+                    if (task.get("notes") == f"alpha-operation:{operation_id}:{index}"
+                            and task.get("title") == title and not task.get("deleted")):
+                        found[index].append({"task_id": task["id"], "title": title})
+            page_token = response.get("nextPageToken")
+            if not page_token:
+                break
+    complete = all(len(found[index]) == 1 for index in found)
+    return _task_result("已核实全部条目" if complete else "未能核实全部条目，不要重试添加", {
+        "version": 1, "status": "succeeded" if complete else "unknown",
+        "list_id": list_id, "list_name": list_name,
+        "created": [found[index][0] for index in found if len(found[index]) == 1],
+    })
 
 
 @mcp.tool()

@@ -2,6 +2,7 @@
 
 import logging
 import json
+from copy import deepcopy
 import httpx2
 from anthropic.types import TextBlockParam, ToolParam
 from mcp import ClientSession, StdioServerParameters
@@ -10,12 +11,12 @@ from mcp.client.streamable_http import streamable_http_client
 from mcp.types import CallToolResult, GetPromptResult, PaginatedRequestParams, TextContent
 from core.rules import ALPHA_RULES
 from integrations.tool_gateway import ToolNotSent
-from integrations.tool_policy import TOOL_POLICY
+from integrations.tool_policy import INTERNAL_TOOLS, TOOL_POLICY
 
 logger = logging.getLogger("alpha.mcp")
 
 # 保留旧导出供 Brain 使用，工具名由同一份策略表定义，不再维护两张白名单。
-ALLOWED_TOOLS = set(TOOL_POLICY)
+ALLOWED_TOOLS = set(TOOL_POLICY) - INTERNAL_TOOLS
 
 
 def device_action_succeeded(name: str, result: CallToolResult) -> bool:
@@ -55,11 +56,14 @@ async def load_tools(session: ClientSession) -> list[ToolParam]:
             params=PaginatedRequestParams(cursor=cursor) if cursor else None
         )
         for tool in result.tools:
+            schema = deepcopy(tool.input_schema)
+            if tool.name in {"add_items", "create_reminder"}:
+                schema.get("properties", {}).pop("operation_id", None)
             # MCP schema 转成 Claude 所需的字段名；这里只转换描述，不执行工具。
             tools.append({
                 "name": tool.name,
                 "description": tool.description or "",
-                "input_schema": tool.input_schema,
+                "input_schema": schema,
             })
         cursor = result.next_cursor
         if not cursor:

@@ -12,9 +12,11 @@ import json
 import os
 import re
 import time
+from typing import Any
 import httpx2
 from contextlib import AsyncExitStack
 from datetime import datetime
+from dataclasses import dataclass, field
 from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -27,6 +29,10 @@ from dotenv import load_dotenv
 from anthropic.types import ToolParam
 from mcp import StdioServerParameters
 from core.paths import ENV_FILE, PROJECT_ROOT, VENV_PYTHON, OPERATIONS_DB
+from core.plan import needs_plan
+from core.plan_coordinator import PlanCoordinator
+from core.task_coordinator import TaskCoordinator
+from core.simple_coordinator import SimpleCoordinator
 from integrations.mcp_client import (
     load_personal_catalog, format_error, load_ha_catalog, merge_tools,
 )
@@ -43,6 +49,19 @@ from voice.audio import (
     StreamingPlayer, audio_device, SpeechActivity, SpeechCandidate, is_meaningful,
 )
 from voice.commit_window import CommitReport, CommitWindow
+from voice.plan_tools import call_control, control_output
+from voice.batch_tools import CONTROL_TOOLS as LEGACY_CONTROL_TOOLS
+from voice.simple_tools import CONTROL_TOOLS, RULES
+
+
+@dataclass
+class _Recap:
+    plan_id: str
+    version: int
+    text: str
+    items: list[str] = field(default_factory=list)
+    invalid: bool = False
+    checked: bool = False
 
 
 MODEL = "qwen3.8-omni-flash-realtime"
@@ -82,24 +101,9 @@ def session_config(voice: str, tools: list[ToolParam] | None = None,
         "modalities": ["text", "audio"],
         "voice": voice,
         "instructions": (
-            "你是一个中文语音助手。无论用户说哪种语言，都使用普通话回答。"
-            "回答简短自然，用一两句口语表达，不使用 Markdown、列表和表情符号。"
-            "调用查询、清单或提醒工具前，可以只说一句很短的口语，比如‘嗯，我看看’、‘我查一下’或‘稍等啊’只说一句很短的口语，或者等结果出来再答；不必每次先回应。"
-            # "确实需要过渡时，只说一句很短的口语，比如‘嗯，我看看’、‘我查一下’或‘稍等啊’。"
-            "可以适量使用嗯、好、啊等自然语气词，但不要每次套同一句话，不要刻意堆叠。"
-            "避免‘我就帮您查看一下购物清单’这类冗长的执行说明，不复述整条指令。"
-            "同一轮工具调用最多一句过渡语；结果回来直接说实际结果，不再说‘查到了’或重复过渡。"
-            "你可以用工具管理购物清单、待办和提醒。"
-            '“X 买了”表示把清单上的 X 标记为完成。不要声称做了工具没有执行成功的事。'
-            "创建提醒、添加或完成清单条目时，必须先调用对应的工具。"
-            "工具结果写着‘尚未执行’时，只能说‘好的，记下了’之类的话，不能说‘已经设好了’。"
-            "只有拿到工具返回的成功结果之后，才能说‘已经……’。"
-            "工具没有被调用或调用失败时，绝不能说已经完成。"
-            "查询设备状态或控制设备时必须使用提供的工具，不猜测状态、不虚构成功。"
-            "设备目标不明确时先询问，工具失败时简短说明失败。"
-            "开关设备或调光时直接调用工具，不要先说执行说明；成功后不需要口头确认。"
-            + ("" if names & PERSONAL_TOOLS else "个人服务暂时不可用，不能声称已完成清单或提醒操作。")
-            + ("" if names & HA_DEVICE_TOOLS else "家居设备暂时不可用，不能声称已操作家居设备。")
+            RULES
+            + ("" if names & PERSONAL_TOOLS else "个人服务暂时不可用，不能声称已完成清单或提醒。")
+            + ("" if names & HA_DEVICE_TOOLS else "家居设备暂时不可用，不能声称已操作设备。")
             + ("\nHome Assistant Assist prompt：\n" + assist_prompt if assist_prompt else "")
         ),
         "tools": [
@@ -107,7 +111,8 @@ def session_config(voice: str, tools: list[ToolParam] | None = None,
                 "name": tool["name"], "description": tool.get("description", ""),
                 "parameters": tool["input_schema"],
             }} for tool in tools or [] if get_policy(tool["name"]) is not None
-        ],
+        ] + [{"type": "function", "function": {"name": name, **tool}}
+             for name, tool in CONTROL_TOOLS.items()],
         "audio": {
             "input": {"format": {
                 "type": "pcm", "sample_rate": 16000,
@@ -270,6 +275,7 @@ class QwenReceiver:
     def __init__(self, ws, player: StreamingPlayer, activity: SpeechActivity,
                  costs: CostTracker, session_id: str, *, gateway: ToolGateway,
                  commit_window: CommitWindow,
+                 coordinator: PlanCoordinator,
                  tools: list[ToolParam] | None = None):
         self.ws, self.player, self.activity = ws, player, activity
         self.costs, self.session_id = costs, session_id
@@ -293,6 +299,14 @@ class QwenReceiver:
         self.first_audio = True
         self.gateway = gateway
         self.commit_window = commit_window
+        self.coordinator = coordinator
+        self.pending_recap: _Recap | None = None
+        self.recaps: dict[str, _Recap] = {}
+        self.response_items: dict[str, list[str]] = {}
+        self.recap_needed = coordinator.plan is not None and coordinator.plan.status == "collecting"
+        self.playback_tasks: set[asyncio.Task] = set()
+        self.early_recap_turns: dict[str, tuple[str, int]] = {}
+        self.finalized_responses: set[str] = set()
         self.turn_operations: dict[str, list[str]] = {}
         self.active_report: CommitReport | None = None
         self.report_response: str | None = None
@@ -330,6 +344,8 @@ class QwenReceiver:
     async def correct_unsupported_claim(self) -> bool:
         """等待本轮工具结束后核对声明；只为当前用户请求纠正一次，防止生成死循环。"""
         for response_id, text in self.claims_to_check.items():
+            if response_id in self.recaps:
+                continue  # 模板中可能有“标为已完成”，那是在复述计划，不是宣称已执行。
             if response_id in self.checked_claims:
                 continue
             turn = self.response_turns[response_id]
@@ -406,6 +422,24 @@ class QwenReceiver:
             self.log("客户端发送 response.create（已提交且文字有意义）")
             await self.request_response(target)
             return
+        effective = self.last_meaningful_candidate if target is not None and target.meaningful is False else target
+        if self.turn_pending.get(self.turn_key(effective), 0):
+            return  # 同一轮的 update/remove 全部完成后，才生成一次最新版本的复述。
+        # 工具结果都已返回时先分流，再决定如何继续模型这一轮。
+        # 多动作直接以计划复述完成工具后续轮次，不先生成“记下了/设好了”的自由回答。
+        ready = [response_id for response_id, pending in self.tool_pending.items()
+                 if pending == 0 and self.finished_responses.get(response_id) == "completed"
+                 and response_id not in self.tool_continued
+                 and (self.tool_candidates[response_id] is effective)]
+        if (self.commit_window.pending and self.needs_plan_flow()
+                and any(response_id not in self.recaps for response_id in ready)):
+            self.tool_continued.update(ready)
+            for response_id in ready:
+                if response_id in self.claims_to_check:
+                    self.log("[⚠️ 疑似虚构] 工具轮含未经核实的完成声明，直接用计划复述澄清")
+                    self.checked_claims.add(response_id)
+            await self.transfer_window_to_plan(effective)
+            return
         if await self.correct_unsupported_claim():
             return
         # 工具已完成时继续旧问题；若用户已经提出新的有效问题，就不播过时的后续回答。
@@ -416,6 +450,13 @@ class QwenReceiver:
                          or (self.candidate is not None and self.candidate.meaningful is False
                              and self.tool_candidates[response_id] is self.last_meaningful_candidate))):
                 self.tool_continued.add(response_id)
+                if response_id in self.recaps:
+                    # 拒绝不等于跳过协议收尾，否则连续违规会积压服务端轮次。
+                    await self.request_response(self.tool_candidates[response_id], silent=True)
+                    return
+                if self.recap_needed and self.active_plan():
+                    await self.request_recap(self.tool_candidates[response_id])
+                    return
                 if self.tool_silent.get(response_id, False):
                     self.log("[静默] 设备操作全部成功，完成后续轮次但不播放确认")
                     await self.request_response(self.tool_candidates[response_id], silent=True)
@@ -425,6 +466,9 @@ class QwenReceiver:
         # 报告只在没有新话语、工具后续回答和纠正回答时送出，避免自己打断自己。
         if target is not None and (target.meaningful is None
                                    or (target.meaningful is True and not target.responded)):
+            return
+        if self.recap_needed and self.active_plan():
+            await self.request_recap(target)
             return
         if self.active_report is None and not self.commit_window.reports.empty():
             self.active_report = self.commit_window.reports.get_nowait()
@@ -452,6 +496,13 @@ class QwenReceiver:
                 "content": [{"type": "input_text", "text": correction}],
             })
         if not silent:
+            snapshot = self.coordinator.snapshot()
+            if snapshot is not None:
+                await self.command("conversation.item.create", item={
+                    "type": "message", "role": "system", "content": [{
+                        "type": "input_text", "text": "当前操作记录：" + json.dumps(snapshot, ensure_ascii=False),
+                    }],
+                })
             now = datetime.now(self.timezone)
             weekday = "一二三四五六日"[now.weekday()]
             text = f"[当前时间：{now:%Y-%m-%d} 星期{weekday} {now:%H:%M}，{self.timezone.key}]"
@@ -463,6 +514,47 @@ class QwenReceiver:
             })
         await self.command("response.create")
 
+    def active_plan(self) -> bool:
+        plan = self.coordinator.plan
+        return plan is not None and plan.status in {"collecting", "awaiting_confirmation"}
+
+    def coordinator_turn(self, target: SpeechCandidate | None) -> str:
+        return f"{self.session_id}:{self.turn_key(target)}"
+
+    async def request_recap(self, target: SpeechCandidate | None) -> None:
+        if self.current_response is not None or self.response_pending or not self.active_plan():
+            return
+        plan = self.coordinator.plan
+        assert plan is not None
+        self.recap_needed = False
+        if not plan.items:
+            return
+        self.pending_recap = _Recap(plan.id, plan.version, plan.recap(datetime.now(self.timezone)))
+        # 即使是同一个版本再次复述，也必须先撤销上次的播放资格。
+        self.coordinator.recap_played(plan.id, plan.version, interrupted=True)
+        self.log(f"[计划复述] {plan.id} v{plan.version}：{self.pending_recap.text}")
+        await self.request_response(target, correction=(
+            "本轮只做计划复述。逐字念出下面这段话，不要增加或删减内容，不要调用工具：\n"
+            + self.pending_recap.text
+        ))
+
+    async def wait_recap_played(self, response_id: str) -> None:
+        recap = self.recaps[response_id]
+        played = bool(recap.items) and not recap.invalid
+        if played:
+            played = all(await asyncio.gather(*(self.player.wait_played(item) for item in recap.items)))
+        result = self.coordinator.recap_played(
+            recap.plan_id, recap.version, interrupted=not played or recap.invalid,
+        )
+        recap.checked = True
+        self.log(f"[计划播放] v{recap.version} played={played} reason={result.reason}")
+
+    async def close_playback_tasks(self) -> None:
+        tasks = tuple(self.playback_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     def schedule_tool(self, event: dict, timers: asyncio.TaskGroup) -> None:
         # 这里只登记调用并安排任务，马上返回事件循环，不等 Google API 完成。
         call_id, response_id = event["call_id"], event["response_id"]
@@ -470,6 +562,8 @@ class QwenReceiver:
                 or response_id in self.silent_responses):
             return
         self.tool_calls.add(call_id)
+        if response_id in self.recaps:
+            self.recaps[response_id].invalid = True
         self.tool_candidates.setdefault(response_id, self.requested_candidate)
         turn = self.response_turns.setdefault(response_id, self.turn_key(self.tool_candidates[response_id]))
         self.turn_pending[turn] = self.turn_pending.get(turn, 0) + 1
@@ -483,36 +577,60 @@ class QwenReceiver:
         name, call_id, response_id = event["name"], event["call_id"], event["response_id"]
         arguments = event.get("arguments", "")
         silent = False
+        output: dict[str, Any]
         turn = self.response_turns[response_id]
         try:
-            policy = get_policy(name)
-            if name not in self.tool_names or policy is None:
-                raise ValueError(f"工具不在白名单或未加载：{name}")
             arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
                 raise ValueError("工具参数必须是 JSON 对象")
-            # 前缀避免重连后服务端重用 item_id 时，执行记录混到同一次用户请求里。
-            op = await self.gateway.submit(f"{self.session_id}:{turn}", name, arguments)
-            self.turn_operations.setdefault(turn, []).append(op.id)
-            duplicate = None
-            if policy.commit == "deferred" and op.status == "pending":
-                duplicate = self.gateway.store.recent_succeeded(name, arguments)
-                if duplicate is not None:
-                    self.gateway.cancel(op.id)
-                    op = self.gateway.store.get(op.id) or op
-                else:
-                    self.commit_window.add(op)
-            silent = op.status == "succeeded" and name in HA_ACTION_TOOLS
-            if policy.mutates and op.status in {"executing", "succeeded", "failed", "unknown"}:
-                self.turn_attempts.setdefault(turn, set()).add(call_id)
-            # 保持“写入成功证据”语义，查询 succeeded 不能证明某项写操作完成。
-            if policy.mutates and op.status == "succeeded":
-                self.turn_successes.setdefault(turn, set()).add(call_id)
-            output = format_for_model(op, duplicate_of=duplicate)
+            if response_id in self.recaps:
+                self.recaps[response_id].invalid = True
+                snapshot = self.coordinator.snapshot()
+                output = {"is_error": True, "reason": "recap_only", "snapshot": snapshot,
+                          "version": snapshot["version"] if snapshot else None,
+                          "text": "复述这一轮禁止调用工具，本次没有执行"}
+            elif name in LEGACY_CONTROL_TOOLS:
+                result = await call_control(self.coordinator, name, arguments)
+                output = control_output(result)
+                if result.ok and name in {"update_plan_item", "remove_plan_item"}:
+                    self.recap_needed = True
+                if result.ok and name == "cancel_plan":
+                    self.recap_needed = False
+                for op in result.operations:
+                    self.turn_operations.setdefault(turn, []).append(op.id)
+                    if op.status in {"succeeded", "failed", "unknown"}:
+                        self.turn_attempts.setdefault(turn, set()).add(op.id)
+                    if op.status == "succeeded":
+                        self.turn_successes.setdefault(turn, set()).add(op.id)
+            else:
+                policy = get_policy(name)
+                if name not in self.tool_names or policy is None:
+                    raise ValueError(f"工具不在白名单或未加载：{name}")
+                op = await self.gateway.submit(f"{self.session_id}:{turn}", name, arguments)
+                self.turn_operations.setdefault(turn, []).append(op.id)
+                duplicate = None
+                if policy.commit in {"deferred", "confirm"} and op.status == "pending":
+                    duplicate = (self.gateway.store.recent_succeeded(name, arguments)
+                                 if policy.commit == "deferred" else None)
+                    if duplicate is not None:
+                        self.gateway.cancel(op.id)
+                        op = self.gateway.store.get(op.id) or op
+                    else:
+                        self.commit_window.add(op)
+                silent = op.status == "succeeded" and name in HA_ACTION_TOOLS
+                if policy.mutates and op.status in {"executing", "succeeded", "failed", "unknown"}:
+                    self.turn_attempts.setdefault(turn, set()).add(call_id)
+                if policy.mutates and op.status == "succeeded":
+                    self.turn_successes.setdefault(turn, set()).add(call_id)
+                output = dict(format_for_model(op, duplicate_of=duplicate))
         except Exception as exc:
             output = {"is_error": True, "text": (
                 f"工具执行失败：{format_error(exc)}。操作可能已生效，写入操作不要盲目重试。"
             )}
+            if name in LEGACY_CONTROL_TOOLS:
+                snapshot = self.coordinator.snapshot()
+                output.update(reason="invalid_arguments" if isinstance(exc, (ValueError, TypeError)) else "control_error",
+                              snapshot=snapshot, version=snapshot["version"] if snapshot else None)
         preview = str(output["text"])[:100]
         self.log(f"[工具] {name} {json.dumps(arguments, ensure_ascii=False)} → {preview}")
         # call_id 将返回值与模型原先请求的调用配对；output 是文本形式的 JSON。
@@ -525,6 +643,7 @@ class QwenReceiver:
         self.tool_pending[response_id] -= 1
         self.turn_pending[turn] -= 1
         await self.maybe_respond()
+        await self.maybe_finish_turn()
         self.report_wakeup.set()
 
     def pause_candidate(self, target: SpeechCandidate) -> None:
@@ -574,11 +693,11 @@ class QwenReceiver:
     async def handle(self, event: dict, timers: asyncio.TaskGroup) -> None:
         try:
             await self._handle(event, timers)
-            self.maybe_finish_turn()
+            await self.maybe_finish_turn()
         finally:
             self.report_wakeup.set()
 
-    def maybe_finish_turn(self) -> None:
+    async def maybe_finish_turn(self) -> None:
         """回答结束和噪音转写可能乱序；两种事件之后都重新检查提交条件。"""
         if self.current_response is not None or self.response_pending:
             return
@@ -593,12 +712,49 @@ class QwenReceiver:
         turn = self.turn_key(target)
         if self.turn_pending.get(turn, 0):
             return
-        if any(status == "completed" and self.response_turns.get(response_id) == turn
-               and response_id not in self.tool_pending
-               for response_id, status in self.finished_responses.items()):
-            # 播放器暂无按 response 通知播放完毕的信号，先以最终 response.done 为界。
-            # 若 done 时正在辨认噪音，噪音转写到达后仍能补上这次通知。
+        completed = [response_id for response_id, status in self.finished_responses.items()
+                     if status == "completed" and self.response_turns.get(response_id) == turn
+                     and response_id not in self.tool_pending
+                     and response_id not in self.finalized_responses]
+        if not completed:
+            return
+        self.finalized_responses.update(completed)
+        self.coordinator.turn_answered(self.coordinator_turn(target))
+        if all(response_id in self.recaps for response_id in completed):
+            return  # 复述的生成结束不是再次发起复述，也不等于扬声器播完。
+        if not self.needs_plan_flow():
             self.commit_window.turn_finished()
+            return
+        await self.transfer_window_to_plan(target)
+
+    def needs_plan_flow(self) -> bool:
+        try:
+            to_plan = self.active_plan() or needs_plan(self.commit_window.pending)
+        except ValueError:
+            to_plan = True  # 无效参数交给 collect 拒绝并取消，不能落入自动执行。
+        if self.coordinator.plan is not None and self.coordinator.plan.status == "executing":
+            to_plan = True
+        return to_plan
+
+    async def transfer_window_to_plan(self, target: SpeechCandidate | None) -> None:
+        rejected = []
+        for op in self.commit_window.take_all():
+            result = self.coordinator.collect(op)
+            if not result.ok:
+                self.gateway.cancel(op.id)
+                rejected.append(f"#{op.id} {op.name}：这一项没有加进计划（{result.reason}），"
+                                f"当前状态 {(self.gateway.store.get(op.id) or op).status}")
+        if rejected:
+            text = "\n".join(rejected)
+            self.log("[计划登记] " + text)
+            await self.command("conversation.item.create", item={
+                "type": "message", "role": "system", "content": [{"type": "input_text", "text": text}],
+            })
+        if self.active_plan():
+            self.recap_needed = True
+            await self.request_recap(target)
+        elif rejected:
+            await self.request_response(target, correction="只根据刚才的计划登记失败结果报告，不要重新调用工具。")
 
     async def _handle(self, event: dict, timers: asyncio.TaskGroup) -> None:
         # 服务端的消息一条条到达；按 type 更新状态，不假定转写一定早于音频提交。
@@ -631,6 +787,11 @@ class QwenReceiver:
             if self.timer:
                 self.timer.cancel()
             self.candidate = SpeechCandidate(event["item_id"], event["audio_start_ms"])
+            open_recap = self.pending_recap or next(
+                (recap for recap in reversed(list(self.recaps.values())) if not recap.checked), None,
+            )
+            if open_recap is not None:
+                self.early_recap_turns[event["item_id"]] = (open_recap.plan_id, open_recap.version)
             self.player.duck(True)
             self.stopped_at = None
             self.log("speech_started → 降低音量到 20%，开始确认")
@@ -664,6 +825,13 @@ class QwenReceiver:
                 if self.timer:
                     self.timer.cancel()
                 if meaningful:
+                    early = self.early_recap_turns.pop(target.item_id, None)
+                    if early is not None:
+                        self.coordinator.recap_played(*early, interrupted=True)
+                        for recap in self.recaps.values():
+                            if (recap.plan_id, recap.version) == early:
+                                recap.invalid = True
+                    self.coordinator.user_turn(self.coordinator_turn(target))
                     await self.confirm(target)
                 else:
                     self.commit_window.speech_ignored()
@@ -685,6 +853,9 @@ class QwenReceiver:
             self.log(f"conversation.item.deleted（{event['item_id']}）")
         elif kind == "response.created":
             self.current_response = event["response"]["id"]
+            if self.pending_recap is not None:
+                self.recaps[self.current_response] = self.pending_recap
+                self.pending_recap = None
             if self.report_requested:
                 self.report_response = self.current_response
                 self.report_requested = False
@@ -711,7 +882,12 @@ class QwenReceiver:
                 if self.first_audio and self.stopped_at is not None:
                     self.log(f"[延迟] speech_stopped 到首段音频：{time.perf_counter() - self.stopped_at:.2f}s")
                 self.first_audio = False
+                items = self.response_items.setdefault(event["response_id"], [])
+                if event["item_id"] not in items:
+                    items.append(event["item_id"])
                 self.player.append(chunk, event["item_id"], event.get("content_index", 0))
+        elif kind == "response.audio.done":
+            self.player.finish(event["item_id"])
         elif kind in {"response.audio_transcript.delta", "response.audio_transcript.done", "response.text.delta", "response.text.done"}:
             response_id = event["response_id"]
             key = (event.get("item_id", ""), event.get("content_index", 0))
@@ -728,6 +904,14 @@ class QwenReceiver:
             self.schedule_tool(event, timers)
         elif kind == "response.done":
             response = event["response"]
+            items = self.response_items.setdefault(response["id"], [])
+            for item in response.get("output", []):
+                if (item.get("type") == "message" and item.get("id")
+                        and any(part.get("type") == "audio" for part in item.get("content", []))
+                        and item["id"] not in items):
+                    items.append(item["id"])
+            for item_id in items:
+                self.player.finish(item_id)
             self.response_turns.setdefault(response["id"], self.turn_key(self.requested_candidate))
             silent_response = response["id"] in self.silent_responses
             # 优先读最终 response.output；若服务端只在转写事件中给文字，则使用按 response_id 收集的内容。
@@ -766,6 +950,20 @@ class QwenReceiver:
                     # 收尾只允许完成回答，不能因为模型重复调用而再次执行设备写入。
                     raise SessionEnded("静默收尾再次请求工具，未执行重复操作，重新建立会话")
                 self.log("[静默] 收尾完成，继续监听下一句")
+            if response["id"] in self.recaps:
+                recap = self.recaps[response["id"]]
+                recap.items = list(items)
+                recap.invalid |= self.finished_responses[response["id"]] != "completed"
+                self.coordinator.turn_answered(f"{self.session_id}:{self.response_turns[response['id']]}")
+                if not recap.checked and not any(
+                    task.get_name() == f"recap-played-{response['id']}" for task in self.playback_tasks
+                ):
+                    task = (timers.create_task(self.wait_recap_played(response["id"]),
+                                               name=f"recap-played-{response['id']}") if timers is not None
+                            else asyncio.create_task(self.wait_recap_played(response["id"]),
+                                                     name=f"recap-played-{response['id']}"))
+                    self.playback_tasks.add(task)
+                    task.add_done_callback(self.playback_tasks.discard)
             await self.maybe_respond()
             if response["id"] == self.report_response:
                 # 只有完整回答才算报告送达；打断/断线时把事实留给下一次连接。
@@ -789,10 +987,12 @@ class QwenReceiver:
         try:
             async with asyncio.TaskGroup() as timers:
                 timers.create_task(self.watch_reports())
+                await self.maybe_respond()  # 重连后将保留的计划重新复述。
                 async for message in self.ws:
                     await self.handle(json.loads(message), timers)
                 raise SessionEnded("Qwen WebSocket 连接已关闭")
         finally:
+            await self.close_playback_tasks()
             if self.active_report is not None:
                 self.commit_window.reports.put_nowait(self.active_report)
                 self.active_report = None
@@ -810,8 +1010,8 @@ def verify_session(session: dict, tools: list[ToolParam] | None = None) -> None:
             "不能保证暂停后噪音恢复，请检查模型/接口支持。实际 turn_detection="
             + json.dumps(detection, ensure_ascii=False)
         )
-    if tools:
-        expected = {tool["name"] for tool in tools if get_policy(tool["name"]) is not None}
+    if tools is not None:
+        expected = {tool["name"] for tool in tools if get_policy(tool["name"]) is not None} | set(CONTROL_TOOLS)
         actual = {tool.get("function", {}).get("name") for tool in session.get("tools", [])
                   if tool.get("type") == "function"}
         if not expected <= actual:
@@ -834,7 +1034,8 @@ async def rotate_session(seconds: float) -> None:
 async def run_session(ws, player: StreamingPlayer, costs: CostTracker,
                       voice: str, region: str, session_seconds: float,
                       tools: list[ToolParam] | None = None, *, gateway: ToolGateway,
-                      commit_window: CommitWindow,
+                      commit_window: Any,
+                      coordinator: Any,
                       assist_prompt: str = "") -> None:
     # 每个新连接都重新完成“服务端建会话 → 发送配置 → 等确认”，之后才启动收音。
     created = await wait_for_event(ws, "session.created")
@@ -845,8 +1046,18 @@ async def run_session(ws, player: StreamingPlayer, costs: CostTracker,
     verify_session(updated["session"], tools)
     print(f"[配置] 中文 ｜ {voice} ｜ 16kHz 输入/24kHz 输出 ｜ semantic_vad ｜ 客户端控制回答与打断")
     activity = SpeechActivity(sample_rate=INPUT_RATE)
-    receiver = QwenReceiver(ws, player, activity, costs, session_id, gateway=gateway,
-                            commit_window=commit_window, tools=tools)
+    if isinstance(coordinator, SimpleCoordinator):
+        from voice.simple_receiver import receiver_type
+        receiver = receiver_type(QwenReceiver, claims_completion=claims_completion)(
+            ws, player, activity, costs, session_id, gateway=gateway, workflow=coordinator, tools=tools)
+    elif isinstance(coordinator, TaskCoordinator):
+        from voice.batch_receiver import receiver_type
+        receiver = receiver_type(QwenReceiver, claims_completion=claims_completion)(ws, player, activity, costs, session_id,
+                                               gateway=gateway, workflow=coordinator, tools=tools)
+    else:
+        # 兼容旧的离线回归夹具；生产 main 只创建 SimpleCoordinator。
+        receiver = QwenReceiver(ws, player, activity, costs, session_id, gateway=gateway,
+                                commit_window=commit_window, coordinator=coordinator, tools=tools)
     async with asyncio.TaskGroup() as tasks:
         # create_task 安排并发执行，不是为每个协程新开线程；这里不逐个 await 到结束。
         # 三个任务分别负责发麦克风音频、收服务端事件，以及定时结束本次会话。
@@ -858,7 +1069,8 @@ async def run_session(ws, player: StreamingPlayer, costs: CostTracker,
 async def reconnect_loop(url: str, key: str, player: StreamingPlayer,
                          costs: CostTracker, voice: str, region: str,
                          session_seconds: float = 1800, tools: list[ToolParam] | None = None, *,
-                         gateway: ToolGateway, commit_window: CommitWindow,
+                         gateway: ToolGateway, commit_window: Any,
+                         coordinator: Any,
                          assist_prompt: str = "") -> None:
     if session_seconds <= 0:
         raise ValueError("QWEN_SESSION_SECONDS 必须大于 0")
@@ -870,13 +1082,15 @@ async def reconnect_loop(url: str, key: str, player: StreamingPlayer,
                                open_timeout=30, max_size=16 * 1024 * 1024) as ws:
                 print(f"[连接] WebSocket {time.perf_counter() - started:.2f}s")
                 await run_session(ws, player, costs, voice, region, session_seconds, tools,
-                                  gateway=gateway, commit_window=commit_window, assist_prompt=assist_prompt)
+                                  gateway=gateway, commit_window=commit_window,
+                                  coordinator=coordinator, assist_prompt=assist_prompt)
         except Exception as exc:
             if not reconnectable(exc):
                 raise
             print("[重连] 会话已结束，重新连接")
             print(f"[重连原因] {exc}；新会话的对话历史将重新开始，累计费用保留。")
         finally:
+            coordinator.on_reconnect()
             player.clear()
         await asyncio.sleep(1)
 
@@ -906,6 +1120,8 @@ async def main() -> None:
         stack.callback(store.close)
         for recovered in store.recover_on_startup():
             print(f"[恢复] 操作 {recovered.id} {recovered.name}：executing → unknown，不自动重试")
+        for discarded in store.discard_unsubmitted():
+            print(f"[恢复] 旧进程未提交操作 {discarded.id} 已取消，不恢复旧计划")
         # HTTP 客户端跨 Qwen 重连复用，离开 stack 才关闭；HA 会话则在每次工具调用时创建。
         ha_http_client = await stack.enter_async_context(httpx2.AsyncClient(
             headers={"Authorization": f"Bearer {ha_token}"},
@@ -933,19 +1149,26 @@ async def main() -> None:
         # 登记退出清理：即使发生异常，也会取消并等待 worker 退出，关闭它的 MCP 子进程。
         stack.push_async_callback(stop_worker, worker_task)
         gateway = ToolGateway(store, make_executor(ha_url=ha_url, http_client=ha_http_client, worker=worker))
-        commit_window = CommitWindow(gateway)
+        coordinator = SimpleCoordinator(
+            gateway, timezone_name=os.environ.get("REMINDER_TIMEZONE", "America/Los_Angeles"),
+            window_s=float(os.environ.get("COLLECTION_WINDOW_S", "2")),
+            incomplete_s=float(os.environ.get("COLLECTION_INCOMPLETE_S", "5")),
+        )
+        commit_window = coordinator  # 只有简单写入窗口；不启动计划模式和复述。
         # 先关窗口，再停 worker/HTTP/store；WebSocket 重连不会触发这项程序级清理。
         stack.push_async_callback(commit_window.close)
         print("[个人工具] " + ("、".join(tool["name"] for tool in tools if tool["name"] in PERSONAL_TOOLS) or "暂不可用"))
         print("[HA 工具] " + ("、".join(tool["name"] for tool in tools if tool["name"] in HA_DEVICE_TOOLS) or "暂不可用"))
         async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(coordinator.run(), name="alpha-task-coordinator")
             # 打开并维持扬声器输出流；真正取缓冲区音频的是音频库调用的 player.callback。
             tasks.create_task(player.run())
             # 同时运行云端连接；它可以不断重连，而不用反复打开播放器和个人 server。
             tasks.create_task(reconnect_loop(
                 url, key, player, costs, voice, region,
                 float(os.environ.get("QWEN_SESSION_SECONDS", "1800")), tools,
-                gateway=gateway, commit_window=commit_window, assist_prompt=assist_prompt,
+                gateway=gateway, commit_window=commit_window, coordinator=coordinator,
+                assist_prompt=assist_prompt,
             ))
 
 

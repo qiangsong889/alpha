@@ -12,13 +12,13 @@ from mcp.types import CallToolResult, TextContent
 from integrations.mcp_client import call_ha_tool, device_action_succeeded
 from integrations.operations import Operation
 from integrations.personal_worker import PersonalWorker
-from integrations.tool_gateway import Executor, ExecutorResult, ToolNotSent
-from integrations.tool_policy import get_policy
+from integrations.tool_gateway import CURRENT_OPERATION_ID, Executor, ExecutorResult, ToolNotSent, ToolOutcomeUnknown
+from integrations.tool_policy import INTERNAL_TOOLS, get_policy
 
 
 HA_ACTION_TOOLS = {"intent__HassTurnOn", "intent__HassTurnOff", "light__HassLightSet"}
 HA_DEVICE_TOOLS = HA_ACTION_TOOLS | {"homeassistant__GetLiveContext"}
-PERSONAL_TOOLS = {"list_items", "add_items", "complete_items", "create_reminder"}
+PERSONAL_TOOLS = {"list_items", "list_reminders", "add_items", "complete_items", "create_reminder"}
 
 
 def make_executor(
@@ -34,11 +34,14 @@ def make_executor(
             result = await call_ha_tool(
                 name, arguments, url=ha_url, http_client=http_client, classify_not_sent=True,
             )
-        elif name in PERSONAL_TOOLS:
+        elif name in PERSONAL_TOOLS | INTERNAL_TOOLS:
             if worker is None or worker.closed:
                 raise ToolNotSent("个人服务未启动或已关闭，工具请求尚未发出")
             # 即使这里超时，也可能已经入队或执行，不能把它包装成 ToolNotSent。
-            result = await worker.call(name, arguments)
+            sent_arguments = dict(arguments)
+            if name in {"add_items", "create_reminder"} and CURRENT_OPERATION_ID.get():
+                sent_arguments["operation_id"] = CURRENT_OPERATION_ID.get()
+            result = await worker.call(name, sent_arguments)
         else:
             raise ToolNotSent(f"工具没有对应的服务器：{name}")
 
@@ -48,6 +51,11 @@ def make_executor(
         if not text and result.structured_content is not None:
             text = json.dumps(result.structured_content, ensure_ascii=False)
         ok = device_action_succeeded(name, result) if name in HA_ACTION_TOOLS else not result.is_error
+        if name in PERSONAL_TOOLS | INTERNAL_TOOLS and result.structured_content is not None:
+            payload = {"text": text or "工具未返回文字", "structured_content": result.structured_content}
+            if (policy := get_policy(name)) is not None and policy.mutates and result.structured_content.get("status") == "unknown":
+                raise ToolOutcomeUnknown(payload)
+            return ExecutorResult(ok=ok, result=payload)
         return ExecutorResult(ok=ok, result=text or "工具未返回文字")
 
     return execute
@@ -61,6 +69,8 @@ class ModelToolResult(TypedDict):
 def _result_text(result: object | None) -> str:
     if isinstance(result, str):
         return result
+    if isinstance(result, dict) and isinstance(result.get("text"), str):
+        return result["text"]
     if isinstance(result, dict) and isinstance(result.get("error"), str):
         return result["error"]
     return json.dumps(result, ensure_ascii=False) if result is not None else ""

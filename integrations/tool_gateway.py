@@ -3,13 +3,24 @@
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
+from contextvars import ContextVar
 
 from integrations.operations import Operation, OperationStatus, OperationStore
 from integrations.tool_policy import get_policy
 
+CURRENT_OPERATION_ID: ContextVar[str | None] = ContextVar("alpha_operation_id", default=None)
+
 
 class ToolNotSent(RuntimeError):
     """executor 确定请求尚未发出时使用；发出后超时不能使用这个异常。"""
+
+
+class ToolOutcomeUnknown(RuntimeError):
+    """服务端明确报告结果未知，保留部分成功的 ID 等结构化证据。"""
+
+    def __init__(self, result: object):
+        super().__init__("工具返回结果未知，请先查询核实")
+        self.result = result
 
 
 @dataclass(frozen=True)
@@ -29,6 +40,13 @@ class ToolGateway:
     def __init__(self, store: OperationStore, executor: Executor):
         self.store = store
         self.executor = executor
+
+    def register(self, turn_id: str, name: str, arguments: dict[str, Any]) -> Operation:
+        """新批次入口：任何写操作只登记，不依据 immediate 策略提前执行。"""
+        policy = get_policy(name)
+        if policy is None or not policy.mutates:
+            raise ValueError("只能登记白名单内的写操作")
+        return self.store.create(turn_id, name, arguments)
 
     async def submit(self, turn_id: str, name: str, arguments: dict[str, Any]) -> Operation:
         """创建新操作；immediate 自动批准并执行，deferred/confirm 保留 pending。"""
@@ -66,6 +84,7 @@ class ToolGateway:
         if not self.store.transition(op_id, "approved", "executing"):
             return self._get(op_id)
 
+        token = CURRENT_OPERATION_ID.set(op_id)
         try:
             response = await self.executor(operation.name, operation.arguments)
             if not isinstance(response, ExecutorResult) or type(response.ok) is not bool:
@@ -73,6 +92,8 @@ class ToolGateway:
             status: OperationStatus = "succeeded" if response.ok else "failed"
             # 把结果保存也放在 try 里：远端成功但结果无法编码时，不能把它当作确定失败。
             self.store.transition(op_id, "executing", status, response.result)
+        except ToolOutcomeUnknown as exc:
+            self.store.transition(op_id, "executing", "unknown", exc.result)
         except ToolNotSent as exc:
             self.store.transition(op_id, "executing", "failed", self._error(exc))
         except Exception as exc:
@@ -81,6 +102,8 @@ class ToolGateway:
             # 包括任务取消：远端可能已经收到请求，记 unknown，再保留取消/退出的传播行为。
             self.store.transition(op_id, "executing", "unknown", self._error(exc))
             raise
+        finally:
+            CURRENT_OPERATION_ID.reset(token)
         return self._get(op_id)
 
     def _get(self, op_id: str) -> Operation:

@@ -13,6 +13,7 @@ class ToolPolicy:
 
 TOOL_POLICY: dict[str, ToolPolicy] = {
     "list_items": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
+    "list_reminders": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
     "homeassistant__GetLiveContext": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
     "intent__HassTurnOn": ToolPolicy(mutates=True, retry_safe=True, commit="immediate"),
     "intent__HassTurnOff": ToolPolicy(mutates=True, retry_safe=True, commit="immediate"),
@@ -22,7 +23,15 @@ TOOL_POLICY: dict[str, ToolPolicy] = {
     "complete_items": ToolPolicy(mutates=True, retry_safe=False, commit="deferred"),
     "add_items": ToolPolicy(mutates=True, retry_safe=False, commit="deferred"),
     "create_reminder": ToolPolicy(mutates=True, retry_safe=False, commit="deferred"),
+    "delete_task": ToolPolicy(mutates=True, retry_safe=True, commit="confirm"),
+    "delete_reminder": ToolPolicy(True, True, "confirm"),
+    "inspect_task": ToolPolicy(False, True, "immediate"),
+    "inspect_reminder": ToolPolicy(False, True, "immediate"),
+    "find_created_items": ToolPolicy(False, True, "immediate"),
 }
+
+# 仅供代码根据执行记录构造撤销，不发布到 Claude/Qwen 的模型工具目录。
+INTERNAL_TOOLS = frozenset({"delete_task", "delete_reminder", "inspect_task", "inspect_reminder", "find_created_items"})
 
 
 def get_policy(name: str) -> ToolPolicy | None:

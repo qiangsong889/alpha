@@ -40,7 +40,7 @@ The current allowlist is shown below. Available tools depend on what the Home As
 | MCP Tool | Input | Output |
 | --- | --- | --- |
 | `list_items` | `list_name` | Task titles and completion status |
-| `add_items` | `list_name`, `items` | A text confirmation of added tasks |
+| `add_items` | `list_name`, `items` | A text confirmation plus structured IDs for tasks created by this call |
 | `create_reminder` | `title`, `local_time`, optional `minutes_before` | Confirmation including the scheduled time and reminder timing |
 
 Task list lookup and task retrieval both handle pagination. If a list cannot be found, the error includes available list names. If a batch insertion fails partway through, the error identifies tasks already added. Successful insertions are not rolled back.
@@ -68,7 +68,7 @@ cd alpha
 python3.11 -m venv .venv
 source .venv/bin/activate
 python -m pip install 'mcp==2.3.0' anthropic httpx2 python-dotenv \
-  google-auth google-auth-oauthlib google-api-python-client OpenCC
+  google-auth google-auth-oauthlib google-api-python-client OpenCC jsonschema
 ```
 
 The project does not currently include a fully pinned dependency file. To record your installed environment:
@@ -306,15 +306,29 @@ python -m voice.qwen_realtime
 
 Speak directly in Mandarin; press Ctrl+C to exit. Input is mono PCM16 at 16 kHz, output is 24 kHz. Wear headphones to reduce feedback.
 
-At startup it discovers `list_items`, `add_items`, `complete_items`, and `create_reminder` from the personal MCP server and starts a persistent `PersonalWorker`, stopped on exit. Google credentials use the same setup as the CLI. Qwen function definitions use the nested `function` object and `parameters` schema. Tool calls run in background tasks, so incoming voice events remain responsive. Each call returns a `function_call_output` with its original `call_id`, including errors. The model continues after all results in a completed response have arrived. Repeated function events are deduplicated to avoid executing a write twice.
+At startup it discovers `list_items`, `list_reminders`, `add_items`, `complete_items`, and `create_reminder` from the personal MCP server and starts a persistent `PersonalWorker`, stopped on exit. Google credentials use the same setup as the CLI. Qwen function definitions use the nested `function` object and `parameters` schema. Tool calls run in background tasks, so incoming voice events remain responsive. Each call returns a `function_call_output` with its original `call_id`, including errors. The model continues after all results in a completed response have arrived. Repeated function events are deduplicated to avoid executing a write twice.
 
 Qwen tool execution now goes through `ToolGateway` and the injected executor in `integrations/tool_executor.py`. A tool must be loaded and have a local policy. The gateway stores operations in `data/operations.db` (ignored by Git), shared across Qwen reconnects and closed on exit. At startup, leftover `executing` operations are changed to `unknown` and printed without retrying. A missing/closed personal worker or unavailable HA client is definitely not sent; HA connection/initialization failures are also classified as not sent. Once a tool call begins, transport failures and timeouts are unknown. HA device actions require a clean `action_done`; other tools use MCP `is_error`.
 
-**Deferred submission:** a `deferred` operation checks the last 600 seconds of successful records for matching arguments. A match cancels the new operation and tells the model “本次没有执行…那是之前的那次…先向用户确认”. Otherwise `voice/commit_window.py` keeps it pending and tells the model “已登记，尚未执行”. The two-second countdown begins after the final `response.done` (a fallback until the player supports per-response playback completion). Speech pauses the countdown; noise restarts it, while meaningful speech waits for the next final answer. Additional operations wait and execute together, sequentially, after that turn. Speech does not cancel an already executing request. Cancelled operations are skipped, and reports reflect each operation's actual status, including failure and unknown results. Reports enter the conversation before a new model response is requested. The window and its report queue survive WebSocket reconnects; pending work is not restored after restarting the program. Plan confirmation is not implemented yet, and `confirm` policies stay pending. An earlier success never becomes this operation's success.
+**Simple execution flow:** the Qwen entry point uses `SimpleCoordinator`. HA on/off/brightness commands execute immediately and successful device actions stay silent. Personal additions, task completion, and reminders wait for two seconds of silence. Code starts the window once the response is complete and all tool results have arrived; the model does not need to call a collection-control tool. A larger number of tasks does not add a confirmation step.
+
+New speech pauses the window; noise resumes it. Recognized unfinished expressions such as “等等”, “还有”, or “把” wait up to five seconds and then prompt for clarification. This is a small local heuristic, not a general test of whether every sentence is complete. `COLLECTION_WINDOW_S=2` and `COLLECTION_INCOMPLETE_S=5` configure these delays. Time is measured from speech end, so slow model interpretation does not add another full window.
+
+Only three local control tools are exposed:
+
+- `cancel_pending()`: cancel every operation still waiting to be sent. A request already in flight is allowed to finish and is not described as cancelled.
+- `undo_recent(title=...)`: immediately delete an exact item or reminder created by Alpha during this program session, using saved IDs. It does not need another confirmation. An ambiguous target prompts for clarification.
+- `delete_item(kind, item_id, list_id, confirmed)`: delete a specific existing task or reminder. The first call only asks for confirmation. Execution requires `confirmed=true` and a new meaningful user utterance after that request, bound to the same exact target. The model must interpret whether that utterance actually agrees; code does not treat every new utterance as consent.
+
+`list_items` and `list_reminders` supply structured IDs so deletion can target one resource. Reading existing content does not make it Alpha-created content. Internal deletion and verification tools are not directly exposed. Undo has its own operation record and does not rewrite the original success. Repeated deletion of the same target is not sent twice while its result is executing, unknown, or already successful.
+
+Unknown Google creation/deletion results receive read-only verification where tracking evidence is available. An unproven result remains unknown and is not blindly replayed. SQLite execution facts survive process restarts; automatic undo ownership only covers the current program session. WebSocket reconnect preserves this ownership, execution and reports, clears outstanding deletion confirmations, and pauses unsent operations until a new mutation or explicit execution request. Shutdown cancels unsent work and leaves interrupted in-flight calls unknown.
+
+Plans, dependency tools, required collection controls, recap comparisons and fallback TTS are absent from the production Qwen path. Earlier batch modules remain for regression tests. See [execution and undo](docs/task-batches.md) for the current flow.
 
 With `HA_URL` and `HA_TOKEN` configured, it also discovers `intent__HassTurnOn`, `intent__HassTurnOff`, `light__HassLightSet`, and `homeassistant__GetLiveContext`. The HA Assist prompt supplies the static device context. Both catalogs are checked for duplicate names before filtering, and tools are routed to the server they belong to. Personal tools use the worker; HA tools use `call_ha_tool`, with a fresh MCP session per call and a shared HTTP client. The same catalogs, Assist prompt, and HTTP client are reused after Qwen reconnection. Missing HA configuration or failed startup discovery leaves chat and personal tools available; rediscovering HA tools then requires restarting the script. Tool failures are returned to the model and are not automatically replayed.
 
-Successful on/off/brightness batches finish silently: when every tool in the response is a device action with `is_error=False`, HA `response_type=action_done`, and no failure details, the client returns tool outputs and requests a follow-up response to finish processing them, but discards that response's audio and transcript. This still incurs model generation cost. No additional current-time message is inserted for this silent follow-up. If it unexpectedly asks for another tool, the client does not execute that request and reconnects instead. Queries, errors, uncertain results, and batches containing personal tools continue to the model for a spoken answer. Instructions also ask the model to omit pre-action narration.
+Successful on/off/brightness operations are silent when HA returns a clean `action_done`. Queries, errors, uncertain results and personal-task reports can receive a spoken answer. Pending-write acknowledgments and unsupported completion claims are held or suppressed locally; their generation can still incur cost. Final execution reports use actual operation states.
 
 Current time is injected as a separate `system` text item before response creation, including tool continuations, using `REMINDER_TIMEZONE` (default `America/Los_Angeles`). It no longer becomes the newest user message. This is an explicit compatibility attempt: the current Omni client reference does not document generic system messages or history insertion with `previous_item_id`; server acceptance still requires live verification. A role rejection is reported rather than silently falling back to a timestamp as a user message. Instructions remain static. Tool logs show the name, arguments, and first 100 characters of the result. A new meaningful user turn suppresses a stale tool continuation; already-running writes are not replayed automatically.
 

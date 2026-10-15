@@ -50,6 +50,20 @@ class CommitWindow:
         self._waiting_for_turn = False
         self._start_timer()
 
+    @property
+    def pending(self) -> list[Operation]:
+        """尚未被认领执行的操作快照；已取消或由别处处理的记录不再参与分流。"""
+        return [op for op_id in self._pending
+                if (op := self.gateway.store.get(op_id)) is not None and op.status == "pending"]
+
+    def take_all(self) -> list[Operation]:
+        """停止计时并移交 pending 项，不取消操作，也不取消已经发出的请求。"""
+        self._stop_timer()
+        self._waiting_for_turn = True
+        operations = self.pending
+        self._pending.clear()
+        return operations
+
     def speech_started(self) -> None:
         self._speech = True
         self._stop_timer()
@@ -91,6 +105,8 @@ class CommitWindow:
             for op_id in tuple(self._pending):
                 if self._speech or self._waiting_for_turn or self._closed:
                     break
+                if op_id not in self._pending:
+                    continue
                 self._pending.pop(op_id)
                 op: Operation | None
                 # approve 与 execute 的 approved→executing 之间没有让出事件循环。

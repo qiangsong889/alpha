@@ -4,8 +4,10 @@ import asyncio
 import base64
 import json
 import sqlite3
+import time
 import unittest
 from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import AsyncMock, Mock, patch
@@ -106,6 +108,258 @@ class AudioTests(unittest.TestCase):
             self.assertTrue(is_meaningful(text))
 
 
+class PlaybackCompletionTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.player = StreamingPlayer()
+        self.player.ready = True
+        self.waiters = []
+        self.addAsyncCleanup(self.stop_waiters)
+
+    async def stop_waiters(self):
+        self.player.clear()
+        for task in self.waiters:
+            task.cancel()
+        await asyncio.gather(*self.waiters, return_exceptions=True)
+
+    def append(self, item_id="answer", frames=480, content_index=0):
+        self.player.append(b"\x00\x40" * frames, item_id, content_index)
+
+    def callback(self, frames):
+        output = np.zeros((frames, 1), dtype=np.float32)
+        self.player.callback(output, frames, None, None)
+        return output
+
+    async def waiting(self, item_id="answer"):
+        task = asyncio.create_task(self.player.wait_played(item_id))
+        self.waiters.append(task)
+        await asyncio.sleep(0)
+        return task
+
+    async def test_finish_and_callback_drain_are_both_required(self):
+        self.append()
+        self.player.finish("answer")
+        task = await self.waiting()
+        self.callback(240)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.callback(240)
+        self.assertTrue(await asyncio.wait_for(task, 1))
+
+    async def test_empty_buffer_without_finish_is_not_completion(self):
+        self.append()
+        task = await self.waiting()
+        self.callback(480)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        # 生成慢时出现临时空队列；后续音频仍必须全部取完。
+        self.append(frames=240)
+        self.player.finish("answer")
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.callback(240)
+        self.assertTrue(await asyncio.wait_for(task, 1))
+
+    async def test_finish_after_buffer_was_drained_completes(self):
+        self.append()
+        task = await self.waiting()
+        self.callback(480)
+        await asyncio.sleep(0)
+        self.assertFalse(task.done())
+        self.player.finish("answer")
+        self.assertTrue(await asyncio.wait_for(task, 1))
+
+    async def test_clear_halfway_returns_false(self):
+        self.append()
+        self.player.finish("answer")
+        task = await self.waiting()
+        self.callback(240)
+        self.player.clear()
+        self.assertFalse(await asyncio.wait_for(task, 1))
+
+    async def test_pause_keeps_waiting_and_resume_completes(self):
+        self.append()
+        self.player.finish("answer")
+        task = await self.waiting()
+        self.player.pause()
+        output = self.callback(480)
+        np.testing.assert_array_equal(output, 0)
+        self.assertEqual(self.player.played_frames, 0)
+        self.assertFalse(task.done())
+        self.player.resume()
+        self.callback(480)
+        self.assertTrue(await asyncio.wait_for(task, 1))
+
+    async def test_each_item_finishes_independently(self):
+        self.append("first", frames=240)
+        self.append("second", frames=480)
+        self.player.finish("first")
+        self.player.finish("second")
+        first, second = await self.waiting("first"), await self.waiting("second")
+        self.callback(240)
+        self.assertTrue(await asyncio.wait_for(first, 1))
+        self.assertFalse(second.done())
+        self.callback(480)
+        self.assertTrue(await asyncio.wait_for(second, 1))
+
+    async def test_output_latency_is_waited_after_last_callback(self):
+        self.player.latency = .05
+        self.append()
+        self.player.finish("answer")
+        task = await self.waiting()
+        started = time.perf_counter()
+        self.callback(480)
+        await asyncio.sleep(.005)
+        self.assertFalse(task.done())
+        self.assertTrue(await asyncio.wait_for(task, 1))
+        self.assertGreaterEqual(time.perf_counter() - started, .05)
+
+    async def test_clear_during_output_latency_returns_false(self):
+        self.player.latency = .1
+        self.append()
+        self.player.finish("answer")
+        task = await self.waiting()
+        self.callback(480)
+        await asyncio.sleep(.005)
+        self.assertFalse(task.done())
+        self.player.clear()
+        self.assertFalse(await asyncio.wait_for(task, 1))
+
+    async def test_clear_before_finish_stays_false_when_finish_arrives_late(self):
+        self.append()
+        task = await self.waiting()
+        self.player.clear()
+        self.player.finish("answer")
+        self.assertFalse(await asyncio.wait_for(task, 1))
+        self.assertFalse(await self.player.wait_played("answer"))
+        self.append()  # 旧回答晚到的块不能重新加入缓冲区。
+        self.assertFalse(self.player.buffers)
+
+    async def test_items_without_audio_return_false_without_waiting(self):
+        self.assertFalse(await asyncio.wait_for(self.player.wait_played("unknown"), .1))
+        self.player.finish("empty")
+        self.assertFalse(await asyncio.wait_for(self.player.wait_played("empty"), .1))
+        self.player.append(b"", "empty-chunk", 0)
+        self.player.finish("empty-chunk")
+        self.assertFalse(await self.player.wait_played("empty-chunk"))
+
+    async def test_unavailable_device_does_not_report_partial_audio_as_complete(self):
+        self.player.ready = False
+        self.append()
+        self.player.ready = True
+        self.append()
+        self.player.finish("answer")
+        self.assertFalse(await self.player.wait_played("answer"))
+        self.assertFalse(self.player.buffers)
+
+    async def test_multiple_waiters_and_cancelled_waiter_do_not_interfere(self):
+        self.append()
+        first, second = await self.waiting(), await self.waiting()
+        first.cancel()
+        await asyncio.gather(first, return_exceptions=True)
+        self.player.finish("answer")
+        self.callback(480)
+        self.assertTrue(await asyncio.wait_for(second, 1))
+        self.assertTrue(await self.player.wait_played("answer"))
+
+    async def test_callback_from_another_thread_resolves_on_event_loop(self):
+        self.append()
+        self.player.finish("answer")
+        task = await self.waiting()
+        await asyncio.to_thread(self.callback, 480)
+        self.assertTrue(await asyncio.wait_for(task, 1))
+
+    async def test_clear_before_queued_completion_notification_returns_false(self):
+        self.append()
+        self.player.finish("answer")
+        task = await self.waiting()
+        self.callback(480)
+        self.player.clear()  # True 通知仍在事件循环队列中，不能覆盖这次打断。
+        self.assertFalse(await asyncio.wait_for(task, 1))
+
+    async def test_finished_item_remains_true_after_later_items_are_cleared(self):
+        self.append("first", frames=240)
+        self.player.finish("first")
+        first = await self.waiting("first")
+        self.callback(240)
+        self.assertTrue(await asyncio.wait_for(first, 1))
+        self.append("second")
+        second = await self.waiting("second")
+        self.player.clear()
+        self.assertFalse(await asyncio.wait_for(second, 1))
+        self.assertTrue(await self.player.wait_played("first"))
+
+    async def test_recent_terminal_records_are_limited_to_200_in_item_order(self):
+        for index in range(250):
+            self.player.finish(f"empty-{index}")
+        self.assertEqual(len(self.player._playbacks), 200)
+        self.assertEqual(list(self.player._playbacks), [f"empty-{index}" for index in range(50, 250)])
+
+    async def test_recent_cleared_record_still_blocks_late_audio(self):
+        self.append("cleared")
+        self.player.clear()
+        for index in range(199):
+            self.player.finish(f"empty-{index}")
+        self.assertIn("cleared", self.player._playbacks)
+        self.append("cleared")
+        self.assertFalse(self.player.buffers)
+        self.assertFalse(await self.player.wait_played("cleared"))
+
+    async def test_old_active_record_can_exceed_limit_then_prunes_after_playback(self):
+        self.append("active")
+        self.player.finish("active")
+        for index in range(250):
+            self.player.finish(f"empty-{index}")
+        self.assertEqual(len(self.player._playbacks), 201)
+        self.assertIn("active", self.player._playbacks)
+        task = await self.waiting("active")
+        self.callback(480)
+        self.assertTrue(await asyncio.wait_for(task, 1))
+        self.assertNotIn("active", self.player._playbacks)
+        self.assertEqual(len(self.player._playbacks), 200)
+
+    async def test_terminal_record_is_retained_until_its_waiter_exits(self):
+        self.append("old")
+        task = await self.waiting("old")
+        self.player.clear()
+        # clear 的 False 通知还在事件循环队列里；此时不能删掉正在等待的记录。
+        for index in range(250):
+            self.player.finish(f"empty-{index}")
+        self.assertIn("old", self.player._playbacks)
+        self.assertEqual(len(self.player._playbacks), 201)
+        self.assertFalse(await asyncio.wait_for(task, 1))
+        self.assertNotIn("old", self.player._playbacks)
+        self.assertEqual(len(self.player._playbacks), 200)
+
+    async def test_unwaited_completed_audio_does_not_accumulate_forever(self):
+        self.append("old")
+        self.player.finish("old")
+        self.callback(480)
+        for index in range(250):
+            self.player.finish(f"empty-{index}")
+        self.assertNotIn("old", self.player._playbacks)
+        self.assertEqual(len(self.player._playbacks), 200)
+
+    async def test_clear_prunes_old_active_records_after_clearing_their_audio(self):
+        for index in range(210):
+            self.append(f"active-{index}")
+        self.assertEqual(len(self.player._playbacks), 210)
+        self.player.clear()
+        self.assertFalse(self.player.buffers)
+        self.assertEqual(len(self.player._playbacks), 200)
+        self.assertEqual(list(self.player._playbacks)[0], "active-10")
+
+    async def test_old_device_failure_record_is_not_pruned_while_audio_is_still_queued(self):
+        self.append("old")
+        self.player.ready = False
+        self.append("old")
+        self.player.ready = True
+        for index in range(250):
+            self.player.finish(f"empty-{index}")
+        self.assertIn("old", self.player._playbacks)
+        self.callback(480)  # 队列里仍有音频时，callback 必须还能找到它的记录。
+        self.assertNotIn("old", self.player._playbacks)
+
+
 class QwenTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.ws = Mock()
@@ -125,14 +379,315 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         ))
         window = qwen.CommitWindow(gateway, window_s=.05)
         self.addAsyncCleanup(window.close)
-        return qwen.QwenReceiver(ws, player, activity, costs, session_id, gateway=gateway,
-                                 commit_window=window, tools=tools)
+        receiver = qwen.QwenReceiver(ws, player, activity, costs, session_id, gateway=gateway,
+                                     commit_window=window, coordinator=qwen.PlanCoordinator(gateway), tools=tools)
+        self.addAsyncCleanup(receiver.close_playback_tasks)
+        return receiver
 
     def sent(self):
         return [json.loads(call.args[0]) for call in self.ws.send.call_args_list]
 
     async def emit(self, kind, **fields):
         await self.receiver.handle({"type": kind, **fields}, None)
+
+    async def plan_tool_round(self, name, arguments, response_id, tasks):
+        receiver = self.receiver
+        if not receiver.response_pending:
+            receiver.response_pending = True
+            receiver.requested_candidate = receiver.candidate
+        await receiver.handle({"type": "response.created", "response": {"id": response_id}}, tasks)
+        await receiver.handle({"type": "response.function_call_arguments.done", "response_id": response_id,
+                               "call_id": f"call-{response_id}", "name": name,
+                               "arguments": json.dumps(arguments, ensure_ascii=False)}, tasks)
+        await receiver.handle({"type": "response.done", "response": {
+            "id": response_id, "status": "completed",
+        }}, tasks)
+
+    async def prepare_qwen_plan(self):
+        receiver = self.receiver
+        receiver.gateway.executor = AsyncMock(return_value=executor_module.ExecutorResult(True, "已添加牛奶和鸡蛋"))
+        receiver.tool_names = {"add_items"}
+        receiver.candidate = SpeechCandidate("request", 0, meaningful=True, committed=True, responded=True)
+        receiver.last_meaningful_candidate = receiver.candidate
+        receiver.coordinator.user_turn(receiver.coordinator_turn(receiver.candidate))
+        async with asyncio.TaskGroup() as tasks:
+            await self.plan_tool_round("add_items", {"list_name": "购物清单", "items": ["牛奶", "鸡蛋"]},
+                                       "register", tasks)
+        # 工具完成后直接请求模板复述，不再生成普通确认回答。
+        return receiver.coordinator.plan
+
+    async def recap_audio(self, response_id, tasks, *, consume=True):
+        receiver = self.receiver
+        await receiver.handle({"type": "response.created", "response": {"id": response_id}}, tasks)
+        await receiver.handle({"type": "response.audio.delta", "response_id": response_id,
+                               "item_id": f"audio-{response_id}",
+                               "delta": base64.b64encode(b"\x00\x40" * 480).decode()}, tasks)
+        await receiver.handle({"type": "response.audio.done", "response_id": response_id,
+                               "item_id": f"audio-{response_id}"}, tasks)
+        await receiver.handle({"type": "response.done", "response": {
+            "id": response_id, "status": "completed", "output": [{
+                "id": f"audio-{response_id}", "type": "message", "content": [{
+                    "type": "audio", "transcript": receiver.recaps[response_id].text,
+                }],
+            }],
+        }}, tasks)
+        await asyncio.sleep(0)
+        if consume:
+            self.player.callback(np.zeros((480, 1), dtype=np.float32), 480, None, None)
+
+    async def plan_user_input(self, text, item_id, tasks):
+        await self.receiver.handle({"type": "input_audio_buffer.speech_started", "item_id": item_id,
+                                   "audio_start_ms": 0}, tasks)
+        await self.receiver.handle({"type": "input_audio_buffer.committed", "item_id": item_id}, tasks)
+        await self.receiver.handle({"type": "conversation.item.input_audio_transcription.completed",
+                                   "item_id": item_id, "transcript": text}, tasks)
+
+    def last_tool_output(self):
+        return next(json.loads(event["item"]["output"]) for event in reversed(self.sent())
+                    if event.get("item", {}).get("type") == "function_call_output")
+
+    async def test_multi_action_plan_only_executes_after_recap_playback_and_user_confirmation(self):
+        plan = await self.prepare_qwen_plan()
+        self.assertIsNotNone(plan)
+        self.receiver.gateway.executor.assert_not_awaited()
+        self.assertEqual(len(self.receiver.commit_window.pending), 0)
+        self.assertEqual(plan.status, "collecting")
+        texts = [event["item"]["content"][0]["text"] for event in self.sent()
+                 if event.get("item", {}).get("role") == "system"]
+        expected = plan.recap(datetime.now(self.receiver.timezone))
+        self.assertTrue(any(text.endswith(expected) and "逐字念出" in text for text in texts))
+        async with asyncio.TaskGroup() as tasks:
+            await self.recap_audio("recap", tasks, consume=False)
+            self.assertEqual(plan.status, "collecting")
+            self.player.callback(np.zeros((480, 1), dtype=np.float32), 480, None, None)
+        self.assertEqual(plan.status, "awaiting_confirmation")
+        async with asyncio.TaskGroup() as tasks:
+            await self.plan_user_input("对", "yes", tasks)
+            await self.plan_tool_round("confirm_plan", {"plan_id": plan.id, "version": plan.version},
+                                       "confirm", tasks)
+        self.receiver.gateway.executor.assert_awaited_once_with(
+            "add_items", {"list_name": "购物清单", "items": ["牛奶", "鸡蛋"]},
+        )
+        self.assertEqual(plan.status, "done")
+        output = self.last_tool_output()
+        self.assertEqual(output["reason"], "completed")
+        self.assertEqual(output["operations"][0]["status"], "succeeded")
+        self.assertEqual(output["version"], plan.version)
+        requests = sum(event["type"] == "response.create" for event in self.sent())
+        with patch("builtins.print") as printed:
+            await self.emit("response.created", response={"id": "confirmed-answer"})
+            await self.emit("response.done", response={"id": "confirmed-answer", "status": "completed",
+                            "output": [{"type": "message", "content": [{
+                                "type": "text", "text": "牛奶和鸡蛋已经加好了",
+                            }]}]})
+        self.assertFalse(any("疑似虚构" in str(call) for call in printed.call_args_list))
+        self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), requests)
+
+    async def test_shopping_and_reminder_batch_continues_directly_with_recap_in_either_event_order(self):
+        for tools_first in (False, True):
+            with self.subTest(tools_first=tools_first):
+                self.ws.send.reset_mock()
+                receiver = self.make_receiver(self.ws, self.player, self.activity,
+                                             self.receiver.costs, f"session-{tools_first}")
+                receiver.gateway.executor = AsyncMock()
+                receiver.tool_names = {"add_items", "create_reminder"}
+                receiver.candidate = SpeechCandidate("request", 0, meaningful=True, committed=True, responded=True)
+                receiver.last_meaningful_candidate = receiver.requested_candidate = receiver.candidate
+                receiver.coordinator.user_turn(receiver.coordinator_turn(receiver.candidate))
+                receiver.response_pending = True
+                async with asyncio.TaskGroup() as tasks:
+                    await receiver.handle({"type": "response.created", "response": {"id": "tools"}}, tasks)
+                    for name, arguments in (
+                        ("add_items", {"list_name": "购物清单", "items": ["牛奶", "鸡蛋"]}),
+                        ("create_reminder", {"title": "开会", "local_time": "2026-10-16T08:00:00"}),
+                    ):
+                        await receiver.handle({"type": "response.function_call_arguments.done",
+                                               "response_id": "tools", "call_id": name, "name": name,
+                                               "arguments": json.dumps(arguments)}, tasks)
+                    if tools_first:
+                        await asyncio.sleep(0)
+                        self.assertFalse(receiver.response_pending)
+                    await receiver.handle({"type": "response.done", "response": {
+                        "id": "tools", "status": "completed", "output": [{
+                            "type": "message", "content": [{"type": "text", "text": "提醒已经设好了"}],
+                        }],
+                    }}, tasks)
+                receiver.gateway.executor.assert_not_awaited()
+                self.assertEqual(len(receiver.coordinator.plan.items), 2)
+                self.assertEqual(receiver.pending_recap.version, 2)
+                self.assertEqual(receiver.correction_counts, {})
+                self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), 1)
+                texts = [event["item"]["content"][0]["text"] for event in self.sent()
+                         if event.get("item", {}).get("role") == "system"]
+                self.assertTrue(any("逐字念出" in text and "牛奶、鸡蛋" in text and "开会" in text for text in texts))
+                statuses = receiver.gateway.store._db.execute("SELECT status FROM operations").fetchall()
+                self.assertEqual([row["status"] for row in statuses], ["pending", "pending"])
+
+    async def test_recap_interrupted_halfway_does_not_open_confirmation(self):
+        plan = await self.prepare_qwen_plan()
+        async with asyncio.TaskGroup() as tasks:
+            await self.recap_audio("recap", tasks, consume=False)
+            self.player.callback(np.zeros((240, 1), dtype=np.float32), 240, None, None)
+            await self.plan_user_input("对", "early-yes", tasks)
+            await self.plan_tool_round("confirm_plan", {"plan_id": plan.id, "version": plan.version},
+                                       "early-confirm", tasks)
+        self.assertEqual(self.last_tool_output()["reason"], "not_played")
+        self.receiver.gateway.executor.assert_not_awaited()
+
+    async def test_tools_in_recap_response_are_rejected_including_confirmation(self):
+        plan = await self.prepare_qwen_plan()
+        async with asyncio.TaskGroup() as tasks:
+            await self.plan_tool_round("confirm_plan", {"plan_id": plan.id, "version": plan.version},
+                                       "recap", tasks)
+        output = self.last_tool_output()
+        self.assertEqual(output["reason"], "recap_only")
+        self.assertTrue(output["is_error"])
+        self.assertEqual(plan.status, "collecting")
+        self.receiver.gateway.executor.assert_not_awaited()
+        self.assertEqual(len(self.receiver.gateway.store._db.execute("SELECT * FROM operations").fetchall()), 1)
+        self.assertTrue(self.receiver.silent_response_pending)
+
+    async def test_waiting_plan_collects_new_operation_and_recaps_new_version(self):
+        plan = await self.prepare_qwen_plan()
+        async with asyncio.TaskGroup() as tasks:
+            await self.recap_audio("recap", tasks)
+        version = plan.version
+        async with asyncio.TaskGroup() as tasks:
+            await self.plan_user_input("再加面包", "more", tasks)
+            await self.plan_tool_round("add_items", {"list_name": "购物清单", "items": ["面包"]},
+                                       "add-more", tasks)
+        self.assertEqual(plan.version, version + 1)
+        self.assertEqual(plan.status, "collecting")
+        self.assertEqual(len(plan.items), 2)
+        self.assertEqual(self.receiver.pending_recap.version, plan.version)
+        self.receiver.gateway.executor.assert_not_awaited()
+
+    async def test_control_update_and_remove_in_one_response_trigger_one_new_recap(self):
+        plan = await self.prepare_qwen_plan()
+        async with asyncio.TaskGroup() as tasks:
+            await self.recap_audio("recap", tasks)
+        # 再收集一个独立条目，供同一轮修改和删除。
+        extra = await self.receiver.gateway.submit("setup", "add_items", {"list_name": "购物清单", "items": ["面包"]})
+        self.receiver.coordinator.collect(extra)
+        async with asyncio.TaskGroup() as tasks:
+            await self.plan_user_input("第一项改成牛奶，第二项不要了", "edit", tasks)
+            await self.emit("response.created", response={"id": "edit-tools"})
+            for call_id, name, arguments in (
+                ("update", "update_plan_item", {"plan_id": plan.id, "item_id": 1,
+                                               "arguments": {"list_name": "购物清单", "items": ["牛奶"]}}),
+                ("remove", "remove_plan_item", {"plan_id": plan.id, "item_id": 2}),
+            ):
+                await self.receiver.handle({"type": "response.function_call_arguments.done",
+                                            "response_id": "edit-tools", "call_id": call_id, "name": name,
+                                            "arguments": json.dumps(arguments)}, tasks)
+            await self.receiver.handle({"type": "response.done", "response": {
+                "id": "edit-tools", "status": "completed",
+            }}, tasks)
+        self.assertEqual(len(plan.items), 1)
+        self.assertEqual(plan.items[0].arguments["items"], ["牛奶"])
+        self.assertEqual(self.receiver.pending_recap.version, plan.version)
+        outputs = [json.loads(event["item"]["output"]) for event in self.sent()
+                   if event.get("item", {}).get("call_id") in {"update", "remove"}]
+        self.assertTrue(all(not output["is_error"] for output in outputs))
+        self.receiver.gateway.executor.assert_not_awaited()
+
+    async def test_reconnect_reuses_plan_and_requires_new_recap_playback(self):
+        plan = await self.prepare_qwen_plan()
+        async with asyncio.TaskGroup() as tasks:
+            await self.recap_audio("recap", tasks)
+        self.assertEqual(plan.status, "awaiting_confirmation")
+        coordinator = self.receiver.coordinator
+        coordinator.on_reconnect()
+        ws = Mock(send=AsyncMock())
+        receiver = qwen.QwenReceiver(ws, self.player, self.activity, self.receiver.costs, "new-session",
+                                     gateway=self.receiver.gateway, commit_window=self.receiver.commit_window,
+                                     coordinator=coordinator)
+        self.addAsyncCleanup(receiver.close_playback_tasks)
+        await receiver.maybe_respond()
+        self.assertIs(receiver.coordinator.plan, plan)
+        self.assertEqual(plan.status, "collecting")
+        self.assertEqual(receiver.pending_recap.plan_id, plan.id)
+        events = [json.loads(call.args[0]) for call in ws.send.call_args_list]
+        self.assertEqual(events[-1]["type"], "response.create")
+        self.assertTrue(any(plan.id in json.dumps(event, ensure_ascii=False) for event in events))
+        self.receiver.gateway.executor.assert_not_awaited()
+
+    async def test_invalid_plan_operation_is_cancelled_and_reported(self):
+        receiver = self.receiver
+        receiver.candidate = SpeechCandidate("bad", 0, meaningful=True, responded=True)
+        receiver.finished_responses["final"] = "completed"
+        receiver.response_turns["final"] = "bad"
+        op = await receiver.gateway.submit("bad", "add_items", {"items": ["牛奶", "鸡蛋"]})
+        receiver.commit_window.add(op)
+        await receiver.maybe_finish_turn()
+        self.assertEqual(receiver.gateway.store.get(op.id).status, "cancelled")
+        self.assertIsNone(receiver.coordinator.plan)
+        texts = [event["item"]["content"][0]["text"] for event in self.sent()
+                 if event.get("item", {}).get("role") == "system"]
+        self.assertTrue(any("这一项没有加进计划" in text and "invalid_arguments" in text for text in texts))
+
+    async def test_plan_busy_cancels_newly_registered_operation_without_affecting_execution(self):
+        plan = await self.prepare_qwen_plan()
+        async with asyncio.TaskGroup() as tasks:
+            await self.recap_audio("recap", tasks)
+        receiver = self.receiver
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def execute(*args):
+            entered.set()
+            await release.wait()
+            return executor_module.ExecutorResult(True, "已添加")
+
+        receiver.gateway.executor.side_effect = execute
+        receiver.coordinator.user_turn("confirmed")
+        execution = asyncio.create_task(receiver.coordinator.confirm(plan.id, plan.version))
+        try:
+            await asyncio.wait_for(entered.wait(), 1)
+            receiver.candidate = SpeechCandidate("more", 100, meaningful=True, responded=True)
+            receiver.finished_responses["more-final"] = "completed"
+            receiver.response_turns["more-final"] = "more"
+            op = await receiver.gateway.submit("more", "add_items", {"list_name": "购物清单", "items": ["面包"]})
+            receiver.commit_window.add(op)
+            await receiver.maybe_finish_turn()
+            self.assertEqual(receiver.gateway.store.get(op.id).status, "cancelled")
+            texts = [event["item"]["content"][0]["text"] for event in self.sent()
+                     if event.get("item", {}).get("role") == "system"]
+            self.assertTrue(any("这一项没有加进计划（busy）" in text for text in texts))
+            release.set()
+            self.assertTrue((await execution).ok)
+        finally:
+            execution.cancel()
+            await asyncio.gather(execution, return_exceptions=True)
+
+    async def test_confirm_schema_errors_include_snapshot_without_gateway_execution(self):
+        plan = await self.prepare_qwen_plan()
+        async with asyncio.TaskGroup() as tasks:
+            await self.recap_audio("recap", tasks)
+        async with asyncio.TaskGroup() as tasks:
+            await self.plan_user_input("对", "yes", tasks)
+            await self.plan_tool_round("confirm_plan", {"plan_id": plan.id, "version": True},
+                                       "wrong-type", tasks)
+        output = self.last_tool_output()
+        self.assertEqual(output["reason"], "invalid_arguments")
+        self.assertEqual(output["version"], plan.version)
+        self.assertEqual(output["snapshot"]["id"], plan.id)
+        self.receiver.gateway.executor.assert_not_awaited()
+
+    async def test_two_short_utterances_transfer_window_actions_into_one_plan(self):
+        receiver = self.receiver
+        receiver.tool_names = {"add_items"}
+        receiver.gateway.executor = AsyncMock(return_value=executor_module.ExecutorResult(True, "已添加"))
+        for item_id, title in (("milk", "牛奶"), ("eggs", "鸡蛋")):
+            async with asyncio.TaskGroup() as tasks:
+                await self.plan_user_input(f"加{title}", item_id, tasks)
+                await self.plan_tool_round("add_items", {"list_name": "购物清单", "items": [title]},
+                                           f"tool-{item_id}", tasks)
+            if receiver.pending_recap is None:
+                await self.emit("response.created", response={"id": f"ack-{item_id}"})
+                await self.emit("response.done", response={"id": f"ack-{item_id}", "status": "completed"})
+        self.assertEqual(len(receiver.coordinator.plan.items), 2)
+        self.assertEqual(receiver.commit_window.pending, [])
+        receiver.gateway.executor.assert_not_awaited()
 
     async def test_claim_without_tool_warns_and_requests_one_correction(self):
         response = {"id": "made-up", "status": "completed", "output": [{
@@ -169,7 +724,8 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                                      [{"name": "add_items", "input_schema": {}}])
         async with asyncio.TaskGroup() as tasks:
             await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "tool-response",
-                                   "call_id": "call", "name": "add_items", "arguments": "{}"}, tasks)
+                                   "call_id": "call", "name": "add_items",
+                                   "arguments": '{"list_name":"购物清单","items":["牛奶"]}'}, tasks)
             await receiver.handle({"type": "response.done", "response": {
                 "id": "tool-response", "status": "completed",
             }}, tasks)
@@ -776,6 +1332,7 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         async def receive(receiver):
             self.assertIs(receiver.gateway, self.receiver.gateway)
             self.assertIs(receiver.commit_window, self.receiver.commit_window)
+            self.assertIs(receiver.coordinator, self.receiver.coordinator)
             self.assertIn("intent__HassTurnOn", receiver.tool_names)
             if len(sockets) == 1:
                 qwen.raise_api_error({"message": "Turn queue overflow: capacity=8"})
@@ -795,7 +1352,7 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             task = asyncio.create_task(qwen.reconnect_loop(
                 "wss://example", "test", self.player, self.receiver.costs, "Tina", "singapore",
                 tools=tools, assist_prompt="客厅灯", gateway=self.receiver.gateway,
-                commit_window=self.receiver.commit_window))
+                commit_window=self.receiver.commit_window, coordinator=self.receiver.coordinator))
             await asyncio.wait_for(second_session.wait(), 2)
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
@@ -820,7 +1377,8 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         previous.close()
         for configured, available in ((True, True), (True, False), (False, False)):
             worker = Mock(run=AsyncMock())
-            environment = {"DASHSCOPE_API_KEY": "test", "QWEN_WORKSPACE_ID": "test"}
+            environment = {"DASHSCOPE_API_KEY": "test", "QWEN_WORKSPACE_ID": "test",
+                           "REMINDER_TIMEZONE": "Asia/Shanghai"}
             if configured:
                 environment.update(HA_URL="http://ha", HA_TOKEN="test")
             catalog = ([ha], prompt) if available else None
@@ -844,6 +1402,8 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual([t["name"] for t in args[7]],
                                  ["list_items", "intent__HassTurnOn"] if available else ["list_items"])
                 self.assertEqual(kwargs["assist_prompt"], "客厅灯" if available else "")
+                self.assertEqual(kwargs["coordinator"]._timezone_name, "Asia/Shanghai")
+                self.assertIs(kwargs["coordinator"].gateway, kwargs["gateway"])
                 with self.assertRaises(sqlite3.ProgrammingError):
                     kwargs["gateway"].store.get("closed")
                 stop.assert_awaited_once()
@@ -858,6 +1418,18 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CostAndProtocolTests(unittest.TestCase):
+    def test_simple_controls_are_local_and_verified_in_session_configuration(self):
+        config = qwen.session_config("Tina", [])
+        names = {tool["function"]["name"] for tool in config["tools"]}
+        self.assertEqual(names, set(qwen.CONTROL_TOOLS))
+        self.assertTrue(all(qwen.get_policy(name) is None for name in names))
+        qwen.verify_session(config, [])
+        with self.assertRaises(qwen.QwenProtocolError):
+            qwen.verify_session({**config, "tools": config["tools"][:-1]}, [])
+        self.assertEqual(names, {"cancel_pending", "undo_recent", "delete_item"})
+        self.assertNotIn("finish_collection", config["instructions"])
+        self.assertNotIn("confirm_plan", names)
+
     def test_completion_phrases_exclude_negation_and_quotes(self):
         for text in ("已经设好了", "已经加了", "已添加牛奶", "设置好了", "标记好了", "提醒已经帮你设置好了"):
             self.assertTrue(qwen.claims_completion(text), text)
