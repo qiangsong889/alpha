@@ -116,6 +116,112 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
     async def emit(self, kind, **fields):
         await self.receiver.handle({"type": kind, **fields}, None)
 
+    async def test_claim_without_tool_warns_and_requests_one_correction(self):
+        response = {"id": "made-up", "status": "completed", "output": [{
+            "type": "message", "role": "assistant", "content": [{"type": "audio", "transcript": "已经设好了。"}],
+        }]}
+        with patch("builtins.print") as printed:
+            await self.emit("response.done", response=response)
+            self.assertTrue(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
+            events = self.sent()
+            self.assertEqual(sum(event["type"] == "response.create" for event in events), 1)
+            correction = events[0]["item"]
+            self.assertEqual(correction["role"], "system")
+            self.assertIn("没有成功的写入工具结果", correction["content"][0]["text"])
+            # 重复 done 不会重复纠正；纠正回答仍然瞎说时，也不会无限请求。
+            await self.emit("response.done", response=response)
+            await self.emit("response.created", response={"id": "correction"})
+            await self.emit("response.done", response={**response, "id": "correction"})
+            self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), 1)
+
+    async def test_claim_can_be_detected_from_transcript_events(self):
+        await self.emit("response.audio_transcript.delta", response_id="r", item_id="answer", delta="设置")
+        await self.emit("response.audio_transcript.done", response_id="r", item_id="answer", transcript="设置好了")
+        with patch("builtins.print") as printed:
+            await self.emit("response.done", response={"id": "r", "status": "completed"})
+            self.assertTrue(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
+        self.assertEqual(self.sent()[-1]["type"], "response.create")
+
+    async def test_real_tool_success_allows_completion_across_followup_response(self):
+        worker = Mock(call=AsyncMock(return_value=CallToolResult(
+            content=[TextContent(type="text", text="已添加牛奶")],
+        )))
+        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+                                     self.receiver.costs, "session", worker,
+                                     [{"name": "add_items", "input_schema": {}}])
+        async with asyncio.TaskGroup() as tasks:
+            await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "tool-response",
+                                   "call_id": "call", "name": "add_items", "arguments": "{}"}, tasks)
+            await receiver.handle({"type": "response.done", "response": {
+                "id": "tool-response", "status": "completed",
+            }}, tasks)
+        await receiver.handle({"type": "response.created", "response": {"id": "answer"}}, None)
+        with patch("builtins.print") as printed:
+            await receiver.handle({"type": "response.done", "response": {
+                "id": "answer", "status": "completed", "output": [{
+                    "type": "message", "content": [{"type": "text", "text": "已经加了牛奶"}],
+                }],
+            }}, None)
+            self.assertFalse(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
+        self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), 1)
+        # 下一句用户请求不能借用上一句的成功记录。
+        receiver.candidate = SpeechCandidate("next-user", 100, committed=True, meaningful=True, responded=True)
+        receiver.requested_candidate = receiver.candidate
+        with patch("builtins.print") as printed:
+            await receiver.handle({"type": "response.done", "response": {
+                "id": "new-made-up", "status": "completed", "output": [{
+                    "type": "message", "content": [{"type": "text", "text": "已经设好了"}],
+                }],
+            }}, None)
+            self.assertTrue(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
+
+    async def test_audit_waits_for_pending_write_and_does_not_blindly_retry_failure(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def call(*args):
+            entered.set()
+            await release.wait()
+            raise TimeoutError("结果不确定")
+
+        receiver = qwen.QwenReceiver(self.ws, self.player, self.activity,
+                                     self.receiver.costs, "session", Mock(call=AsyncMock(side_effect=call)),
+                                     [{"name": "create_reminder", "input_schema": {}}])
+        with patch("builtins.print") as printed:
+            async with asyncio.TaskGroup() as tasks:
+                await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                       "call_id": "call", "name": "create_reminder", "arguments": "{}"}, tasks)
+                await entered.wait()
+                await receiver.handle({"type": "response.done", "response": {
+                    "id": "r", "status": "completed", "output": [{
+                        "type": "message", "content": [{"text": "已经设好了"}],
+                    }],
+                }}, tasks)
+                self.assertFalse(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
+                release.set()
+            self.assertTrue(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
+        corrections = [event["item"] for event in self.sent() if event.get("item", {}).get("role") == "system"]
+        self.assertIn("禁止盲目重复写入", corrections[0]["content"][0]["text"])
+        self.assertEqual(sum(event["type"] == "response.create" for event in self.sent()), 1)
+
+    async def test_read_only_success_does_not_prove_a_write_happened(self):
+        receiver = self.receiver
+        receiver.candidate = SpeechCandidate("user", 0, responded=True, meaningful=True)
+        receiver.requested_candidate = receiver.candidate
+        receiver.worker = Mock(call=AsyncMock(return_value=CallToolResult(
+            content=[TextContent(type="text", text="清单里有牛奶")],
+        )))
+        receiver.tool_names = {"list_items"}
+        with patch("builtins.print") as printed:
+            async with asyncio.TaskGroup() as tasks:
+                await receiver.handle({"type": "response.function_call_arguments.done", "response_id": "r",
+                                       "call_id": "read", "name": "list_items", "arguments": "{}"}, tasks)
+                await receiver.handle({"type": "response.done", "response": {
+                    "id": "r", "status": "completed", "output": [{
+                        "type": "message", "content": [{"text": "已添加牛奶"}],
+                    }],
+                }}, tasks)
+            self.assertTrue(any("[⚠️ 疑似虚构]" in str(call) for call in printed.call_args_list))
+
     async def test_tool_result_audio_does_not_cut_off_earlier_response_audio(self):
         for response_id, item_id, pcm in (("first", "preamble", b"\x00\x40" * 240),
                                            ("second", "result", b"\x00\x20" * 240)):
@@ -211,7 +317,7 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(result["output"]), {"is_error": False, "text": "已完成：牛奶"})
         self.assertEqual(events[-1]["type"], "response.create")
         clock = events[-2]["item"]
-        self.assertEqual(clock["role"], "user")
+        self.assertEqual(clock["role"], "system")
         self.assertIn("[当前时间：", clock["content"][0]["text"])
         self.assertIn("America/Los_Angeles", clock["content"][0]["text"])
 
@@ -552,6 +658,12 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CostAndProtocolTests(unittest.TestCase):
+    def test_completion_phrases_exclude_negation_and_quotes(self):
+        for text in ("已经设好了", "已经加了", "已添加牛奶", "设置好了", "标记好了", "提醒已经帮你设置好了"):
+            self.assertTrue(qwen.claims_completion(text), text)
+        for text in ("还没有设置好", "无法确认已经设好了", "不能说已经加了", "请不要说“已经设好了”", "我查一下", "购物清单有牛奶"):
+            self.assertFalse(qwen.claims_completion(text), text)
+
     def test_ha_tools_prompt_and_service_specific_fallback(self):
         tools = [{"name": "intent__HassTurnOn", "description": "开灯", "input_schema": {}}]
         config = qwen.session_config("Tina", tools, "客厅灯属于客厅")

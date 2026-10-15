@@ -10,6 +10,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import time
 import httpx2
 from contextlib import AsyncExitStack
@@ -47,6 +48,21 @@ HA_DEVICE_TOOLS = {
     "light__HassLightSet", "homeassistant__GetLiveContext",
 }
 REALTIME_TOOLS = PERSONAL_TOOLS | HA_DEVICE_TOOLS
+WRITE_TOOLS = REALTIME_TOOLS - {"list_items", "homeassistant__GetLiveContext"}
+
+
+def claims_completion(text: str) -> bool:
+    """有限的中文完成声明检查；跳过否定和引用，不是完整语义验证。"""
+    text = re.sub(r'[“「『"].*?[”」』"]', "", text)
+    for clause in re.split(r"[，。！？；,!?;\n]", text):
+        if re.search(r"没有|还没|未能|尚未|并未|不能|无法|不代表|不是|未完成|未添加|未设置", clause):
+            continue
+        if re.search(
+            r"(?:已经|已)(?:帮你|为你|替你|给你)?(?:设好|设置|安排|创建|添加|加了|加好|完成|标记|勾选|打开|关闭|关掉)"
+            r"|(?:设置好|标记好|设好|添加好|加好|完成)了", clause,
+        ):
+            return True
+    return False
 
 
 def websocket_url(workspace: str, region: str) -> str:
@@ -79,6 +95,9 @@ def session_config(voice: str, tools: list[ToolParam] | None = None,
             "同一轮工具调用最多一句过渡语；结果回来直接说实际结果，不再说‘查到了’或重复过渡。"
             "你可以用工具管理购物清单、待办和提醒。"
             '“X 买了”表示把清单上的 X 标记为完成。不要声称做了工具没有执行成功的事。'
+            "创建提醒、添加或完成清单条目时，必须先调用对应的工具。"
+            "只有拿到工具返回的成功结果之后，才能说‘已经……’。"
+            "工具没有被调用或调用失败时，绝不能说已经完成。"
             "查询设备状态或控制设备时必须使用提供的工具，不猜测状态、不虚构成功。"
             "设备目标不明确时先询问，工具失败时简短说明失败。"
             "开关设备或调光时直接调用工具，不要先说执行说明；成功后不需要口头确认。"
@@ -286,12 +305,60 @@ class QwenReceiver:
         self.tool_candidates: dict[str, SpeechCandidate | None] = {}
         self.finished_responses: dict[str, str] = {}
         self.tool_continued: set[str] = set()
-        # 仅当这一轮全部是明确成功的设备操作时，跳过工具后的模型回答。
+        # 仅当这一轮全部是明确成功的设备操作时，静音处理工具后的模型回答。
         self.tool_silent: dict[str, bool] = {}
         # 静默表示用户不听到确认，不等于跳过服务端需要的工具后续轮次。
         self.silent_response_pending = False
         self.silent_responses: set[str] = set()
         self.response_requests = 0
+        # 证据跨“调用工具”和“工具后续回答”两次 response 保留，但不跨用户请求。
+        self.response_turns: dict[str, str] = {}
+        self.turn_successes: dict[str, set[str]] = {}
+        self.turn_attempts: dict[str, set[str]] = {}
+        self.turn_pending: dict[str, int] = {}
+        self.response_text: dict[str, dict[tuple[str, int], str]] = {}
+        self.claims_to_check: dict[str, str] = {}
+        self.checked_claims: set[str] = set()
+        self.correction_counts: dict[str, int] = {}
+
+    @staticmethod
+    def turn_key(target: SpeechCandidate | None) -> str:
+        return target.item_id if target is not None else "<no-user-item>"
+
+    async def correct_unsupported_claim(self) -> bool:
+        """等待本轮工具结束后核对声明；只为当前用户请求纠正一次，防止生成死循环。"""
+        for response_id, text in self.claims_to_check.items():
+            if response_id in self.checked_claims:
+                continue
+            turn = self.response_turns[response_id]
+            current = self.turn_key(self.candidate)
+            if self.candidate is not None and self.candidate.meaningful is False:
+                current = self.turn_key(self.last_meaningful_candidate)
+            if turn != current or self.turn_pending.get(turn, 0):
+                continue
+            self.checked_claims.add(response_id)
+            if self.turn_successes.get(turn):
+                continue
+            self.log("[⚠️ 疑似虚构] 模型声称已完成，但本轮没有成功的工具调用")
+            self.log(f"[核对] response_id={response_id} ｜ {text[:100]}")
+            if self.correction_counts.get(turn, 0) >= 1:
+                self.log("[核对] 已纠正一次，不再自动请求，避免重复调用或无限生成")
+                continue
+            self.correction_counts[turn] = 1
+            attempted = bool(self.turn_attempts.get(turn))
+            correction = (
+                "系统执行记录校验：你刚才宣称操作已完成，但本次用户请求没有成功的写入工具结果。"
+                "必须先纠正刚才未经证实的说法，不得再次假称已完成。"
+                + ("本轮已有写入尝试但结果失败或不明确，操作可能已生效。先查询状态或说明不确定，禁止盲目重复写入。"
+                   if attempted else
+                   "本轮没有执行写入工具。核对用户原始请求：若明确要求执行新操作，请调用对应工具后再回答；"
+                   "若只是询问历史或讨论示例，不要重复执行操作。")
+            )
+            # 当前纠正取代这轮原本的工具后续回答，避免稍后又发一次 response.create。
+            self.tool_continued.update(r for r in self.tool_pending if self.response_turns.get(r) == turn)
+            await self.request_response(self.candidate, correction=correction)
+            return True
+        return False
 
     def log(self, text: str) -> None:
         print(f"[{time.perf_counter() - self.started:.3f}] {text}", flush=True)
@@ -314,6 +381,8 @@ class QwenReceiver:
             self.log("客户端发送 response.create（已提交且文字有意义）")
             await self.request_response(target)
             return
+        if await self.correct_unsupported_claim():
+            return
         # 工具已完成时继续旧问题；若用户已经提出新的有效问题，就不播过时的后续回答。
         for response_id, pending in self.tool_pending.items():
             if (pending == 0 and self.finished_responses.get(response_id) == "completed"
@@ -329,7 +398,8 @@ class QwenReceiver:
                 await self.request_response(self.tool_candidates[response_id])
                 return
 
-    async def request_response(self, target: SpeechCandidate | None, *, silent: bool = False) -> None:
+    async def request_response(self, target: SpeechCandidate | None, *, silent: bool = False,
+                               correction: str = "") -> None:
         if self.current_response is not None or self.response_pending:
             return
         # 先占住“已请求”状态，再执行 await；其他异步任务此时也可能检查能否回答。
@@ -338,13 +408,19 @@ class QwenReceiver:
         self.requested_candidate = target
         self.response_requests += 1
         self.log(f"[轮次] response.create #{self.response_requests}（{'静默收尾' if silent else '正常回答'}）")
+        if correction:
+            await self.command("conversation.item.create", item={
+                "type": "message", "role": "system",
+                "content": [{"type": "input_text", "text": correction}],
+            })
         if not silent:
             now = datetime.now(self.timezone)
             weekday = "一二三四五六日"[now.weekday()]
             text = f"[当前时间：{now:%Y-%m-%d} 星期{weekday} {now:%H:%M}，{self.timezone.key}]"
-            # 静默收尾不增加新的用户时间条目，只完成工具结果的后续处理。
+            # 时间作为系统上下文，不替代用户原始指令；静默收尾不增加时间条目。
+            # Omni 当前文档未明确列出 system message 支持，服务端拒绝时会明确报错。
             await self.command("conversation.item.create", item={
-                "type": "message", "role": "user",
+                "type": "message", "role": "system",
                 "content": [{"type": "input_text", "text": text}],
             })
         await self.command("response.create")
@@ -357,6 +433,8 @@ class QwenReceiver:
             return
         self.tool_calls.add(call_id)
         self.tool_candidates.setdefault(response_id, self.requested_candidate)
+        turn = self.response_turns.setdefault(response_id, self.turn_key(self.tool_candidates[response_id]))
+        self.turn_pending[turn] = self.turn_pending.get(turn, 0) + 1
         self.tool_pending[response_id] = self.tool_pending.get(response_id, 0) + 1
         self.tool_silent.setdefault(response_id, True)
         timers.create_task(self.execute_tool(event), name=f"qwen-tool-{event['name']}")
@@ -367,12 +445,15 @@ class QwenReceiver:
         name, call_id, response_id = event["name"], event["call_id"], event["response_id"]
         arguments = event.get("arguments", "")
         silent = False
+        turn = self.response_turns[response_id]
         try:
             if name not in self.tool_names or name not in REALTIME_TOOLS:
                 raise ValueError(f"工具不在白名单或未加载：{name}")
             arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
                 raise ValueError("工具参数必须是 JSON 对象")
+            if name in WRITE_TOOLS:
+                self.turn_attempts.setdefault(turn, set()).add(call_id)
             if name in HA_DEVICE_TOOLS:
                 if not self.ha_url or self.http_client is None:
                     raise RuntimeError("家居设备服务暂时不可用")
@@ -383,6 +464,9 @@ class QwenReceiver:
                     raise RuntimeError("个人服务暂时不可用")
                 result = await self.worker.call(name, arguments)
             silent = device_action_succeeded(name, result)
+            # 普通 MCP 工具以 is_error 为失败标记；设备操作还必须确认 HA 的 action_done。
+            if name in WRITE_TOOLS and not result.is_error and (name not in HA_DEVICE_TOOLS or silent):
+                self.turn_successes.setdefault(turn, set()).add(call_id)
             text = "\n".join(item.text for item in result.content if isinstance(item, TextContent))
             if not text and result.structured_content is not None:
                 text = json.dumps(result.structured_content, ensure_ascii=False)
@@ -401,6 +485,7 @@ class QwenReceiver:
         # 查询、个人工具、异常或 action_done 以外的结果都保留模型后续回答。
         self.tool_silent[response_id] = self.tool_silent.get(response_id, True) and silent
         self.tool_pending[response_id] -= 1
+        self.turn_pending[turn] -= 1
         await self.maybe_respond()
 
     def pause_candidate(self, target: SpeechCandidate) -> None:
@@ -463,6 +548,13 @@ class QwenReceiver:
                     f"Qwen 拒绝 {operation}，不能保证服务端历史与本地对话一致："
                     + json.dumps(error, ensure_ascii=False)
                 )
+            if operation == "conversation.item.create" and (
+                "role" in str(error).lower() or "system" in str(error).lower()
+            ):
+                raise QwenProtocolError(
+                    "Qwen 拒绝系统上下文条目；当前 Omni 接口的 system 消息兼容性需要确认："
+                    + json.dumps(error, ensure_ascii=False)
+                )
             raise_api_error(error)
         if kind == "input_audio_buffer.speech_started":
             # 先降低音量，保留旧回答；新的确认任务观察这次发声是否持续够久。
@@ -521,6 +613,7 @@ class QwenReceiver:
             self.log(f"conversation.item.deleted（{event['item_id']}）")
         elif kind == "response.created":
             self.current_response = event["response"]["id"]
+            self.response_turns[self.current_response] = self.turn_key(self.requested_candidate)
             self.first_audio = True
             self.log(f"response.created（客户端请求={self.response_pending}）")
             if not self.response_pending:
@@ -544,15 +637,34 @@ class QwenReceiver:
                     self.log(f"[延迟] speech_stopped 到首段音频：{time.perf_counter() - self.stopped_at:.2f}s")
                 self.first_audio = False
                 self.player.append(chunk, event["item_id"], event.get("content_index", 0))
-        elif kind == "response.audio_transcript.done":
+        elif kind in {"response.audio_transcript.delta", "response.audio_transcript.done", "response.text.delta", "response.text.done"}:
+            response_id = event["response_id"]
+            key = (event.get("item_id", ""), event.get("content_index", 0))
+            parts = self.response_text.setdefault(response_id, {})
+            if kind.endswith(".delta"):
+                parts[key] = parts.get(key, "") + event.get("delta", "")
+            else:
+                parts[key] = event.get("transcript", event.get("text", ""))
             if event.get("response_id") not in self.interrupted | self.silent_responses:
-                self.log(f"模型：{event.get('transcript', '')}")
+                if kind.endswith(".done"):
+                    self.log(f"模型：{parts[key]}")
         elif kind == "response.function_call_arguments.done":
             # 参数已完整才执行，不能拿 arguments.delta 的半截 JSON 去调用工具。
             self.schedule_tool(event, timers)
         elif kind == "response.done":
             response = event["response"]
+            self.response_turns.setdefault(response["id"], self.turn_key(self.requested_candidate))
             silent_response = response["id"] in self.silent_responses
+            # 优先读最终 response.output；若服务端只在转写事件中给文字，则使用按 response_id 收集的内容。
+            final_text = "".join(
+                part.get("transcript", part.get("text", ""))
+                for item in response.get("output", []) if item.get("type") == "message"
+                for part in item.get("content", [])
+            ) or "".join(self.response_text.pop(response["id"], {}).values())
+            self.response_text.pop(response["id"], None)
+            if (response.get("status") == "completed" and not silent_response
+                    and response["id"] not in self.interrupted and claims_completion(final_text)):
+                self.claims_to_check[response["id"]] = final_text
             # done.output 兼作完整事件缺失时的兜底，call_id 去重避免重复写入。
             if response.get("status") == "completed" and response["id"] not in self.interrupted:
                 for item in response.get("output", []):
