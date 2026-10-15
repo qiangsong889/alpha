@@ -21,6 +21,7 @@ from integrations.personal_worker import PersonalWorker, stop_worker
 from integrations.mcp_client import (
     ALLOWED_TOOLS, call_ha_tool, catalog_system, format_error,
     load_ha_catalog, load_personal_catalog, merge_tools,
+    device_action_succeeded,
 )
 
 logger = logging.getLogger("alpha.brain")
@@ -34,28 +35,8 @@ def device_action_reply(name: str, arguments: dict, result: CallToolResult) -> s
         "intent__HassTurnOff": "关闭",
         "light__HassLightSet": "调整",
     }
-    if name not in actions or result.is_error:
+    if not device_action_succeeded(name, result):
         return None
-    payloads = []
-    if isinstance(result.structured_content, dict):
-        payloads.append(result.structured_content)
-    for content in result.content:
-        if isinstance(content, TextContent):
-            try:
-                payloads.append(json.loads(content.text))
-            except (ValueError, TypeError):
-                return None
-    if not payloads:
-        return None
-    for payload in payloads:
-        if not isinstance(payload, dict):
-            return None
-        response = payload.get("response", payload)
-        if not isinstance(response, dict) or response.get("response_type") != "action_done":
-            return None
-        data = response.get("data", {})
-        if isinstance(data, dict) and (data.get("failed") or data.get("errors")):
-            return None
     target = arguments.get("name")
     if not isinstance(target, str) or not target.strip():
         target = arguments.get("area") or "设备"

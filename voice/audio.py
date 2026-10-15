@@ -90,6 +90,8 @@ class StreamingPlayer:
         self.lock = Lock()
         # 缓冲区存“收到但还没播完”的音频；offset 是第一块音频已经播放到的位置。
         self.buffers = deque()
+        # 与音频块一一对应，保留每块属于哪个会话条目；新回答排队，不覆盖没播完的旧话。
+        self._buffer_items: deque[tuple[str, int]] = deque()
         self.offset = 0
         self.rate = 24000
         self.ready = False
@@ -113,14 +115,13 @@ class StreamingPlayer:
                 count = round(samples.size * self.rate / 24000)
                 samples = np.interp(np.arange(count) * 24000 / self.rate,
                                     np.arange(samples.size), samples).astype(np.float32)
-            if self.item_id != item_id:
-                # item_id 标识这段回答音频；新条目开始时重新统计已播放时长。
-                self.buffers.clear()
-                self.offset = 0
+            if self.item_id is None:
+                # 第一次入队时记录条目；后续条目的切换要等 callback 真正播放到它。
                 self.item_id = item_id
                 self.content_index = content_index
                 self.played_frames = 0
             self.buffers.append(samples)
+            self._buffer_items.append((item_id, content_index))
 
     def callback(self, outdata, frames, time_info, status) -> None:
         # 不是主程序手动循环调用：音频库需要下一小块声音时，在音频线程调用它。
@@ -133,17 +134,23 @@ class StreamingPlayer:
             written = 0
             while self.buffers and written < frames:
                 # 一次回调可以取多块音频，也可以只取一块的一部分，直到填满本次输出。
+                item_id, content_index = self._buffer_items[0]
+                if (self.item_id, self.content_index) != (item_id, content_index):
+                    self.item_id, self.content_index = item_id, content_index
+                    self.played_frames = 0
                 samples = self.buffers[0]
                 count = min(frames - written, samples.size - self.offset)
                 outdata[written:written + count, 0] = samples[self.offset:self.offset + count]
                 self.offset += count
                 written += count
+                # 记录当前条目的播放量；同一次 callback 跨条目时也不能把前一条的帧数算进来。
+                self.played_frames += count
                 if self.offset == samples.size:
                     self.buffers.popleft()
+                    self._buffer_items.popleft()
                     self.offset = 0
             outdata *= self.gain
             # gain=0.2 是降低音量；与 pause 不同，降低音量时仍然继续消费音频。
-            self.played_frames += written
             if written:
                 self.last_submit_at = time.perf_counter()
 
@@ -171,7 +178,13 @@ class StreamingPlayer:
             interrupted = bool(self.buffers) or pending_frames > 0
             played_ms = max(0, (self.played_frames - pending_frames) * 1000 // self.rate)
             item = (self.item_id, self.content_index, played_ms) if self.item_id and interrupted else None
+            if self._buffer_items and not pending_frames:
+                next_item = self._buffer_items[0]
+                if next_item != (self.item_id, self.content_index):
+                    # 上一句已播完、下一句还没开始：下一条的已听时长应为 0。
+                    item = (*next_item, 0)
             self.buffers.clear()
+            self._buffer_items.clear()
             self.offset = 0
             self.item_id = None
             self.played_frames = 0

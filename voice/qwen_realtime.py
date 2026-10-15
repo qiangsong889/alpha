@@ -3,7 +3,7 @@
 运行：cd alpha && .venv/bin/python -m voice.qwen_realtime
 .env：DASHSCOPE_API_KEY、QWEN_WORKSPACE_ID。
 可选：QWEN_REGION=singapore/beijing、QWEN_VOICE=Tina。
-带噪音确认、暂停恢复、费用统计和自动重连；目前不连接 HA 工具。
+带噪音确认、暂停恢复、费用统计和自动重连；支持个人工具和 HA 设备工具。
 """
 
 import asyncio
@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import time
+import httpx2
 from contextlib import AsyncExitStack
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -26,7 +27,10 @@ from anthropic.types import ToolParam
 from mcp import StdioServerParameters
 from mcp.types import TextContent
 from core.paths import ENV_FILE, PROJECT_ROOT, VENV_PYTHON
-from integrations.mcp_client import load_personal_catalog, format_error
+from integrations.mcp_client import (
+    load_personal_catalog, format_error, load_ha_catalog, call_ha_tool, merge_tools,
+    device_action_succeeded,
+)
 from integrations.personal_worker import PersonalWorker, stop_worker
 from websockets.asyncio.client import connect
 
@@ -38,6 +42,11 @@ from voice.audio import (
 MODEL = "qwen3.8-omni-flash-realtime"
 INPUT_RATE = 16000
 PERSONAL_TOOLS = {"list_items", "add_items", "complete_items", "create_reminder"}
+HA_DEVICE_TOOLS = {
+    "intent__HassTurnOn", "intent__HassTurnOff",
+    "light__HassLightSet", "homeassistant__GetLiveContext",
+}
+REALTIME_TOOLS = PERSONAL_TOOLS | HA_DEVICE_TOOLS
 
 
 def websocket_url(workspace: str, region: str) -> str:
@@ -52,25 +61,36 @@ def websocket_url(workspace: str, region: str) -> str:
     )
 
 
-def session_config(voice: str, tools: list[ToolParam] | None = None) -> dict:
+def session_config(voice: str, tools: list[ToolParam] | None = None,
+                   assist_prompt: str = "") -> dict:
     # 这里只组装配置字典，不建立连接、不录音，也不调用工具；session.update 才发送它。
-    # 工具描述让模型决定“想调用什么”，真正执行仍要经过本地白名单和 worker。
+    # 工具描述让模型决定“想调用什么”，真正执行仍要经过本地白名单和 MCP 路由。
+    names = {tool["name"] for tool in tools or []} & REALTIME_TOOLS
     return {
         "modalities": ["text", "audio"],
         "voice": voice,
         "instructions": (
             "你是一个中文语音助手。无论用户说哪种语言，都使用普通话回答。"
             "回答简短自然，用一两句口语表达，不使用 Markdown、列表和表情符号。"
+            "调用查询、清单或提醒工具前，可以只说一句很短的口语，比如‘嗯，我看看’、‘我查一下’或‘稍等啊’只说一句很短的口语，或者等结果出来再答；不必每次先回应。"
+            # "确实需要过渡时，只说一句很短的口语，比如‘嗯，我看看’、‘我查一下’或‘稍等啊’。"
+            "可以适量使用嗯、好、啊等自然语气词，但不要每次套同一句话，不要刻意堆叠。"
+            "避免‘我就帮您查看一下购物清单’这类冗长的执行说明，不复述整条指令。"
+            "同一轮工具调用最多一句过渡语；结果回来直接说实际结果，不再说‘查到了’或重复过渡。"
             "你可以用工具管理购物清单、待办和提醒。"
             '“X 买了”表示把清单上的 X 标记为完成。不要声称做了工具没有执行成功的事。'
-            "没有家居设备操作工具，不能声称已控制设备。"
-            + ("" if tools else "个人服务暂时不可用，不能声称已完成清单或提醒操作。")
+            "查询设备状态或控制设备时必须使用提供的工具，不猜测状态、不虚构成功。"
+            "设备目标不明确时先询问，工具失败时简短说明失败。"
+            "开关设备或调光时直接调用工具，不要先说执行说明；成功后不需要口头确认。"
+            + ("" if names & PERSONAL_TOOLS else "个人服务暂时不可用，不能声称已完成清单或提醒操作。")
+            + ("" if names & HA_DEVICE_TOOLS else "家居设备暂时不可用，不能声称已操作家居设备。")
+            + ("\nHome Assistant Assist prompt：\n" + assist_prompt if assist_prompt else "")
         ),
         "tools": [
             {"type": "function", "function": {
                 "name": tool["name"], "description": tool.get("description", ""),
                 "parameters": tool["input_schema"],
-            }} for tool in tools or [] if tool["name"] in PERSONAL_TOOLS
+            }} for tool in tools or [] if tool["name"] in REALTIME_TOOLS
         ],
         "audio": {
             "input": {"format": {
@@ -178,6 +198,9 @@ def raise_api_error(error: dict) -> None:
     code = str(error.get("code", ""))
     message = str(error.get("message", ""))
     lowered = (code + " " + message).lower()
+    if "turn queue overflow" in lowered:
+        # 服务端轮次队列已经满了，旧连接不能继续可靠使用；重连但绝不重放写入工具。
+        raise SessionEnded(message or code)
     if (code in {"session_expired", "session_timeout", "session_duration_exceeded", "session_closed"}
             or ("session" in lowered and any(word in lowered for word in
                                              ("expired", "maximum duration", "timed out")))):
@@ -230,7 +253,8 @@ class CostTracker:
 class QwenReceiver:
     def __init__(self, ws, player: StreamingPlayer, activity: SpeechActivity,
                  costs: CostTracker, session_id: str, worker: PersonalWorker | None = None,
-                 tools: list[ToolParam] | None = None):
+                 tools: list[ToolParam] | None = None, *, ha_url: str = "",
+                 http_client: httpx2.AsyncClient | None = None):
         self.ws, self.player, self.activity = ws, player, activity
         self.costs, self.session_id = costs, session_id
         self.started = time.perf_counter()
@@ -252,7 +276,8 @@ class QwenReceiver:
         self.pending_commands: dict[str, str] = {}
         self.first_audio = True
         self.worker = worker
-        self.tool_names = {tool["name"] for tool in tools or []} & PERSONAL_TOOLS
+        self.tool_names = {tool["name"] for tool in tools or []} & REALTIME_TOOLS
+        self.ha_url, self.http_client = ha_url, http_client
         self.timezone = ZoneInfo(os.environ.get("REMINDER_TIMEZONE", "America/Los_Angeles"))
         # call_id 去重，response_id 按一轮回答分组：一轮可能同时要求多个工具。
         # pending 归零且该轮 response.done 后，才继续请求模型组织回答。
@@ -261,6 +286,12 @@ class QwenReceiver:
         self.tool_candidates: dict[str, SpeechCandidate | None] = {}
         self.finished_responses: dict[str, str] = {}
         self.tool_continued: set[str] = set()
+        # 仅当这一轮全部是明确成功的设备操作时，跳过工具后的模型回答。
+        self.tool_silent: dict[str, bool] = {}
+        # 静默表示用户不听到确认，不等于跳过服务端需要的工具后续轮次。
+        self.silent_response_pending = False
+        self.silent_responses: set[str] = set()
+        self.response_requests = 0
 
     def log(self, text: str) -> None:
         print(f"[{time.perf_counter() - self.started:.3f}] {text}", flush=True)
@@ -291,47 +322,67 @@ class QwenReceiver:
                          or (self.candidate is not None and self.candidate.meaningful is False
                              and self.tool_candidates[response_id] is self.last_meaningful_candidate))):
                 self.tool_continued.add(response_id)
+                if self.tool_silent.get(response_id, False):
+                    self.log("[静默] 设备操作全部成功，完成后续轮次但不播放确认")
+                    await self.request_response(self.tool_candidates[response_id], silent=True)
+                    return
                 await self.request_response(self.tool_candidates[response_id])
                 return
 
-    async def request_response(self, target: SpeechCandidate | None) -> None:
+    async def request_response(self, target: SpeechCandidate | None, *, silent: bool = False) -> None:
+        if self.current_response is not None or self.response_pending:
+            return
         # 先占住“已请求”状态，再执行 await；其他异步任务此时也可能检查能否回答。
         self.response_pending = True
+        self.silent_response_pending = silent
         self.requested_candidate = target
-        now = datetime.now(self.timezone)
-        weekday = "一二三四五六日"[now.weekday()]
-        text = f"[当前时间：{now:%Y-%m-%d} 星期{weekday} {now:%H:%M}，{self.timezone.key}]"
-        # 时间是会话消息，不改动静态 instructions；首次推理也能正确理解“明天”。
-        await self.command("conversation.item.create", item={
-            "type": "message", "role": "user",
-            "content": [{"type": "input_text", "text": text}],
-        })
+        self.response_requests += 1
+        self.log(f"[轮次] response.create #{self.response_requests}（{'静默收尾' if silent else '正常回答'}）")
+        if not silent:
+            now = datetime.now(self.timezone)
+            weekday = "一二三四五六日"[now.weekday()]
+            text = f"[当前时间：{now:%Y-%m-%d} 星期{weekday} {now:%H:%M}，{self.timezone.key}]"
+            # 静默收尾不增加新的用户时间条目，只完成工具结果的后续处理。
+            await self.command("conversation.item.create", item={
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": text}],
+            })
         await self.command("response.create")
 
     def schedule_tool(self, event: dict, timers: asyncio.TaskGroup) -> None:
         # 这里只登记调用并安排任务，马上返回事件循环，不等 Google API 完成。
         call_id, response_id = event["call_id"], event["response_id"]
-        if call_id in self.tool_calls or response_id in self.interrupted:
+        if (call_id in self.tool_calls or response_id in self.interrupted
+                or response_id in self.silent_responses):
             return
         self.tool_calls.add(call_id)
         self.tool_candidates.setdefault(response_id, self.requested_candidate)
         self.tool_pending[response_id] = self.tool_pending.get(response_id, 0) + 1
+        self.tool_silent.setdefault(response_id, True)
         timers.create_task(self.execute_tool(event), name=f"qwen-tool-{event['name']}")
 
     async def execute_tool(self, event: dict) -> None:
         # 模型给的是函数名和 JSON 参数，并没有直接执行 Python 函数的权限。
-        # 校验后经 PersonalWorker 发到个人 MCP server，等待属于这次调用的结果。
+        # 先校验，再按工具名路由：个人工具交给 worker，家居工具按需建立 HA MCP 会话。
         name, call_id, response_id = event["name"], event["call_id"], event["response_id"]
         arguments = event.get("arguments", "")
+        silent = False
         try:
-            if name not in self.tool_names or name not in PERSONAL_TOOLS:
+            if name not in self.tool_names or name not in REALTIME_TOOLS:
                 raise ValueError(f"工具不在白名单或未加载：{name}")
             arguments = json.loads(arguments)
             if not isinstance(arguments, dict):
                 raise ValueError("工具参数必须是 JSON 对象")
-            if self.worker is None:
-                raise RuntimeError("个人服务暂时不可用")
-            result = await self.worker.call(name, arguments)
+            if name in HA_DEVICE_TOOLS:
+                if not self.ha_url or self.http_client is None:
+                    raise RuntimeError("家居设备服务暂时不可用")
+                # 复用 HTTP 客户端；每次新建 MCP 会话，避免持有 HA 重启前的失效会话。
+                result = await call_ha_tool(name, arguments, url=self.ha_url, http_client=self.http_client)
+            else:
+                if self.worker is None:
+                    raise RuntimeError("个人服务暂时不可用")
+                result = await self.worker.call(name, arguments)
+            silent = device_action_succeeded(name, result)
             text = "\n".join(item.text for item in result.content if isinstance(item, TextContent))
             if not text and result.structured_content is not None:
                 text = json.dumps(result.structured_content, ensure_ascii=False)
@@ -347,6 +398,8 @@ class QwenReceiver:
             "type": "function_call_output", "call_id": call_id,
             "output": json.dumps(output, ensure_ascii=False),
         })
+        # 查询、个人工具、异常或 action_done 以外的结果都保留模型后续回答。
+        self.tool_silent[response_id] = self.tool_silent.get(response_id, True) and silent
         self.tool_pending[response_id] -= 1
         await self.maybe_respond()
 
@@ -472,6 +525,9 @@ class QwenReceiver:
             self.log(f"response.created（客户端请求={self.response_pending}）")
             if not self.response_pending:
                 raise QwenProtocolError("服务端自动创建了回答，create_response=False 未生效")
+            if self.silent_response_pending:
+                self.silent_responses.add(self.current_response)
+            self.silent_response_pending = False
             self.response_pending = False
             # 旧的 response.create 与新的用户输入交错。
             if (self.candidate is not None and self.candidate is not self.requested_candidate
@@ -480,7 +536,7 @@ class QwenReceiver:
                 await self.command("response.cancel")
         elif kind == "response.audio.delta":
             # delta 是一小块新音频，不是完整回答；解码后入队，由播放器回调逐块消费。
-            if event.get("response_id") in self.interrupted:
+            if event.get("response_id") in self.interrupted | self.silent_responses:
                 return
             chunk = base64.b64decode(event["delta"])
             if chunk:
@@ -489,13 +545,14 @@ class QwenReceiver:
                 self.first_audio = False
                 self.player.append(chunk, event["item_id"], event.get("content_index", 0))
         elif kind == "response.audio_transcript.done":
-            if event.get("response_id") not in self.interrupted:
+            if event.get("response_id") not in self.interrupted | self.silent_responses:
                 self.log(f"模型：{event.get('transcript', '')}")
         elif kind == "response.function_call_arguments.done":
             # 参数已完整才执行，不能拿 arguments.delta 的半截 JSON 去调用工具。
             self.schedule_tool(event, timers)
         elif kind == "response.done":
             response = event["response"]
+            silent_response = response["id"] in self.silent_responses
             # done.output 兼作完整事件缺失时的兜底，call_id 去重避免重复写入。
             if response.get("status") == "completed" and response["id"] not in self.interrupted:
                 for item in response.get("output", []):
@@ -516,6 +573,12 @@ class QwenReceiver:
             if self.current_response == response["id"]:
                 self.current_response = None
             self.interrupted.discard(response["id"])
+            self.silent_responses.discard(response["id"])
+            if silent_response:
+                if any(item.get("type") == "function_call" for item in response.get("output", [])):
+                    # 收尾只允许完成回答，不能因为模型重复调用而再次执行设备写入。
+                    raise SessionEnded("静默收尾再次请求工具，未执行重复操作，重新建立会话")
+                self.log("[静默] 收尾完成，继续监听下一句")
             await self.maybe_respond()
 
     async def run(self) -> None:
@@ -542,11 +605,11 @@ def verify_session(session: dict, tools: list[ToolParam] | None = None) -> None:
             + json.dumps(detection, ensure_ascii=False)
         )
     if tools:
-        expected = {tool["name"] for tool in tools} & PERSONAL_TOOLS
+        expected = {tool["name"] for tool in tools} & REALTIME_TOOLS
         actual = {tool.get("function", {}).get("name") for tool in session.get("tools", [])
                   if tool.get("type") == "function"}
         if not expected <= actual:
-            raise QwenProtocolError(f"服务端未确认个人工具：{'、'.join(sorted(expected - actual))}")
+            raise QwenProtocolError(f"服务端未确认工具：{'、'.join(sorted(expected - actual))}")
 
 
 def reconnectable(exc: BaseException) -> bool:
@@ -564,17 +627,20 @@ async def rotate_session(seconds: float) -> None:
 
 async def run_session(ws, player: StreamingPlayer, costs: CostTracker,
                       voice: str, region: str, session_seconds: float,
-                      worker: PersonalWorker | None = None, tools: list[ToolParam] | None = None) -> None:
+                      worker: PersonalWorker | None = None, tools: list[ToolParam] | None = None, *,
+                      assist_prompt: str = "", ha_url: str = "",
+                      http_client: httpx2.AsyncClient | None = None) -> None:
     # 每个新连接都重新完成“服务端建会话 → 发送配置 → 等确认”，之后才启动收音。
     created = await wait_for_event(ws, "session.created")
     session_id = created["session"]["id"]
     print(f"[会话] {session_id} ｜ {MODEL} ｜ {region}")
-    await send_event(ws, "session.update", session=session_config(voice, tools))
+    await send_event(ws, "session.update", session=session_config(voice, tools, assist_prompt))
     updated = await wait_for_event(ws, "session.updated")
     verify_session(updated["session"], tools)
     print(f"[配置] 中文 ｜ {voice} ｜ 16kHz 输入/24kHz 输出 ｜ semantic_vad ｜ 客户端控制回答与打断")
     activity = SpeechActivity(sample_rate=INPUT_RATE)
-    receiver = QwenReceiver(ws, player, activity, costs, session_id, worker, tools)
+    receiver = QwenReceiver(ws, player, activity, costs, session_id, worker, tools,
+                            ha_url=ha_url, http_client=http_client)
     async with asyncio.TaskGroup() as tasks:
         # create_task 安排并发执行，不是为每个协程新开线程；这里不逐个 await 到结束。
         # 三个任务分别负责发麦克风音频、收服务端事件，以及定时结束本次会话。
@@ -586,7 +652,8 @@ async def run_session(ws, player: StreamingPlayer, costs: CostTracker,
 async def reconnect_loop(url: str, key: str, player: StreamingPlayer,
                          costs: CostTracker, voice: str, region: str,
                          session_seconds: float = 1800, worker: PersonalWorker | None = None,
-                         tools: list[ToolParam] | None = None) -> None:
+                         tools: list[ToolParam] | None = None, *, assist_prompt: str = "",
+                         ha_url: str = "", http_client: httpx2.AsyncClient | None = None) -> None:
     if session_seconds <= 0:
         raise ValueError("QWEN_SESSION_SECONDS 必须大于 0")
     while True:
@@ -596,7 +663,8 @@ async def reconnect_loop(url: str, key: str, player: StreamingPlayer,
             async with connect(url, additional_headers={"Authorization": f"Bearer {key}"},
                                open_timeout=30, max_size=16 * 1024 * 1024) as ws:
                 print(f"[连接] WebSocket {time.perf_counter() - started:.2f}s")
-                await run_session(ws, player, costs, voice, region, session_seconds, worker, tools)
+                await run_session(ws, player, costs, voice, region, session_seconds, worker, tools,
+                                  assist_prompt=assist_prompt, ha_url=ha_url, http_client=http_client)
         except Exception as exc:
             if not reconnectable(exc):
                 raise
@@ -611,6 +679,10 @@ async def main() -> None:
     load_dotenv(ENV_FILE)
     key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     workspace = os.environ.get("QWEN_WORKSPACE_ID", "").strip()
+    ha_root = os.environ.get("HA_URL", "").strip()
+    ha_token = os.environ.get("HA_TOKEN", "").strip()
+    ha_url = ha_root.rstrip("/") + "/api/mcp"
+
     if not key or not workspace:
         raise SystemExit("请在 alpha/.env 中设置 DASHSCOPE_API_KEY 和 QWEN_WORKSPACE_ID")
     region = os.environ.get("QWEN_REGION", "singapore")
@@ -623,15 +695,34 @@ async def main() -> None:
         command=str(VENV_PYTHON), args=["-m", "servers.personal_server"], cwd=str(PROJECT_ROOT),
     )
     async with AsyncExitStack() as stack:
+        # HTTP 客户端跨 Qwen 重连复用，离开 stack 才关闭；HA 会话则在每次工具调用时创建。
+        ha_http_client = await stack.enter_async_context(httpx2.AsyncClient(
+            headers={"Authorization": f"Bearer {ha_token}"},
+            timeout=httpx2.Timeout(30.0, read=300.0),
+        ))
         # 目录发现是一次短连接；worker 随后持有自己的长期连接，用于实际执行工具。
-        catalog = await load_personal_catalog(server)
-        tools = [tool for tool in catalog or [] if tool["name"] in PERSONAL_TOOLS]
+        personal_catalog = await load_personal_catalog(server)
+        ha_catalog = await load_ha_catalog(ha_url, ha_http_client) if ha_root and ha_token else None
+        # 先检查全部目录的重名，再按来源和白名单筛选，避免工具被覆盖或路由到错误服务器。
+        merged, owners = merge_tools({
+            "personal": personal_catalog or [],
+            "home_assistant": ha_catalog[0] if ha_catalog is not None else [],
+        })
+        tools = [tool for tool in merged if (
+            owners[tool["name"]] == "personal" and tool["name"] in PERSONAL_TOOLS
+        ) or (
+            owners[tool["name"]] == "home_assistant" and tool["name"] in HA_DEVICE_TOOLS
+        )]
+        # 与 OpenAI 语音版本一致，只取 HA 的 Assist 内容，不重复导入 Claude 的 Alpha 规则。
+        assist_prompt = (ha_catalog[1][0]["text"].partition("Home Assistant Assist prompt：\n")[2]
+                         if ha_catalog is not None else "")
         worker = PersonalWorker(server)
         # worker.run 会一直等待队列请求，所以安排为后台任务，不能在这里直接 await 它结束。
         worker_task = asyncio.create_task(worker.run(), name="qwen-personal-worker")
         # 登记退出清理：即使发生异常，也会取消并等待 worker 退出，关闭它的 MCP 子进程。
         stack.push_async_callback(stop_worker, worker_task)
-        print("[个人工具] " + ("、".join(tool["name"] for tool in tools) or "暂不可用"))
+        print("[个人工具] " + ("、".join(tool["name"] for tool in tools if tool["name"] in PERSONAL_TOOLS) or "暂不可用"))
+        print("[HA 工具] " + ("、".join(tool["name"] for tool in tools if tool["name"] in HA_DEVICE_TOOLS) or "暂不可用"))
         async with asyncio.TaskGroup() as tasks:
             # 打开并维持扬声器输出流；真正取缓冲区音频的是音频库调用的 player.callback。
             tasks.create_task(player.run())
@@ -639,6 +730,7 @@ async def main() -> None:
             tasks.create_task(reconnect_loop(
                 url, key, player, costs, voice, region,
                 float(os.environ.get("QWEN_SESSION_SECONDS", "1800")), worker, tools,
+                assist_prompt=assist_prompt, ha_url=ha_url, http_client=ha_http_client,
             ))
 
 

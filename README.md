@@ -293,6 +293,9 @@ QWEN_REGION=singapore
 QWEN_VOICE=Tina
 INTERRUPT_MS=400
 QWEN_SESSION_SECONDS=1800
+# Optional: reuse the same HA credentials as the CLI/OpenAI voice layer.
+HA_URL=http://your-home-assistant:8123
+HA_TOKEN=your-long-lived-access-token
 ```
 
 The key and workspace must belong to the same selected region. `QWEN_REGION` accepts `singapore` or `beijing`. This model requires a workspace-specific WebSocket endpoint, which the script constructs. Existing `REALTIME_INPUT_DEVICE` and `REALTIME_OUTPUT_DEVICE` settings also apply.
@@ -301,11 +304,17 @@ The key and workspace must belong to the same selected region. `QWEN_REGION` acc
 python -m voice.qwen_realtime
 ```
 
-Speak directly in Mandarin; press Ctrl+C to exit. Input is mono PCM16 at 16 kHz, output is 24 kHz. Wear headphones to reduce feedback. This script does not connect HA tools.
+Speak directly in Mandarin; press Ctrl+C to exit. Input is mono PCM16 at 16 kHz, output is 24 kHz. Wear headphones to reduce feedback.
 
 At startup it discovers `list_items`, `add_items`, `complete_items`, and `create_reminder` from the personal MCP server and starts a persistent `PersonalWorker`, stopped on exit. Google credentials use the same setup as the CLI. Qwen function definitions use the nested `function` object and `parameters` schema. Tool calls run in background tasks, so incoming voice events remain responsive. Each call returns a `function_call_output` with its original `call_id`, including errors. The model continues after all results in a completed response have arrived. Repeated function events are deduplicated to avoid executing a write twice.
 
+With `HA_URL` and `HA_TOKEN` configured, it also discovers `intent__HassTurnOn`, `intent__HassTurnOff`, `light__HassLightSet`, and `homeassistant__GetLiveContext`. The HA Assist prompt supplies the static device context. Both catalogs are checked for duplicate names before filtering, and tools are routed to the server they belong to. Personal tools use the worker; HA tools use `call_ha_tool`, with a fresh MCP session per call and a shared HTTP client. The same catalogs, Assist prompt, and HTTP client are reused after Qwen reconnection. Missing HA configuration or failed startup discovery leaves chat and personal tools available; rediscovering HA tools then requires restarting the script. Tool failures are returned to the model and are not automatically replayed.
+
+Successful on/off/brightness batches finish silently: when every tool in the response is a device action with `is_error=False`, HA `response_type=action_done`, and no failure details, the client returns tool outputs and requests a follow-up response to finish processing them, but discards that response's audio and transcript. This still incurs model generation cost. No additional current-time message is inserted for this silent follow-up. If it unexpectedly asks for another tool, the client does not execute that request and reconnects instead. Queries, errors, uncertain results, and batches containing personal tools continue to the model for a spoken answer. Instructions also ask the model to omit pre-action narration.
+
 Current time is injected as a separate text message before response creation, including tool continuations, using `REMINDER_TIMEZONE` (default `America/Los_Angeles`). Instructions remain static. Tool logs show the name, arguments, and first 100 characters of the result. A new meaningful user turn suppresses a stale tool continuation; already-running writes are not replayed automatically.
+
+Tool transitions may be silent or use one short conversational phrase such as “嗯，我看看”; instructions discourage repetitive narration. Shared playback queues consecutive audio items rather than clearing the previous item's unplayed tail when a fast tool result arrives. Item playback counters switch when the callback actually starts the next item. Confirmed user interruption still clears queued audio. Acoustic naturalness and echo-related false interruptions require microphone testing.
 
 The client disables automatic responses and interruption. Speech onset ducks playback to 20%; sustained local VAD (default 400 ms, configurable from 300 to 500) pauses playback without clearing it. Meaningless transcriptions resume the buffered answer and delete the noise item. Meaningful transcriptions clear playback, cancel an active response, and truncate its audio history to the estimated heard duration. A new response is requested only after meaningful transcription and audio commitment; cancellation completes before another response starts.
 
@@ -313,10 +322,12 @@ Logs include transcripts, end-of-speech-to-first-audio latency, usage, per-respo
 
 Closed connections, network failures, and session-expiration errors trigger reconnection and a fresh `session.update`. The script also deliberately rotates sessions every 1800 seconds by default; `QWEN_SESSION_SECONDS` controls this interval. New connections start fresh conversation history; cumulative cost survives reconnections. Invalid configuration/authentication errors are reported instead of retried indefinitely.
 
+`Turn queue overflow` also triggers reconnection without replaying device writes. This is recovery from a full server queue, not proof of its underlying cause. Numbered `response.create` logs distinguish normal replies from silent follow-ups; live event logs are needed to confirm whether repeated tool turns, background speech, or another server behavior caused accumulation.
+
 Compatibility needs live verification: the official server example includes `create_response` and `interrupt_response`, but the client parameter reference does not explicitly document these switches, `conversation.item.delete`, or `conversation.item.truncate`. Delete/truncate are compatibility attempts, not confirmed Qwen capabilities. The script checks that the server echoes both switches as false and reports rejected commands rather than silently claiming noise recovery/history truncation works. Offline tests verify the client state machine, not server support or microphone behavior.
 
 ```bash
-.venv/bin/python -m unittest test_realtime_audio test_brain
+.venv/bin/python -m unittest tests.test_realtime_audio tests.test_brain
 ```
 
 Official references: [client events](https://www.alibabacloud.com/help/en/model-studio/client-events), [server events](https://www.alibabacloud.com/help/en/model-studio/server-events), [model and prices](https://www.alibabacloud.com/help/en/model-studio/qwen3-8-omni-flash-realtime).

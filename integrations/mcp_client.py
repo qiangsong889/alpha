@@ -1,6 +1,7 @@
 """MCP 工具发现、协议转换与 HA 按需调用，不涉及终端或音频。"""
 
 import logging
+import json
 import httpx2
 from anthropic.types import TextBlockParam, ToolParam
 from mcp import ClientSession, StdioServerParameters
@@ -21,6 +22,34 @@ ALLOWED_TOOLS = {
     "create_reminder",
     "complete_items",
 }
+
+
+def device_action_succeeded(name: str, result: CallToolResult) -> bool:
+    """只认可 HA 明确返回 action_done 且没有失败明细的开关、调光操作。"""
+    if name not in {"intent__HassTurnOn", "intent__HassTurnOff", "light__HassLightSet"} or result.is_error:
+        return False
+    payloads = []
+    if isinstance(result.structured_content, dict):
+        payloads.append(result.structured_content)
+    for content in result.content:
+        if isinstance(content, TextContent):
+            try:
+                payloads.append(json.loads(content.text))
+            except (ValueError, TypeError):
+                return False
+    if not payloads:
+        return False
+    for payload in payloads:
+        if not isinstance(payload, dict):
+            return False
+        response = payload.get("response", payload)
+        if not isinstance(response, dict) or response.get("response_type") != "action_done":
+            return False
+        data = response.get("data", {})
+        if isinstance(data, dict) and (data.get("failed") or data.get("errors")):
+            return False
+    return True
+
 
 async def load_tools(session: ClientSession) -> list[ToolParam]:
     """读取全部工具，包括非白名单工具，供合并时检查重名。"""
