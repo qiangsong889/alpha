@@ -23,15 +23,18 @@ TOOL_POLICY: dict[str, ToolPolicy] = {
     "complete_items": ToolPolicy(mutates=True, retry_safe=False, commit="deferred"),
     "add_items": ToolPolicy(mutates=True, retry_safe=False, commit="deferred"),
     "create_reminder": ToolPolicy(mutates=True, retry_safe=False, commit="deferred"),
-    "delete_task": ToolPolicy(mutates=True, retry_safe=True, commit="confirm"),
-    "delete_reminder": ToolPolicy(True, True, "confirm"),
+    "delete_task": ToolPolicy(mutates=True, retry_safe=True, commit="deferred"),
+    "delete_reminder": ToolPolicy(True, True, "deferred"),
+    "restore_task": ToolPolicy(True, False, "deferred"),
+    "restore_reminder": ToolPolicy(True, False, "deferred"),
     "inspect_task": ToolPolicy(False, True, "immediate"),
     "inspect_reminder": ToolPolicy(False, True, "immediate"),
     "find_created_items": ToolPolicy(False, True, "immediate"),
 }
 
 # 仅供代码根据执行记录构造撤销，不发布到 Claude/Qwen 的模型工具目录。
-INTERNAL_TOOLS = frozenset({"delete_task", "delete_reminder", "inspect_task", "inspect_reminder", "find_created_items"})
+INTERNAL_TOOLS = frozenset({"delete_task", "delete_reminder", "restore_task", "restore_reminder",
+                            "inspect_task", "inspect_reminder", "find_created_items"})
 
 
 def get_policy(name: str) -> ToolPolicy | None:

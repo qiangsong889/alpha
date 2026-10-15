@@ -1,7 +1,8 @@
-"""日常任务协调：设备立即执行、普通写入短暂等待、精确撤销与简单删除确认。"""
+"""日常任务协调：设备立即执行、普通写入短暂等待、自动分批执行、精确删除和恢复。"""
 
 import asyncio
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
+from collections import deque
 import re
 import time
 from typing import Any
@@ -21,12 +22,6 @@ class Clarification:
     turn_id: str
     generation: int
     text: str
-
-
-@dataclass(frozen=True)
-class DeleteConfirmation:
-    sequence: int
-    title: str
 
 
 class SimpleCoordinator:
@@ -61,7 +56,11 @@ class SimpleCoordinator:
         self._created_sources: list[str] = []
         self._mutations: list[str] = []
         self._deletions: dict[tuple[str, str, str], str] = {}
-        self._confirmations: dict[tuple[str, str, str], DeleteConfirmation] = {}
+        self._batches: deque[tuple[str, ...]] = deque()
+        self._queued: set[str] = set()
+        self._report_pending = False
+        self._deleted_sources: list[str] = []
+        self._restorations: dict[str, str] = {}
         self._closed = False
         self._paused_for_reconnect = False
         self.reports: asyncio.Queue[CommitReport] = asyncio.Queue()
@@ -109,9 +108,13 @@ class SimpleCoordinator:
             if self._ready:
                 self._stopped_at = self.clock()
             self._arm()
+            self._start_next()
 
     def record_text(self, turn_id, text):
         self._texts[turn_id] = text
+
+    def user_text(self, turn_id) -> str:
+        return self._texts.get(turn_id, "")
 
     def user_turn(self, turn_id):
         if turn_id == self.current_turn:
@@ -129,12 +132,13 @@ class SimpleCoordinator:
             self._paused_for_reconnect = False
 
     def turn_answered(self, turn_id):
-        pass  # 删除确认只使用新的有效输入序号，不依赖模型回答/播放完成。
+        pass  # 执行无需用户再次同意。
 
     def turn_finished(self, turn_id):
         if turn_id == self.current_turn:
             self._ready = True
             self._arm()
+            self._start_next()
 
     @property
     def has_pending(self):
@@ -145,12 +149,28 @@ class SimpleCoordinator:
         return self._execution is not None
 
     def snapshot(self):
+        def summary(op):
+            args = {key: value for key, value in op.arguments.items() if key != "resource"}
+            resource = op.arguments.get("resource")
+            if isinstance(resource, dict):
+                args["resource_title"] = resource.get("title", resource.get("summary", ""))
+            item = {"id": op.id, "name": op.name, "arguments": args, "status": op.status,
+                    "text": format_for_model(op)["text"][:200]}
+            data = op.result.get("structured_content", {}) if isinstance(op.result, dict) else {}
+            receipt = {key: data[key] for key in ("list_id", "event_id", "task_id", "title") if key in data}
+            if isinstance(data.get("created"), list):
+                receipt["created"] = data["created"][:5]
+                receipt["created_count"] = len(data["created"])
+            if receipt:
+                item["receipt"] = receipt
+            return item
         return {
-            "pending": [asdict(op) for key in self._pending if (op := self.gateway.store.get(key))],
-            "recent_created": [asdict(op) for key in self._created_sources[-10:]
+            "pending": [summary(op) for key in self._pending if (op := self.gateway.store.get(key))],
+            "recent_created": [summary(op) for key in self._created_sources[-3:]
                                if (op := self.gateway.store.get(key))],
-            "awaiting_delete_confirmation": [dict(kind=key[0], list_id=key[1], item_id=key[2], title=value.title)
-                                             for key, value in self._confirmations.items()],
+            "batches": [list(batch) for batch in self._batches],
+            "recent_deletions": [summary(op) for key in self._deleted_sources[-3:]
+                                 if (op := self.gateway.store.get(key))],
             "paused_after_reconnect": self._paused_for_reconnect,
         }
 
@@ -162,7 +182,7 @@ class SimpleCoordinator:
             raise ValueError("工具不在白名单")
         if policy.mutates and name not in HA_ACTION_TOOLS:
             if policy.commit == "confirm":
-                raise ValueError("删除必须经过 delete_item 的目标确认入口")
+                raise ValueError("此工具暂不支持自动执行")
             op = self.gateway.register(turn_id, name, arguments)
             try:
                 validate_arguments(op)
@@ -206,7 +226,7 @@ class SimpleCoordinator:
     def _arm(self):
         if (self._closed or self._speaking or not self._ready or self._stopped_at is None
                 or self._timer is not None or self._paused_for_reconnect
-                or (not self._pending and not self._incomplete)):
+                or (not (self._pending.keys() - self._queued) and not self._incomplete)):
             return
         delay = self.incomplete_s if self._incomplete else (0 if self._execute_now else self.window_s)
         self._timer = self._spawn(self._wait(self._stopped_at + delay, self._generation), "simple-write-window")
@@ -220,8 +240,12 @@ class SimpleCoordinator:
             if self._incomplete:
                 self._ready = False
                 self.notices.put_nowait(Clarification(self.current_turn or "", generation, "你还想补充什么？"))
-            elif self._execution is None and self._pending:
-                self._execution = self._spawn(self._flush(), "simple-write-execution")
+            else:
+                batch = tuple(key for key in self._pending if key not in self._queued)
+                if batch:
+                    self._batches.append(batch)
+                    self._queued.update(batch)
+                self._start_next()
         except asyncio.CancelledError:
             pass
         finally:
@@ -236,22 +260,82 @@ class SimpleCoordinator:
                 pass
         return op
 
-    async def _flush(self):
-        completed = []
+    def _start_next(self):
+        if (self._closed or self._execution is not None or self._report_pending or self._speaking
+                or self._paused_for_reconnect or not self._ready or self._incomplete):
+            return
+        while self._batches:
+            batch = self._batches.popleft()
+            if any(key in self._pending for key in batch):
+                self._execution = self._spawn(self._flush(batch), "simple-write-execution")
+                return
+            self._queued.difference_update(batch)
+
+    def report_finished(self):
+        """当前批次汇报结束，才允许执行已收集好的下一批；不要求用户确认。"""
+        self._report_pending = False
+        self._start_next()
+
+    async def _prepare_delete(self, op):
+        name = "inspect_task" if op.name == "delete_task" else "inspect_reminder"
+        query = await self.gateway.submit("backup:" + op.id, name, op.arguments)
+        data = query.result.get("structured_content", {}) if isinstance(query.result, dict) else {}
+        resource = data.get("resource")
+        if query.status != "succeeded" or data.get("present") is not True or not isinstance(resource, dict):
+            raise ValueError("无法保存删除前的数据，未执行删除")
+        if op.name == "delete_reminder" and (resource.get("recurrence") or resource.get("recurringEventId")
+                or resource.get("eventType", "default") != "default" or resource.get("attendees")
+                or resource.get("conferenceData") or resource.get("hangoutLink")):
+            raise ValueError("暂不支持自动删除重复、特殊或含参与者/会议链接的日程，以免无法恢复")
+        self.gateway.store.save_deletion_backup(op.id, data)
+
+    async def _flush(self, batch):
+        completed: list[Operation] = []
         try:
-            for key in tuple(self._pending):
+            for key in batch:
                 if key not in self._pending:
+                    self._queued.discard(key)
                     continue
-                self._pending.pop(key)
+                op = self.gateway.store.get(key)
+                if op is None:
+                    self._pending.pop(key, None)
+                    self._queued.discard(key)
+                    continue
+                try:
+                    if op.name in {"delete_task", "delete_reminder"}:
+                        await self._prepare_delete(op)
+                except Exception as exc:
+                    # 只读备份失败意味着删除尚未发出，不能记成结果未知。
+                    if self.gateway.approve(key):
+                        self.gateway.store.transition(key, "approved", "executing")
+                        self.gateway.store.transition(key, "executing", "failed", {"error": str(exc)})
+                        failed = self.gateway.store.get(key)
+                        if failed is not None:
+                            completed.append(failed)
+                    self._pending.pop(key, None)
+                    self._queued.discard(key)
+                    continue
+                # 备份期间仍可取消；重新认领状态，取消了就绝不删除。
+                self._pending.pop(key, None)
+                self._queued.discard(key)
                 if self.gateway.approve(key):
                     op = await self.gateway.execute(key)
                     completed.append(await self._verify(op))
             if completed:
+                self._report_pending = True
                 self.reports.put_nowait(CommitReport(tuple(completed), "\n".join(
-                    f"{op.name} [{op.status}]：{format_for_model(op)['text']}" for op in completed)))
+                    f"{op.name} [{op.status}]：{self._report_text(op)}" for op in completed)))
         finally:
             self._execution = None
             self._arm()
+            self._start_next()
+
+    def _report_text(self, op):
+        if op.status == "succeeded" and op.name in {"delete_task", "delete_reminder"}:
+            backup = self.gateway.store.deletion_backup(op.id)
+            if backup and backup.get("title"):
+                return f"已删除{backup['title']}"
+        return format_for_model(op)["text"]
 
     def is_notice_current(self, notice):
         return notice.turn_id == self.current_turn and notice.generation == self._generation and not self._speaking
@@ -273,6 +357,21 @@ class SimpleCoordinator:
                 if isinstance(data.get("event_id"), str) and data["event_id"]:
                     owned[("reminder", "", data["event_id"])] = op.arguments["title"].strip()
         return owned
+
+    def has_unambiguous_recent_creation(self) -> bool:
+        """明确的‘刚才那个不要了’快捷入口，不猜测多个目标。"""
+        if not self._created_sources or not self._mutations or self._mutations[-1] != self._created_sources[-1]:
+            return False
+        source = self.gateway.store.get(self._created_sources[-1])
+        if source is None or source.status != "succeeded":
+            return False
+        if source.name == "add_items":
+            try:
+                return len(created_tasks(source)) == 1
+            except ValueError:
+                return False
+        data = source.result.get("structured_content", {}) if isinstance(source.result, dict) else {}
+        return source.name == "create_reminder" and bool(data.get("event_id"))
 
     async def undo_recent(self, title=""):
         turn = self.current_turn
@@ -314,58 +413,57 @@ class SimpleCoordinator:
         if not title and len(keys) > 1:
             return {"is_error": True, "text": "刚才新增了多个内容，请说明要撤销哪一个：" + "、".join(owned[key] for key in keys)}
         outputs = [await self._delete(key, owned[key]) for key in keys]
-        return {"is_error": any(item["is_error"] for item in outputs), "text": "；".join(item["text"] for item in outputs), "operations": outputs}
+        return {"is_error": any(item["is_error"] for item in outputs), "text": "；".join(item["text"] for item in outputs),
+                "status": "pending" if all(item.get("status") == "pending" for item in outputs) else "mixed",
+                "operations": outputs}
 
-    async def delete_item(self, kind, item_id, list_id="", confirmed=False):
-        if kind not in {"task", "reminder"} or not isinstance(item_id, str) or not item_id.strip() or type(confirmed) is not bool:
-            raise ValueError("删除目标或 confirmed 参数无效")
+    async def delete_item(self, kind, item_id, list_id=""):
+        if kind not in {"task", "reminder"} or not isinstance(item_id, str) or not item_id.strip():
+            raise ValueError("删除目标无效")
         if kind == "task" and (not isinstance(list_id, str) or not list_id.strip()):
             raise ValueError("删除清单条目必须提供精确 list_id")
         if kind == "reminder" and list_id not in {"", "primary"}:
             raise ValueError("目前只支持主日历")
-        key = (kind, list_id if kind == "task" else "", item_id)
         if not self.current_turn:
             return {"is_error": True, "text": "没有新的用户输入，未执行删除"}
-        owned = self._owned()
-        if key in owned:
-            return await self._delete(key, owned[key])
-        request = self._confirmations.get(key)
-        if request is not None and confirmed and self._turn_sequence > request.sequence:
-            self._confirmations.pop(key)  # 确认只能消费一次；检查到认领之间无 await。
-            return await self._delete(key, request.title)
-        if request is None:
-            turn = self.current_turn
-            args = {"list_id": list_id, "task_id": item_id} if kind == "task" else {"event_id": item_id}
-            op = await self.gateway.submit(turn, "inspect_task" if kind == "task" else "inspect_reminder", args)
-            if turn != self.current_turn:
-                return {"is_error": True, "text": "输入已变化，未执行删除"}
-            data = op.result.get("structured_content", {}) if isinstance(op.result, dict) else {}
-            if op.status != "succeeded" or data.get("present") is not True:
-                return {"is_error": True, "text": "未能核实这个删除目标，未执行删除"}
-            request = DeleteConfirmation(self._sequence, data.get("title") or "指定内容")
-            self._confirmations[key] = request
-        return {"is_error": False, "needs_confirmation": True,
-                "text": f"需要用户确认：要删除{request.title}吗？本次尚未删除"}
+        key = (kind, list_id if kind == "task" else "", item_id)
+        return await self._delete(key, self._owned().get(key, "指定内容"))
 
     async def _delete(self, key, title):
         previous_id = self._deletions.get(key)
         if previous_id is not None:
             previous = self.gateway.store.get(previous_id)
             if previous is not None and previous.status not in {"failed", "cancelled"}:
-                previous = await self._verify(previous)
-                if previous.status == "succeeded":
-                    return dict(self._output(previous), text=f"{title}已经删掉了，没有重复删除")
                 return self._output(previous)
         name = "delete_task" if key[0] == "task" else "delete_reminder"
         args = {"list_id": key[1], "task_id": key[2]} if key[0] == "task" else {"event_id": key[2]}
-        op = self.gateway.register(self.current_turn or "undo", name, args)
-        self._deletions[key] = op.id
-        self.gateway.approve(op.id)
-        result = await self._verify(await self.gateway.execute(op.id))
-        output = self._output(result)
-        if result.status == "succeeded":
-            output["text"] = f"已经删掉了{title}"
+        output = await self.invoke(self.current_turn, name, args)
+        if output.get("operation_id"):
+            self._deletions[key] = output["operation_id"]
+            self._deleted_sources.append(output["operation_id"])
         return output
+
+    async def restore_recent(self, title=""):
+        if not self.current_turn:
+            return {"is_error": True, "text": "没有新的用户输入"}
+        for key in reversed(self._deleted_sources):
+            deleted = self.gateway.store.get(key)
+            backup = self.gateway.store.deletion_backup(key)
+            if deleted is None or not backup or (title and backup.get("title", "").strip() != title.strip()):
+                continue
+            if deleted.status != "succeeded":
+                return {"is_error": True, "text": "删除尚未确认成功，请先核实，不能盲目恢复"}
+            prior = self.gateway.store.get(self._restorations.get(key, ""))
+            if prior is not None and prior.status not in {"failed", "cancelled"}:
+                return self._output(prior)
+            args: dict[str, Any] = {"resource": backup["resource"]}
+            if deleted.name == "delete_task":
+                args["list_id"] = deleted.arguments["list_id"]
+            output = await self.invoke(self.current_turn,
+                "restore_task" if deleted.name == "delete_task" else "restore_reminder", args)
+            self._restorations[key] = output["operation_id"]
+            return output
+        return {"is_error": True, "text": "本次会话没有对应的已删除内容可恢复"}
 
     def reconnect_prompt(self) -> str | None:
         if (self._paused_for_reconnect and self._pending
@@ -374,7 +472,6 @@ class SimpleCoordinator:
         return None
 
     def on_reconnect(self):
-        self._confirmations.clear()
         self._invalidate()
         self.current_turn = None
         self._speech_id = None
@@ -404,4 +501,3 @@ class SimpleCoordinator:
         for key in tuple(self._pending):
             self.gateway.cancel(key)
         self._pending.clear()
-        self._confirmations.clear()

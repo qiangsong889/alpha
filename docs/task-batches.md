@@ -1,87 +1,167 @@
-# Execution, cancellation and undo
+# Automatic batches, deletion and correction
 
-The production Qwen voice flow uses `core/simple_coordinator.py` and
-`voice/simple_receiver.py`. The CLI/Claude flow is unchanged.
+The production Qwen flow uses `core/simple_coordinator.py` and
+`voice/simple_receiver.py`. CLI/Claude behavior is unchanged.
 
 ```sh
 .venv/bin/python -m voice.qwen_realtime
 ```
 
-## Execution
+## Collect, execute, report
 
-HA on/off/brightness actions execute immediately. Successful device actions are
-silent. Reads also execute immediately. Personal additions, task completion and
-reminders remain pending until two seconds of silence have elapsed and code has
-received every tool result in the response. No `finish_collection` call is
-required. Multiple ordinary tasks do not trigger a plan or confirmation.
+HA on/off/brightness executes immediately and clean successes stay silent.
+Reads execute immediately. Other writes, including deletion, undo and restoration,
+collect in a two-second silence window. User instructions authorize execution;
+there is no additional approval, plan version, playback qualification or
+`confirmed` parameter. An unclear target still requires clarification.
 
-Speech onset pauses submission. Noise resumes the previous window. Meaningful
-speech waits for the new response to finish. Simple unfinished-expression rules
-extend the delay to five seconds and prompt for clarification. Configure
-`COLLECTION_WINDOW_S=2` and `COLLECTION_INCOMPLETE_S=5`.
+Code waits for the response and all its tools to finish, then seals a batch when
+the silence window expires. Each batch executes one operation at a time and
+produces one factual report. The next sealed batch starts after the current
+report completes. While execution is running, new instructions can be understood
+and collected into later batches; they cannot change an already-sent request.
 
-The coordinator lives outside WebSocket connections. Already-running operations
-can finish during reconnection. Unsent work is paused after reconnect until a
-new mutation or explicit execution request. After reconnecting, an idle receiver
-asks once, “刚才断线了，还有 N 项操作没执行，要继续吗？” without releasing
-the window. Say “继续” / “继续执行” / “执行吧” to resume, or request cancellation.
-There is no prompt when no operations are waiting. Reports wait until the receiver can
-request another response. Tool work does not block receiving audio events.
+All-pending tool responses do not trigger a model acknowledgment. Their outputs
+are stored in conversation and the model resumes for the actual execution report.
+Queries and rejected calls can continue normally. Success, failure and unknown
+results are reported from operation facts, rather than inferred from promises.
+If a completed response promises to perform an action without a tool call,
+code withholds its buffered audio and requests a tool correction. This shares
+the existing completion-check retry budget: at most one automatic correction per
+user utterance. The phrase detector is a heuristic, not a semantic guarantee.
+It never executes a deletion merely because a phrase matched.
+Simple shopping phrases have a deterministic entry point: “买牛奶” registers
+`add_items` for `购物清单`, while “购物清单里有什么” and
+“现在购物清单里有什么” call `list_items` for fresh data. These routes do not
+depend on the model deciding to call a tool. Local queries run as session-managed
+background tasks so speech events remain responsive; a superseded query does
+not produce a late answer. The model receives the actual query result for speech.
+Ambiguous, negated, interrogative or multiple-action purchase phrases use normal
+interpretation. Business operations still pass through Gateway and the write window.
+Startup prints the loaded source path and “本地购物路由 v1”.
+Completion detection includes deletion, removal, restoration and cancellation,
+and permits up to 12 intervening characters after “已/已经”, e.g.
+“面包已从购物清单里撤掉了”. Negated statements are excluded.
+It also recognizes “已加到 / 已加进 / 已加入”. Ordinary answers and execution
+corrections both hold audio until their final text passes the same checks;
+correction instructions alone do not make a response trusted.
+If that retry again promises work or falsely claims completion without tools,
+the client logs a factual failure and requests one final spoken status notice.
+This notice cannot execute tools and cannot start another retry cycle. Pending,
+successful or unknown operations receive their actual status rather than an
+incorrect instruction to repeat a possibly effective write. Notice audio still
+comes from Qwen; the deterministic terminal message does not depend on its wording.
 
-## Three local controls
+A cancelled report remains active and is sent again after the new input is
+handled. The next batch remains blocked until a report response completes.
+All tools requested inside a report response are blocked in code, including local
+undo/cancel controls and calls found only in `response.done.output`. Their outputs
+state that no tool was executed and include the original batch's actual facts.
+A tool-only report does not count as delivered. One factual re-report is allowed;
+if the model again requests tools, code prints the facts as a terminal fallback
+and releases the next batch, rather than looping or replaying an operation.
+Here completion means a successful, uninterrupted `response.done`, not physical
+speaker drain. A regression test covers interruption, re-reporting and subsequent
+batch execution without replaying the first batch.
 
-`cancel_pending()` cancels all unsent operations. It cannot recall a request
-already sent; that request keeps its actual result.
+Speech pauses collection; noise resumes it. Unfinished-expression rules extend
+the window and ask for clarification. Configure `COLLECTION_WINDOW_S=2` and
+`COLLECTION_INCOMPLETE_S=5`. Silence starts at speech end, not tool completion.
 
-`undo_recent(title=...)` deletes an item or reminder created by Alpha during this
-program session, using its exact saved IDs. No extra confirmation is needed.
-When several targets are possible, the user must identify one. Reading a list
-does not confer ownership, and ownership does not survive a process restart.
-It does survive WebSocket reconnection.
+## Four local controls
 
-`delete_item(kind, item_id, list_id, confirmed)` handles exact existing resources.
-The first call verifies the target and asks for confirmation without deleting.
-The next call needs both `confirmed=true` and a new meaningful utterance that
-began after the confirmation request. Confirmation is bound to that exact kind,
-list and item. Noise and the same utterance cannot satisfy this requirement.
-The model remains responsible for understanding explicit agreement; a question
-or ambiguous statement should not produce `confirmed=true`.
+- `cancel_pending()` cancels all unsent work, including queued batches and the
+  unsent remainder of the executing batch. In-flight requests retain real results.
+- `undo_recent(title=...)` registers deletion of an exact resource Alpha created
+  in this program session. It uses saved creation IDs and needs no confirmation.
+- `delete_item(kind, item_id, list_id)` registers deletion of an exact queried
+  task or calendar event. It does not ask the user to say “yes”. Multiple possible
+  targets need clarification, rather than an invented ID.
+- `restore_recent(title=...)` registers restoration of a recently deleted resource
+  from its saved snapshot, without confirmation. Unknown deletion outcomes must
+  be verified before restoration; unknown restoration is not blindly repeated.
 
-No version, playback-complete signal or transcript comparison is required.
-Reconnect clears outstanding deletion confirmation requests. An exact target
-created in this program session uses the immediate undo rule instead.
+Deletion, undo and restoration use the same automatic batch queue as additions.
+For the exact phrase “刚才那个不要了” (and a small set of equivalents), code
+registers undo directly if the latest mutation is a successful single-resource
+creation with a saved exact ID. It bypasses model confirmation. Multiple targets,
+missing receipts or a more recent different mutation use normal interpretation.
+The model must call the tool rather than promise “I'll delete it”. Before execution,
+pending results cannot be described as completed.
 
-## IDs, facts and uncertain results
+## Delete snapshots and recovery limits
 
-`list_items` returns readable text and structured list/task IDs. `list_reminders`
-returns upcoming main-calendar events with IDs. These IDs are for tool arguments,
-not spoken output. Creation receipts retain the exact new task/event IDs.
-Internal delete/inspect tools remain behind the coordinator and Gateway.
+Immediately before deleting, code queries the exact resource and persists the
+full snapshot in SQLite's `deletion_backups` table. A backup failure prevents
+sending the deletion. Cancellation during backup also prevents deletion. Final
+operation results do not overwrite backups.
 
-Gateway checks policies and records every operation in SQLite. Undo records a
-new deletion operation and preserves the original creation fact. Repeated
-executing, unknown or successful deletions are not blindly resent. Unknown
-creation/deletion results can be checked against operation markers or exact IDs;
-missing evidence does not prove a creation failed.
+Restoration creates a new Google resource, with a new ID. Tasks retain title,
+notes, due date and completion fields (and parent where still valid), without
+promising original position or external links. Ordinary events retain title,
+description, location, start/end, popup reminders and supported display settings.
+Automatic deletion rejects recurring/special events and events containing
+participants or conferencing because this restoration path cannot faithfully
+recreate those semantics. Rejection is a factual failure, not a confirmation gate.
 
-On startup, leftover executing operations become unknown and discarded pending
-work is cancelled. Execution records survive restart. Shutdown cancels unsent
-operations; interrupted in-flight requests remain unknown.
+Snapshots and execution facts survive restart. The voice undo/restore selectors
+currently reference operations from this program session, surviving WebSocket
+reconnect but not rebuilding selectors after process restart. Internal raw
+restore/delete/inspect tools are not exposed directly to the model.
 
-## Retained legacy code
+## Connection and lifecycle
 
-The previous task-batch/plan modules and offline regression paths remain in the
-repository. Production `main` creates `SimpleCoordinator`, without dependency
-controls, mandatory collection tools, action-count confirmations, recap playback
-gates, or fallback `say` narration.
+Model snapshots include compact pending state and the last three creation/deletion
+records, with essential IDs and shortened result text. Full timestamps, nested
+results and resource backups stay in SQLite rather than being repeated to the
+model. An unchanged snapshot is not appended again for every `response.create`.
+Time context is still injected. This reduces future input growth; it does not
+delete conversation items already stored by the server or cap total history.
+
+The coordinator and queued work live outside a WebSocket connection. In-flight
+requests can complete during reconnect. Unsent work pauses with a recovery prompt
+and resumes on a new mutation or explicit “继续” / “继续执行” / “执行吧”.
+Reports remain queued until deliverable; interrupted reports are retained.
+Microphone queue overflow discards buffered audio and ends only the current
+session with a reconnectable error. Each audio send also has a two-second timeout,
+so a stalled WebSocket cannot leave the sender waiting indefinitely. The old
+stream is closed and its queued audio is never replayed into the new connection.
+This recovery does not replay business-tool operations.
+Reconnect logs flatten nested task-group exceptions and show connection duration.
+Audio queue errors also show received/sent block counts and maximum callback
+dispatch delay; send timeouts show their limit and queued blocks. These distinguish
+the recovery trigger from the generic task-group wrapper, without asserting that
+all congestion is a network fault.
+
+Startup marks leftover executing operations unknown and cancels discarded unsent
+operations. It does not replay writes. Shutdown cancels unsent operations and
+marks interrupted in-flight results unknown.
+
+Legacy plan/batch modules remain for regression tests. Production does not use
+those confirmation, dependency, recap comparison or fallback TTS paths.
 
 ## Validation
+
+`QWEN_VAD=server_vad` and `QWEN_SILENCE_MS=800` configure acoustic VAD (the
+defaults). `semantic_vad` remains selectable. The actual server-echoed type and
+silence are verified and printed. Test short answers and a one-second pause using
+`python -m devtools.qwen_vad_probe`; it never executes business tools.
+
+An online `qwen3.8-omni-flash-realtime` probe tried both
+`response.create.response.tool_choice="required"` and top-level
+`response.create.tool_choice="required"`. Neither request returned an error,
+but both returned a greeting without the available no-op function. This does not
+establish enforced tool calling, so neither form is enabled in production.
+`python -m devtools.qwen_tool_choice_probe` reproduces the isolated check without
+MCP or microphone access. It uses the configured API account and incurs model usage.
 
 ```sh
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
-Tests use fake WebSockets/workers, direct player callbacks, fake Google services,
-and in-memory or temporary SQLite. They do not use real credentials, audio
-hardware, paid models, or Google/HA requests. Real microphone and model tests
-remain necessary to assess speech recognition and conversational behavior.
+Tests use fake workers/WebSockets/Google services, direct audio callbacks and
+in-memory or temporary SQLite. No real credentials, devices or paid models are
+used. Live speech/model adherence and service latency still require manual tests.
+
+Google API references: [Tasks resource](https://developers.google.com/tasks/reference/rest/v1/tasks),
+[Calendar event insertion](https://developers.google.com/workspace/calendar/api/v3/reference/events/insert).

@@ -468,6 +468,8 @@ class TaskCoordinator:
             self._compensations[key] = new.id
             registered.append(new)
         self._played = None
+        # 仅旧批次回归路径保留撤销确认；生产 SimpleCoordinator 自动提交。
+        self._force_confirm.add(self.batch_id)
         return self.result(True, "undo_pending_confirmation", registered)
 
     def on_reconnect(self):

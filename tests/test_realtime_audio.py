@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import json
+import os
 import sqlite3
 import time
 import unittest
@@ -1310,6 +1311,12 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             await self.emit("response.created", response={"id": "automatic"})
 
     async def test_reconnect_reapplies_session_configuration(self):
+        await self._check_reconnect_reapplies_session_configuration("server")
+
+    async def test_microphone_congestion_reconnects_instead_of_exiting(self):
+        await self._check_reconnect_reapplies_session_configuration("microphone")
+
+    async def _check_reconnect_reapplies_session_configuration(self, cause):
         sockets = []
         tools = [{"name": "intent__HassTurnOn", "input_schema": {}}]
         http_client = Mock(is_closed=False)
@@ -1334,9 +1341,15 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             self.assertIs(receiver.commit_window, self.receiver.commit_window)
             self.assertIs(receiver.coordinator, self.receiver.coordinator)
             self.assertIn("intent__HassTurnOn", receiver.tool_names)
-            if len(sockets) == 1:
+            if len(sockets) == 1 and cause == "server":
                 qwen.raise_api_error({"message": "Turn queue overflow: capacity=8"})
-            second_session.set()
+            if len(sockets) == 2:
+                second_session.set()
+            await asyncio.Future()
+
+        async def microphone(*args):
+            if len(sockets) == 1 and cause == "microphone":
+                raise qwen.SessionEnded("音频发送积压超过 2 秒，丢弃旧音频并重建连接")
             await asyncio.Future()
 
         second_session = asyncio.Event()
@@ -1346,9 +1359,10 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             await original_sleep(0 if seconds == 1 else seconds)
 
         with patch.object(qwen, "connect", side_effect=lambda *a, **kw: Socket()), \
-                patch.object(qwen, "send_microphone", side_effect=lambda *a: asyncio.Future()), \
+                patch.object(qwen, "send_microphone", side_effect=microphone), \
                 patch.object(qwen.QwenReceiver, "run", receive), \
-                patch.object(qwen.asyncio, "sleep", quick_retry):
+                patch.object(qwen.asyncio, "sleep", quick_retry), \
+                patch("builtins.print") as printed:
             task = asyncio.create_task(qwen.reconnect_loop(
                 "wss://example", "test", self.player, self.receiver.costs, "Tina", "singapore",
                 tools=tools, assist_prompt="客厅灯", gateway=self.receiver.gateway,
@@ -1357,6 +1371,11 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
             task.cancel()
             with self.assertRaises(asyncio.CancelledError):
                 await task
+        reason = next(call.args[0] for call in printed.call_args_list
+                      if str(call.args[0]).startswith("[重连原因]"))
+        self.assertNotIn("unhandled errors in a TaskGroup", reason)
+        self.assertIn("音频发送积压" if cause == "microphone" else "Turn queue overflow", reason)
+        self.assertIn("本次连接持续", reason)
         self.assertEqual(len(sockets), 2)
         for socket in sockets:
             event = json.loads(socket.send.call_args.args[0])
@@ -1417,7 +1436,70 @@ class QwenTests(unittest.IsolatedAsyncioTestCase):
                                         for call in printed.call_args_list))
 
 
+class MicrophoneCongestionTests(unittest.IsolatedAsyncioTestCase):
+    def stream_factory(self, blocks, closed):
+        def factory(**kwargs):
+            class Stream:
+                active = True
+
+                def __enter__(self):
+                    for _ in range(blocks):
+                        kwargs["callback"](np.zeros((320, 1), dtype="int16"), 320, None, None)
+                    return self
+
+                def __exit__(self, *args):
+                    closed.set()
+            return Stream()
+        return factory
+
+    async def test_queue_overflow_discards_old_audio_and_is_reconnectable(self):
+        closed = asyncio.Event()
+        ws = Mock(send=AsyncMock())
+        with patch.object(qwen.sd, "InputStream", side_effect=self.stream_factory(101, closed)):
+            with self.assertRaises(qwen.SessionEnded) as raised:
+                await asyncio.wait_for(qwen.send_microphone(ws, Mock()), 1)
+        self.assertTrue(qwen.reconnectable(raised.exception))
+        self.assertTrue(closed.is_set())
+        self.assertIn("收到 101 块、已发送 0 块", str(raised.exception))
+        self.assertIn("回调调度延迟", str(raised.exception))
+        ws.send.assert_not_awaited()  # 不把积压的两秒音频依次补发。
+
+    async def test_stalled_websocket_send_has_bounded_wait_and_closes_microphone(self):
+        closed = asyncio.Event()
+        async def stalled(*args):
+            await asyncio.Future()
+        ws = Mock(send=AsyncMock(side_effect=stalled))
+        with patch.object(qwen.sd, "InputStream", side_effect=self.stream_factory(1, closed)), \
+                patch.object(qwen, "AUDIO_SEND_TIMEOUT_S", .01):
+            with self.assertRaises(qwen.SessionEnded) as raised:
+                await asyncio.wait_for(qwen.send_microphone(ws, Mock()), 1)
+        self.assertIn("音频发送超时", str(raised.exception))
+        self.assertTrue(closed.is_set())
+        self.assertTrue(qwen.reconnectable(ExceptionGroup("microphone", [raised.exception])))
+
+
 class CostAndProtocolTests(unittest.TestCase):
+    def test_server_vad_and_silence_are_configurable_and_verified(self):
+        with patch.dict(os.environ, {"QWEN_VAD": "server_vad", "QWEN_SILENCE_MS": "800"}):
+            config = qwen.session_config("Tina")
+            detection = config["turn_detection"]
+            self.assertEqual(detection, {"type": "server_vad", "silence_duration_ms": 800,
+                                         "create_response": False, "interrupt_response": False})
+            qwen.verify_session(config)
+            with self.assertRaises(qwen.QwenProtocolError):
+                qwen.verify_session({**config, "turn_detection": {**detection, "silence_duration_ms": 1000}})
+        with patch.dict(os.environ, {"QWEN_VAD": "semantic_vad"}):
+            self.assertEqual(qwen.session_config("Tina")["turn_detection"]["type"], "semantic_vad")
+            self.assertNotIn("silence_duration_ms", qwen.session_config("Tina")["turn_detection"])
+
+    def test_invalid_vad_settings_fail_before_connecting(self):
+        for values in ({"QWEN_VAD": "invalid"}, {"QWEN_VAD": "server_vad", "QWEN_SILENCE_MS": "bad"},
+                       {"QWEN_VAD": "server_vad", "QWEN_SILENCE_MS": "199"},
+                       {"QWEN_VAD": "server_vad", "QWEN_SILENCE_MS": "6001"}):
+            with self.subTest(values=values), patch.dict(os.environ, values):
+                with self.assertRaises(ValueError):
+                    qwen.session_config("Tina")
+
     def test_simple_controls_are_local_and_verified_in_session_configuration(self):
         config = qwen.session_config("Tina", [])
         names = {tool["function"]["name"] for tool in config["tools"]}
@@ -1426,7 +1508,7 @@ class CostAndProtocolTests(unittest.TestCase):
         qwen.verify_session(config, [])
         with self.assertRaises(qwen.QwenProtocolError):
             qwen.verify_session({**config, "tools": config["tools"][:-1]}, [])
-        self.assertEqual(names, {"cancel_pending", "undo_recent", "delete_item"})
+        self.assertEqual(names, {"cancel_pending", "undo_recent", "delete_item", "restore_recent"})
         self.assertNotIn("finish_collection", config["instructions"])
         self.assertNotIn("confirm_plan", names)
 
@@ -1434,6 +1516,15 @@ class CostAndProtocolTests(unittest.TestCase):
         for text in ("已经设好了", "已经加了", "已添加牛奶", "设置好了", "标记好了", "提醒已经帮你设置好了"):
             self.assertTrue(qwen.claims_completion(text), text)
         for text in ("还没有设置好", "无法确认已经设好了", "不能说已经加了", "请不要说“已经设好了”", "我查一下", "购物清单有牛奶"):
+            self.assertFalse(qwen.claims_completion(text), text)
+
+    def test_completion_can_separate_already_from_delete_restore_or_cancel(self):
+        for text in ("牛奶已经重新加回购物清单了", "牛奶已经从购物清单里拿掉了",
+                     "牛奶已放回清单", "牛奶已补回清单", "面包已经加到购物清单了", "面包已经加进购物清单了", "面包已加入购物清单",
+                     "面包已从购物清单里撤掉了", "面包已经从购物清单移除", "已把牛奶删掉",
+                     "提醒已为你取消", "面包已从备份恢复", "面包已从购物清单删除"):
+            self.assertTrue(qwen.claims_completion(text), text)
+        for text in ("我没有删掉面包", "我不会取消提醒", "面包尚未恢复", "面包已明确表示不删除"):
             self.assertFalse(qwen.claims_completion(text), text)
 
     def test_ha_tools_prompt_and_service_specific_fallback(self):

@@ -11,6 +11,7 @@ import base64
 import json
 import os
 import re
+import sys
 import time
 from typing import Any
 import httpx2
@@ -66,15 +67,16 @@ class _Recap:
 
 MODEL = "qwen3.8-omni-flash-realtime"
 INPUT_RATE = 16000
+AUDIO_SEND_TIMEOUT_S = 2.0
 def claims_completion(text: str) -> bool:
     """有限的中文完成声明检查；跳过否定和引用，不是完整语义验证。"""
     text = re.sub(r'[“「『"].*?[”」』"]', "", text)
     for clause in re.split(r"[，。！？；,!?;\n]", text):
-        if re.search(r"没有|还没|未能|尚未|并未|不能|无法|不代表|不是|未完成|未添加|未设置", clause):
+        if re.search(r"没有|还没|未能|尚未|并未|不能|无法|不代表|不是|不会|未完成|未添加|未设置|未删除|未撤销|未恢复|不删|不撤|不恢复|不取消", clause):
             continue
         if re.search(
-            r"(?:已经|已)(?:帮你|为你|替你|给你)?(?:设好|设置|安排|创建|添加|加了|加好|完成|标记|勾选|打开|关闭|关掉)"
-            r"|(?:设置好|标记好|设好|添加好|加好|完成)了", clause,
+            r"(?:已经|已)[^，。！？；,!?;\n]{0,12}?(?:设好|设置|安排|创建|添加|加了|加好|加到|加进|加入|加回|放回|放进|放到|补回|完成|标记|勾选|打开|关闭|关掉|删除|删掉|撤销|撤掉|拿掉|移除|恢复|取消)"
+            r"|(?:设置好|标记好|设好|添加好|加好|加回|放回|放进|补回|完成|删除|删掉|撤销|撤掉|拿掉|移除|恢复|取消)了", clause,
         ):
             return True
     return False
@@ -90,6 +92,22 @@ def websocket_url(workspace: str, region: str) -> str:
         f"wss://{workspace}.{regions[region]}.maas.aliyuncs.com/api-ws/v1/realtime?"
         + urlencode({"model": MODEL})
     )
+
+
+def turn_detection_config() -> dict:
+    vad = os.environ.get("QWEN_VAD", "server_vad").strip()
+    if vad not in {"server_vad", "semantic_vad"}:
+        raise ValueError("QWEN_VAD 必须是 server_vad 或 semantic_vad")
+    try:
+        silence_ms = int(os.environ.get("QWEN_SILENCE_MS", "800"))
+    except ValueError as exc:
+        raise ValueError("QWEN_SILENCE_MS 必须是 200 到 6000 的整数") from exc
+    if not 200 <= silence_ms <= 6000:
+        raise ValueError("QWEN_SILENCE_MS 必须是 200 到 6000 的整数")
+    config = {"type": vad, "create_response": False, "interrupt_response": False}
+    if vad == "server_vad":
+        config["silence_duration_ms"] = silence_ms
+    return config
 
 
 def session_config(voice: str, tools: list[ToolParam] | None = None,
@@ -122,9 +140,7 @@ def session_config(voice: str, tools: list[ToolParam] | None = None,
             "output": {"format": {"type": "pcm", "sample_rate": 24000}},
         },
         "input_audio_transcription": {"model": "qwen3-asr-flash-realtime"},
-        "turn_detection": {
-            "type": "semantic_vad", "create_response": False, "interrupt_response": False,
-        },
+        "turn_detection": turn_detection_config(),
     }
 
 
@@ -154,19 +170,27 @@ async def send_microphone(ws, activity: SpeechActivity) -> None:
         # 每块 20ms，最多存 100 块，即 2 秒；不是无限积压、越说延迟越大。
         queue: asyncio.Queue[bytes | Exception] = asyncio.Queue(maxsize=100)
         accepting = True
+        received = sent = 0
+        max_dispatch_delay = 0.0
 
-        def enqueue(chunk: bytes, status: str) -> None:
+        def enqueue(chunk: bytes, status: str, captured_at: float) -> None:
             # 这个函数由事件循环执行，所以这里可以安全操作 asyncio.Queue。
-            nonlocal accepting
+            nonlocal accepting, received, max_dispatch_delay
             if not accepting:
                 return
+            received += 1
+            max_dispatch_delay = max(max_dispatch_delay, time.perf_counter() - captured_at)
             if status:
                 print(f"[麦克风] {status}")
             activity.observe(chunk)
             if queue.full():
                 accepting = False
-                queue.get_nowait()
-                queue.put_nowait(RuntimeError("音频发送积压超过 2 秒，请检查网络"))
+                # 不继续把两秒旧音频送到服务器，也不把拥塞当作程序致命错误。
+                while not queue.empty():
+                    queue.get_nowait()
+                queue.put_nowait(SessionEnded(
+                    "音频发送积压超过 2 秒，丢弃旧音频并重建连接；"
+                    f"收到 {received} 块、已发送 {sent} 块、最大回调调度延迟 {max_dispatch_delay:.2f}s"))
             else:
                 queue.put_nowait(chunk)
 
@@ -176,6 +200,7 @@ async def send_microphone(ws, activity: SpeechActivity) -> None:
             loop.call_soon_threadsafe(
                 enqueue, indata.astype("<i2", copy=False).tobytes(),
                 str(status) if status else "",
+                time.perf_counter(),
             )
 
         try:
@@ -195,8 +220,15 @@ async def send_microphone(ws, activity: SpeechActivity) -> None:
                     if isinstance(chunk, Exception):
                         raise chunk
                     # PCM 是二进制，base64 将它变成能放进 JSON 的文本；没有先转成文字。
-                    await send_event(ws, "input_audio_buffer.append",
-                                     audio=base64.b64encode(chunk).decode("ascii"))
+                    try:
+                        async with asyncio.timeout(AUDIO_SEND_TIMEOUT_S):
+                            await send_event(ws, "input_audio_buffer.append",
+                                             audio=base64.b64encode(chunk).decode("ascii"))
+                        sent += 1
+                    except TimeoutError as exc:
+                        raise SessionEnded(
+                            f"音频发送超时（上限 {AUDIO_SEND_TIMEOUT_S:.1f}s，队列 {queue.qsize()}/100），"
+                            "丢弃旧音频并重建连接") from exc
         except (sd.PortAudioError, ValueError) as exc:
             print(f"[麦克风不可用] {exc}。1 秒后重试。")
             await send_event(ws, "input_audio_buffer.clear")
@@ -327,6 +359,7 @@ class QwenReceiver:
         self.silent_response_pending = False
         self.silent_responses: set[str] = set()
         self.response_requests = 0
+        self._last_snapshot_text: str | None = None
         # 证据跨“调用工具”和“工具后续回答”两次 response 保留，但不跨用户请求。
         self.response_turns: dict[str, str] = {}
         self.turn_successes: dict[str, set[str]] = {}
@@ -402,6 +435,9 @@ class QwenReceiver:
         return False
 
     def log(self, text: str) -> None:
+        if (text.startswith(("[工具]", "[提交结果]", "[本地撤销]"))
+                and sys.stdout.isatty() and "NO_COLOR" not in os.environ):
+            text = f"\033[34m{text}\033[0m"
         print(f"[{time.perf_counter() - self.started:.3f}] {text}", flush=True)
 
     async def command(self, kind: str, **payload) -> None:
@@ -498,11 +534,14 @@ class QwenReceiver:
         if not silent:
             snapshot = self.coordinator.snapshot()
             if snapshot is not None:
-                await self.command("conversation.item.create", item={
-                    "type": "message", "role": "system", "content": [{
-                        "type": "input_text", "text": "当前操作记录：" + json.dumps(snapshot, ensure_ascii=False),
-                    }],
-                })
+                encoded = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
+                if encoded != self._last_snapshot_text:
+                    await self.command("conversation.item.create", item={
+                        "type": "message", "role": "system", "content": [{
+                            "type": "input_text", "text": "当前操作记录：" + encoded,
+                        }],
+                    })
+                    self._last_snapshot_text = encoded
             now = datetime.now(self.timezone)
             weekday = "一二三四五六日"[now.weekday()]
             text = f"[当前时间：{now:%Y-%m-%d} 星期{weekday} {now:%H:%M}，{self.timezone.key}]"
@@ -818,7 +857,10 @@ class QwenReceiver:
             # 转写决定这次发声是否值得回答；噪音恢复旧播放，正常话语确认打断。
             text = event.get("transcript", "").strip()
             meaningful = is_meaningful(text)
-            self.log(f"你：{text!r} ｜ meaningful={meaningful}")
+            user_text = f"你：{text!r}"
+            if sys.stdout.isatty() and "NO_COLOR" not in os.environ:
+                user_text = f"\033[32m{user_text}\033[0m"
+            self.log(f"{user_text} ｜ meaningful={meaningful}")
             target = self.candidate
             if target is not None and target.item_id == event["item_id"]:
                 target.meaningful = meaningful
@@ -1004,6 +1046,11 @@ class QwenReceiver:
 def verify_session(session: dict, tools: list[ToolParam] | None = None) -> None:
     # 检查的是服务端确认后的配置，避免只看本地“发出了什么”就以为配置已经生效。
     detection = session.get("turn_detection") or {}
+    expected_detection = turn_detection_config()
+    if (detection.get("type") != expected_detection["type"]
+            or (expected_detection["type"] == "server_vad"
+                and detection.get("silence_duration_ms") != expected_detection["silence_duration_ms"])):
+        raise QwenProtocolError("服务端未确认请求的 VAD 配置：" + json.dumps(detection, ensure_ascii=False))
     if detection.get("create_response") is not False or detection.get("interrupt_response") is not False:
         raise QwenProtocolError(
             "服务端未确认 create_response=False / interrupt_response=False。"
@@ -1044,7 +1091,9 @@ async def run_session(ws, player: StreamingPlayer, costs: CostTracker,
     await send_event(ws, "session.update", session=session_config(voice, tools, assist_prompt))
     updated = await wait_for_event(ws, "session.updated")
     verify_session(updated["session"], tools)
-    print(f"[配置] 中文 ｜ {voice} ｜ 16kHz 输入/24kHz 输出 ｜ semantic_vad ｜ 客户端控制回答与打断")
+    detection = updated["session"]["turn_detection"]
+    vad_label = detection["type"] + (f" / 静音 {detection['silence_duration_ms']}ms" if detection["type"] == "server_vad" else "")
+    print(f"[配置] 中文 ｜ {voice} ｜ 16kHz 输入/24kHz 输出 ｜ {vad_label} ｜ 客户端控制回答与打断")
     activity = SpeechActivity(sample_rate=INPUT_RATE)
     if isinstance(coordinator, SimpleCoordinator):
         from voice.simple_receiver import receiver_type
@@ -1088,7 +1137,8 @@ async def reconnect_loop(url: str, key: str, player: StreamingPlayer,
             if not reconnectable(exc):
                 raise
             print("[重连] 会话已结束，重新连接")
-            print(f"[重连原因] {exc}；新会话的对话历史将重新开始，累计费用保留。")
+            print(f"[重连原因] {format_error(exc)}；本次连接持续 {time.perf_counter() - started:.2f}s；"
+                  "新会话的对话历史将重新开始，累计费用保留。")
         finally:
             coordinator.on_reconnect()
             player.clear()
@@ -1097,6 +1147,8 @@ async def reconnect_loop(url: str, key: str, player: StreamingPlayer,
 
 async def main() -> None:
     load_dotenv(ENV_FILE)
+    turn_detection_config()  # 在启动 MCP/联网之前检查本地 VAD 参数。
+    print(f"[运行代码] {__file__} ｜ 本地购物路由 v1")
     key = os.environ.get("DASHSCOPE_API_KEY", "").strip()
     workspace = os.environ.get("QWEN_WORKSPACE_ID", "").strip()
     ha_root = os.environ.get("HA_URL", "").strip()

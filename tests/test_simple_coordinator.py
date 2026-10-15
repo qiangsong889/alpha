@@ -37,10 +37,13 @@ class SimpleCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         }})
 
     def inspected(self, title="牛奶", present=True):
-        return ExecutorResult(True, {"text": "查询", "structured_content": {"present": present, "title": title}})
+        return ExecutorResult(True, {"text": "查询", "structured_content": {"present": present, "title": title, "resource": {"title": title, "notes": "原备注", "status": "needsAction"}}})
 
-    async def report(self):
-        return await asyncio.wait_for(self.flow.reports.get(), 1)
+    async def report(self, ack=True):
+        report = await asyncio.wait_for(self.flow.reports.get(), 1)
+        if ack:
+            self.flow.report_finished()
+        return report
 
     async def created(self, title="牛奶", task_id="new"):
         self.remote.return_value = self.receipt(title, task_id)
@@ -71,6 +74,31 @@ class SimpleCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         report = await self.report()
         self.assertEqual(len(report.operations), 3)
         self.assertEqual(self.remote.await_count, 3)
+
+    async def test_recent_creation_shortcut_requires_exactly_one_known_resource(self):
+        self.assertFalse(self.flow.has_unambiguous_recent_creation())
+        self.remote.return_value = ExecutorResult(True, {"structured_content": {
+            "version": 1, "status": "succeeded", "list_id": "list", "list_name": "购物清单",
+            "created": [{"task_id": "milk", "title": "牛奶"}, {"task_id": "bread", "title": "面包"}]}})
+        await self.flow.invoke("u1", "add_items", {"list_name": "购物清单", "items": ["牛奶", "面包"]})
+        self.flow.turn_finished("u1")
+        await self.report()
+        self.assertFalse(self.flow.has_unambiguous_recent_creation())
+
+    async def test_model_snapshot_is_compact_and_keeps_creation_ids(self):
+        await self.created("面包", "new-bread")
+        item = self.flow.snapshot()["recent_created"][0]
+        self.assertEqual(item["receipt"]["list_id"], "list")
+        self.assertEqual(item["receipt"]["created"][0]["task_id"], "new-bread")
+        self.assertNotIn("created_at", item)
+        self.assertNotIn("updated_at", item)
+        self.assertNotIn("result", item)
+
+    async def test_later_device_action_disables_recent_creation_shortcut(self):
+        await self.created("面包", "new-bread")
+        self.assertTrue(self.flow.has_unambiguous_recent_creation())
+        await self.flow.invoke("u1", "intent__HassTurnOff", {"name": "客厅灯"})
+        self.assertFalse(self.flow.has_unambiguous_recent_creation())
 
     async def test_cancel_pending_cancels_all_before_execution(self):
         first, second = await self.add(), await self.add("面包")
@@ -122,144 +150,165 @@ class SimpleCoordinatorTests(unittest.IsolatedAsyncioTestCase):
         await self.report()
         self.remote.assert_awaited_once()
 
-    async def test_own_creation_undo_is_direct_and_exact(self):
-        created = await self.created("面包", "new-bread")
-        self.user("u2", "刚才的面包不要了")
-        self.remote.return_value = ExecutorResult(True, "删除成功")
-        result = await self.flow.undo_recent("面包")
-        self.assertFalse(result["is_error"])
-        self.assertIn("已经删掉了面包", result["text"])
-        self.remote.assert_awaited_with("delete_task", {"list_id": "list", "task_id": "new-bread"})
-        self.assertEqual(self.store.get(created["operation_id"]).status, "succeeded")
+    def delete_executor(self):
+        async def remote(name, args):
+            if name.startswith("inspect_"):
+                return self.inspected("牛奶")
+            return ExecutorResult(True, "已删除牛奶")
+        self.remote.side_effect = remote
 
-    async def test_direct_delete_of_own_created_id_also_skips_confirmation(self):
-        await self.created()
-        self.user("u2", "删掉它")
-        self.remote.return_value = ExecutorResult(True, "成功")
-        result = await self.flow.delete_item("task", "new", "list")
-        self.assertEqual(result["status"], "succeeded")
+    async def test_original_task_is_deleted_without_confirmation_after_window(self):
+        self.delete_executor()
+        result = await self.flow.delete_item("task", "old", "list")
+        self.assertEqual(result["status"], "pending")
         self.assertNotIn("needs_confirmation", result)
-
-    async def test_repeated_undo_does_not_send_duplicate_delete(self):
-        await self.created()
-        self.user("u2", "撤销")
-        self.remote.return_value = ExecutorResult(True, "删除成功")
-        await self.flow.undo_recent()
-        await self.flow.undo_recent()
-        self.assertEqual([call.args[0] for call in self.remote.await_args_list].count("delete_task"), 1)
-
-    async def test_old_process_creation_does_not_become_owned(self):
-        await self.created()
-        other = SimpleCoordinator(self.gateway)
-        self.addAsyncCleanup(other.close)
-        other.user_turn("other-u1")
-        self.remote.return_value = self.inspected()
-        result = await other.delete_item("task", "new", "list")
-        self.assertTrue(result["needs_confirmation"])
-        self.assertNotIn("delete_task", [call.args[0] for call in self.remote.await_args_list])
-
-    async def test_reading_existing_items_does_not_grant_ownership(self):
-        self.remote.return_value = ExecutorResult(True, {"structured_content": {
-            "list_id": "list", "items": [{"task_id": "old", "title": "牛奶"}],
-        }})
-        await self.flow.invoke("u1", "list_items", {"list_name": "购物清单"})
-        self.remote.return_value = self.inspected()
-        self.assertTrue((await self.flow.delete_item("task", "old", "list"))["needs_confirmation"])
-
-    async def test_first_confirmed_true_still_requests_confirmation(self):
-        self.remote.return_value = self.inspected()
-        result = await self.flow.delete_item("task", "old", "list", confirmed=True)
-        self.assertTrue(result["needs_confirmation"])
-        self.assertEqual([call.args[0] for call in self.remote.await_args_list], ["inspect_task"])
-
-    async def test_same_user_turn_cannot_confirm_even_with_true(self):
-        self.remote.return_value = self.inspected()
-        await self.flow.delete_item("task", "old", "list")
-        result = await self.flow.delete_item("task", "old", "list", confirmed=True)
-        self.assertTrue(result["needs_confirmation"])
-        self.remote.assert_awaited_once()
-
-    async def test_new_turn_without_confirmed_true_does_not_delete(self):
-        self.remote.return_value = self.inspected()
-        await self.flow.delete_item("task", "old", "list")
-        self.user("u2", "为什么要删？")
-        self.assertTrue((await self.flow.delete_item("task", "old", "list"))["needs_confirmation"])
-        self.remote.assert_awaited_once()
-
-    async def test_fresh_turn_and_true_delete_same_target(self):
-        self.remote.return_value = self.inspected()
-        await self.flow.delete_item("task", "old", "list")
-        self.user("u2", "对，删掉")
-        self.remote.return_value = ExecutorResult(True, "已删除")
-        output = await self.flow.delete_item("task", "old", "list", confirmed=True)
-        self.assertEqual(output["status"], "succeeded")
+        self.remote.assert_not_awaited()
+        self.flow.turn_finished("u1")
+        report = await self.report()
+        self.assertEqual(report.operations[0].status, "succeeded")
         self.remote.assert_awaited_with("delete_task", {"list_id": "list", "task_id": "old"})
+        backup = self.store.deletion_backup(result["operation_id"])
+        self.assertEqual(backup["resource"]["notes"], "原备注")
 
-    async def test_confirmation_cannot_be_moved_to_another_target_or_list(self):
-        self.remote.return_value = self.inspected()
-        await self.flow.delete_item("task", "old", "list")
-        self.user("u2", "对")
-        for task, tasklist in (("different", "list"), ("old", "other-list")):
-            output = await self.flow.delete_item("task", task, tasklist, confirmed=True)
-            self.assertTrue(output["needs_confirmation"])
-        self.assertNotIn("delete_task", [call.args[0] for call in self.remote.await_args_list])
+    async def test_cancel_before_deletion_sends_no_delete(self):
+        result = await self.flow.delete_item("task", "old", "list")
+        self.flow.cancel_pending()
+        self.flow.turn_finished("u1")
+        await asyncio.sleep(.04)
+        self.remote.assert_not_awaited()
+        self.assertEqual(self.store.get(result["operation_id"]).status, "cancelled")
 
-    async def test_noise_does_not_count_as_new_confirmation_input(self):
-        self.remote.return_value = self.inspected()
-        await self.flow.delete_item("task", "old", "list")
-        self.flow.speech_started("noise")
-        self.flow.speech_ignored()
-        output = await self.flow.delete_item("task", "old", "list", confirmed=True)
-        self.assertTrue(output["needs_confirmation"])
+    async def test_backup_failure_prevents_deletion(self):
+        self.remote.return_value = ExecutorResult(False, "无法读取原数据")
+        result = await self.flow.delete_item("task", "old", "list")
+        self.flow.turn_finished("u1")
+        report = await self.report()
+        self.assertEqual(report.operations[0].status, "failed")
+        self.assertIn("未执行删除", report.text)
+        self.assertEqual(self.remote.await_args.args[0], "inspect_task")
+        self.assertIsNone(self.store.deletion_backup(result["operation_id"]))
 
-    async def test_speech_started_before_challenge_does_not_count_as_after_it(self):
+    async def test_cancel_during_backup_prevents_delete(self):
         entered, release = asyncio.Event(), asyncio.Event()
-        async def inspect(*args):
+        async def remote(name, args):
             entered.set()
             await release.wait()
             return self.inspected()
-        self.remote.side_effect = inspect
-        first = asyncio.create_task(self.flow.delete_item("task", "old", "list"))
+        self.remote.side_effect = remote
+        result = await self.flow.delete_item("task", "old", "list")
+        self.flow.turn_finished("u1")
         await asyncio.wait_for(entered.wait(), 1)
-        self.flow.speech_started("u2")
+        self.flow.cancel_pending()
         release.set()
-        await first
-        self.flow.record_text("u2", "对")
-        self.flow.user_turn("u2")
-        result = await self.flow.delete_item("task", "old", "list", confirmed=True)
-        self.assertTrue(result["needs_confirmation"])
+        await asyncio.sleep(.04)
         self.remote.assert_awaited_once()
+        self.assertEqual(self.store.get(result["operation_id"]).status, "cancelled")
 
-    async def test_reconnect_clears_delete_confirmation_but_keeps_own_scope(self):
-        await self.created()
-        self.user("u2", "删除旧条目")
-        self.remote.return_value = self.inspected()
-        await self.flow.delete_item("task", "old", "list")
-        self.flow.on_reconnect()
-        self.user("new-session-u1", "对")
-        self.assertTrue((await self.flow.delete_item("task", "old", "list", confirmed=True))["needs_confirmation"])
-        self.assertIn(("task", "list", "new"), self.flow._owned())
+    async def test_own_creation_undo_is_queued_and_exact(self):
+        created = await self.created("面包", "new-bread")
+        self.user("u2", "刚才的面包不要了")
+        self.delete_executor()
+        result = await self.flow.undo_recent("面包")
+        self.assertEqual(result["status"], "pending")
+        self.flow.turn_finished("u2")
+        await self.report()
+        self.remote.assert_awaited_with("delete_task", {"list_id": "list", "task_id": "new-bread"})
+        self.assertEqual(self.store.get(created["operation_id"]).status, "succeeded")
 
-    async def test_own_reminder_undo_uses_receipt_id_without_confirming(self):
-        self.remote.return_value = ExecutorResult(True, {"structured_content": {
-            "version": 1, "status": "succeeded", "event_id": "my-event",
-        }})
-        await self.flow.invoke("u1", "create_reminder", {"title": "开会", "local_time": "2026-11-03T08:00:00"})
+    async def test_repeated_delete_returns_same_operation_without_sending_twice(self):
+        self.delete_executor()
+        first = await self.flow.delete_item("task", "old", "list")
+        second = await self.flow.delete_item("task", "old", "list")
+        self.assertEqual(first["operation_id"], second["operation_id"])
         self.flow.turn_finished("u1")
         await self.report()
-        self.user("u2", "提醒不要了")
-        self.remote.return_value = ExecutorResult(True, "已删除")
-        output = await self.flow.undo_recent("开会")
-        self.assertFalse(output["is_error"])
-        self.remote.assert_awaited_with("delete_reminder", {"event_id": "my-event"})
+        third = await self.flow.delete_item("task", "old", "list")
+        self.assertEqual(third["status"], "succeeded")
+        self.assertEqual([c.args[0] for c in self.remote.await_args_list].count("delete_task"), 1)
 
-    async def test_original_reminder_requires_new_input_and_true(self):
-        self.remote.return_value = self.inspected("原有会议")
-        self.assertTrue((await self.flow.delete_item("reminder", "old-event"))["needs_confirmation"])
-        self.user("u2", "对，删掉")
-        self.remote.return_value = ExecutorResult(True, "删除成功")
-        output = await self.flow.delete_item("reminder", "old-event", confirmed=True)
-        self.assertEqual(output["status"], "succeeded")
+    async def test_reminder_also_deletes_without_confirmation_and_saves_details(self):
+        event = {"summary": "开会", "start": {"dateTime": "2026-10-16T08:00:00-07:00"},
+                 "end": {"dateTime": "2026-10-16T08:15:00-07:00"}, "reminders": {"useDefault": True}}
+        async def remote(name, args):
+            if name == "inspect_reminder":
+                return ExecutorResult(True, {"structured_content": {"present": True, "title": "开会", "resource": event}})
+            return ExecutorResult(True, "已删除开会提醒")
+        self.remote.side_effect = remote
+        result = await self.flow.delete_item("reminder", "old-event")
+        self.flow.turn_finished("u1")
+        await self.report()
+        self.remote.assert_awaited_with("delete_reminder", {"event_id": "old-event"})
+        self.assertEqual(self.store.deletion_backup(result["operation_id"])["resource"], event)
+
+    async def test_restoration_uses_stored_snapshot_and_is_not_repeated(self):
+        self.delete_executor()
+        result = await self.flow.delete_item("task", "old", "list")
+        self.flow.turn_finished("u1")
+        await self.report()
+        self.user("u2", "牛奶删错了，恢复")
+        restored = await self.flow.restore_recent("牛奶")
+        self.assertEqual(restored["status"], "pending")
+        self.assertEqual((await self.flow.restore_recent("牛奶"))["operation_id"], restored["operation_id"])
+        self.flow.turn_finished("u2")
+        await self.report()
+        self.remote.assert_awaited_with("restore_task", {
+            "list_id": "list", "resource": self.store.deletion_backup(result["operation_id"])["resource"]})
+        self.assertEqual(self.store.get(result["operation_id"]).status, "succeeded")
+
+    async def test_unknown_delete_does_not_restore_blindly(self):
+        async def remote(name, args):
+            if name == "inspect_task":
+                return self.inspected()
+            raise TimeoutError("超时")
+        self.remote.side_effect = remote
+        await self.flow.delete_item("task", "old", "list")
+        self.flow.turn_finished("u1")
+        self.assertEqual((await self.report()).operations[0].status, "unknown")
+        self.user("u2", "恢复")
+        self.assertTrue((await self.flow.restore_recent())["is_error"])
+        self.assertNotIn("restore_task", [c.args[0] for c in self.remote.await_args_list])
+
+    async def test_batches_execute_serially_and_wait_for_previous_report(self):
+        entered, release = asyncio.Event(), asyncio.Event()
+        order = []
+        async def remote(name, args):
+            order.append(args["items"][0])
+            if len(order) == 1:
+                entered.set()
+                await release.wait()
+            return ExecutorResult(True, "已添加" + args["items"][0])
+        self.remote.side_effect = remote
+        await self.add("面包")
+        self.flow.turn_finished("u1")
+        await asyncio.wait_for(entered.wait(), 1)
+        self.user("u2", "加牛奶和鸡蛋")
+        await self.add("牛奶")
+        await self.add("鸡蛋")
+        self.flow.turn_finished("u2")
+        await asyncio.sleep(.04)
+        release.set()
+        first = await self.report(ack=False)
+        self.assertEqual(len(first.operations), 1)
+        await asyncio.sleep(.04)
+        self.assertEqual(order, ["面包"])
+        self.flow.report_finished()
+        second = await self.report()
+        self.assertEqual(len(second.operations), 2)
+        self.assertEqual(order, ["面包", "牛奶", "鸡蛋"])
+
+    async def test_cancel_also_cancels_next_queued_batch(self):
+        await self.add()
+        self.flow.turn_finished("u1")
+        await self.report(ack=False)
+        self.user("u2", "加面包")
+        op = await self.add("面包")
+        self.flow.turn_finished("u2")
+        await asyncio.sleep(.04)
+        self.flow.cancel_pending()
+        self.flow.report_finished()
+        await asyncio.sleep(.04)
+        self.assertEqual(self.store.get(op["operation_id"]).status, "cancelled")
+        self.remote.assert_awaited_once()
 
     async def test_unknown_creation_without_proof_is_not_undone(self):
         self.remote.side_effect = TimeoutError("结果丢失")

@@ -293,6 +293,8 @@ QWEN_REGION=singapore
 QWEN_VOICE=Tina
 INTERRUPT_MS=400
 QWEN_SESSION_SECONDS=1800
+QWEN_VAD=server_vad
+QWEN_SILENCE_MS=800
 # Optional: reuse the same HA credentials as the CLI/OpenAI voice layer.
 HA_URL=http://your-home-assistant:8123
 HA_TOKEN=your-long-lived-access-token
@@ -306,23 +308,39 @@ python -m voice.qwen_realtime
 
 Speak directly in Mandarin; press Ctrl+C to exit. Input is mono PCM16 at 16 kHz, output is 24 kHz. Wear headphones to reduce feedback.
 
+VAD defaults to `server_vad`, with `QWEN_SILENCE_MS=800` (allowed range 200–6000 ms).
+Set `QWEN_VAD=semantic_vad` to restore semantic detection; the silence setting is
+only sent for `server_vad`. Acoustic VAD avoids semantic backchannel filtering,
+but a pause around the configured silence duration may split a sentence. The
+client verifies the returned VAD configuration before opening the microphone.
+See the [official client events](https://help.aliyun.com/en/model-studio/client-events).
+
+For a 60-second microphone-only check without business tools:
+
+```bash
+QWEN_VAD=server_vad QWEN_SILENCE_MS=800 .venv/bin/python -u -m devtools.qwen_vad_probe
+```
+
 At startup it discovers `list_items`, `list_reminders`, `add_items`, `complete_items`, and `create_reminder` from the personal MCP server and starts a persistent `PersonalWorker`, stopped on exit. Google credentials use the same setup as the CLI. Qwen function definitions use the nested `function` object and `parameters` schema. Tool calls run in background tasks, so incoming voice events remain responsive. Each call returns a `function_call_output` with its original `call_id`, including errors. The model continues after all results in a completed response have arrived. Repeated function events are deduplicated to avoid executing a write twice.
 
 Qwen tool execution now goes through `ToolGateway` and the injected executor in `integrations/tool_executor.py`. A tool must be loaded and have a local policy. The gateway stores operations in `data/operations.db` (ignored by Git), shared across Qwen reconnects and closed on exit. At startup, leftover `executing` operations are changed to `unknown` and printed without retrying. A missing/closed personal worker or unavailable HA client is definitely not sent; HA connection/initialization failures are also classified as not sent. Once a tool call begins, transport failures and timeouts are unknown. HA device actions require a clean `action_done`; other tools use MCP `is_error`.
 
-**Simple execution flow:** the Qwen entry point uses `SimpleCoordinator`. HA on/off/brightness commands execute immediately and successful device actions stay silent. Personal additions, task completion, and reminders wait for two seconds of silence. Code starts the window once the response is complete and all tool results have arrived; the model does not need to call a collection-control tool. A larger number of tasks does not add a confirmation step.
+**Automatic batches:** the Qwen entry point uses `SimpleCoordinator`. HA on/off/brightness commands execute immediately and successful device actions stay silent. Other personal mutations (including deletion, undo and restoration) collect in a two-second window. User instructions authorize execution: there is no separate “yes” step and no `confirmed` parameter. Ambiguous targets still require clarification.
 
-New speech pauses the window; noise resumes it. Recognized unfinished expressions such as “等等”, “还有”, or “把” wait up to five seconds and then prompt for clarification. This is a small local heuristic, not a general test of whether every sentence is complete. `COLLECTION_WINDOW_S=2` and `COLLECTION_INCOMPLETE_S=5` configure these delays. Time is measured from speech end, so slow model interpretation does not add another full window.
+Code seals a batch after the response and all tool results have arrived and the silence window has elapsed. A batch executes sequentially, then receives one factual spoken report. Only after that report completes does the next queued batch start. New instructions can be interpreted and collected while an earlier batch executes. A larger number of tasks does not add confirmation. When a response contains only pending writes, no extra acknowledgment response is requested; the model resumes for the actual execution report. Reads and rejected tool calls can still request a normal continuation.
 
-Only three local control tools are exposed:
+New speech pauses collection; noise resumes it. Recognized unfinished expressions such as “等等”, “还有”, or “把” wait up to five seconds and then prompt for clarification. This is a local heuristic, not a general completeness detector. `COLLECTION_WINDOW_S=2` and `COLLECTION_INCOMPLETE_S=5` configure the delays, measured from speech end.
 
-- `cancel_pending()`: cancel every operation still waiting to be sent. A request already in flight is allowed to finish and is not described as cancelled.
-- `undo_recent(title=...)`: immediately delete an exact item or reminder created by Alpha during this program session, using saved IDs. It does not need another confirmation. An ambiguous target prompts for clarification.
-- `delete_item(kind, item_id, list_id, confirmed)`: delete a specific existing task or reminder. The first call only asks for confirmation. Execution requires `confirmed=true` and a new meaningful user utterance after that request, bound to the same exact target. The model must interpret whether that utterance actually agrees; code does not treat every new utterance as consent.
+Four local control tools are exposed:
 
-`list_items` and `list_reminders` supply structured IDs so deletion can target one resource. Reading existing content does not make it Alpha-created content. Internal deletion and verification tools are not directly exposed. Undo has its own operation record and does not rewrite the original success. Repeated deletion of the same target is not sent twice while its result is executing, unknown, or already successful.
+- `cancel_pending()`: cancel all unsent operations, including queued batches. A request already in flight is allowed to finish and is not described as cancelled.
+- `undo_recent(title=...)`: register an exact deletion of an item/reminder Alpha created during this program session. No extra confirmation is needed.
+- `delete_item(kind, item_id, list_id)`: register deletion of an exact existing resource, without asking for agreement again. IDs come from queries; unclear targets prompt for clarification.
+- `restore_recent(title=...)`: register restoration of a resource Alpha deleted during this program session, using the saved snapshot. No extra confirmation is needed. Restored resources get new Google IDs.
 
-Unknown Google creation/deletion results receive read-only verification where tracking evidence is available. An unproven result remains unknown and is not blindly replayed. SQLite execution facts survive process restarts; automatic undo ownership only covers the current program session. WebSocket reconnect preserves this ownership, execution and reports, clears outstanding deletion confirmations, and pauses unsent operations until a new mutation or explicit execution request. Shutdown cancels unsent work and leaves interrupted in-flight calls unknown.
+`list_items` and `list_reminders` supply structured IDs, which should not be spoken. Immediately before deletion, code reads the original resource and persists its snapshot in SQLite, independently of the operation's final result. If a backup cannot be obtained, deletion is not sent. Task restoration retains title, notes, due date and completion data; ordinary calendar restoration retains title, description, location, timing and reminders. Automatic deletion rejects recurring/special calendar events and events with participants or conferencing because their original behavior cannot be faithfully restored by this implementation. Task IDs/order and externally linked task metadata are not restored exactly.
+
+Undo and restoration have separate operation records; original successes remain recorded. Repeated pending/executing/unknown/successful deletions or restorations are not blindly sent again. Unknown Google writes receive read-only verification where available; unproven results remain unknown. SQLite facts and deletion snapshots survive process restarts, but the voice `undo_recent`/`restore_recent` selectors currently cover this program session. WebSocket reconnect retains work and reports; unsent work remains paused with a spoken recovery prompt until a new mutation or explicit continuation. Shutdown cancels unsent operations and leaves interrupted in-flight requests unknown.
 
 Plans, dependency tools, required collection controls, recap comparisons and fallback TTS are absent from the production Qwen path. Earlier batch modules remain for regression tests. See [execution and undo](docs/task-batches.md) for the current flow.
 

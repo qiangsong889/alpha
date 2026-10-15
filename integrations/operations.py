@@ -64,6 +64,24 @@ class OperationStore:
                 CREATE INDEX IF NOT EXISTS operations_recent
                 ON operations (name, status, updated_at)
             """)
+            self._db.execute("""
+                CREATE TABLE IF NOT EXISTS deletion_backups (
+                    op_id TEXT PRIMARY KEY REFERENCES operations(id),
+                    snapshot TEXT NOT NULL
+                )
+            """)
+
+    def save_deletion_backup(self, op_id: str, snapshot: dict[str, Any]) -> None:
+        """在发出删除请求之前持久化原数据；不随工具结果覆盖。"""
+        if self.get(op_id) is None:
+            raise KeyError(op_id)
+        encoded = json.dumps(snapshot, ensure_ascii=False, allow_nan=False)
+        with self._db:
+            self._db.execute("INSERT OR REPLACE INTO deletion_backups VALUES (?, ?)", (op_id, encoded))
+
+    def deletion_backup(self, op_id: str) -> dict[str, Any] | None:
+        row = self._db.execute("SELECT snapshot FROM deletion_backups WHERE op_id=?", (op_id,)).fetchone()
+        return json.loads(row[0]) if row else None
 
     @staticmethod
     def _from_row(row: sqlite3.Row) -> Operation:

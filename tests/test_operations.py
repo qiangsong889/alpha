@@ -1,6 +1,8 @@
 """策略与操作记录测试；只使用内存数据库，不访问任何外部服务。"""
 
 import unittest
+import tempfile
+from pathlib import Path
 from unittest.mock import patch
 
 from integrations.operations import OperationStore
@@ -128,6 +130,24 @@ class OperationTests(unittest.TestCase):
             self.assertEqual(self.store.recent_succeeded(op.name, op.arguments).id, op.id)
         with patch("integrations.operations.time.time", return_value=1601):
             self.assertIsNone(self.store.recent_succeeded(op.name, op.arguments))
+
+    def test_deletion_backup_survives_final_result_and_database_reopen(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "operations.db"
+            store = OperationStore(path)
+            op = store.create("turn", "delete_task", {"list_id": "list", "task_id": "old"})
+            backup = {"title": "牛奶", "resource": {"title": "牛奶", "notes": "两瓶"}}
+            store.save_deletion_backup(op.id, backup)
+            store.transition(op.id, "pending", "approved")
+            store.transition(op.id, "approved", "executing")
+            store.transition(op.id, "executing", "succeeded", "删除成功")
+            store.close()
+            reopened = OperationStore(path)
+            try:
+                self.assertEqual(reopened.deletion_backup(op.id), backup)
+                self.assertEqual(reopened.get(op.id).result, "删除成功")
+            finally:
+                reopened.close()
 
 
 if __name__ == "__main__":

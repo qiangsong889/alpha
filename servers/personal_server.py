@@ -323,6 +323,7 @@ def inspect_reminder(event_id: str = "", operation_id: str = "") -> CallToolResu
     return _task_result("提醒存在" if present else "没有查到有效提醒", {
         "present": present, "event_id": target, "title": event.get("summary", ""),
         "start": event.get("start", {}),
+        "resource": event if present else None,
     })
 
 
@@ -341,6 +342,52 @@ def inspect_task(list_id: str, task_id: str) -> CallToolResult:
     return _task_result("任务存在" if not task.get("deleted") else "任务已不存在", {
         "present": not bool(task.get("deleted")), "list_id": list_id,
         "task_id": task_id, "title": task.get("title", ""),
+        "resource": task if not task.get("deleted") else None,
+    })
+
+
+@mcp.tool()
+def restore_task(list_id: str, resource: dict) -> CallToolResult:
+    """按代码保存的删除前快照重新创建任务；Google 会分配新的任务 ID。"""
+    if not list_id.strip() or not isinstance(resource.get("title"), str):
+        raise ToolError("缺少清单 ID 或有效任务快照")
+    body = {key: resource[key] for key in ("title", "notes", "status", "due", "completed") if key in resource}
+    with _TASKS_LOCK:
+        service = get_tasks_service()
+        try:
+            created = service.tasks().insert(tasklist=list_id, body=body,
+                                             **({"parent": resource["parent"]} if resource.get("parent") else {})).execute()
+        except Exception as exc:
+            return _task_result("恢复结果未知，可能已生效，不要重试", {
+                "status": "unknown", "error": f"{type(exc).__name__}: {exc}",
+            }, is_error=True)
+    if not created.get("id"):
+        return _task_result("恢复结果未知，不要重试", {"status": "unknown"}, is_error=True)
+    return _task_result(f"已恢复任务：{body['title']}", {
+        "status": "succeeded", "list_id": list_id, "task_id": created["id"], "title": body["title"],
+    })
+
+
+@mcp.tool()
+def restore_reminder(resource: dict) -> CallToolResult:
+    """按代码保存的普通日程快照重新创建；不承诺恢复会议链接或参与者邀请。"""
+    if not resource.get("start") or not resource.get("end"):
+        raise ToolError("缺少有效的日程快照")
+    if resource.get("recurrence") or resource.get("recurringEventId") or resource.get("eventType", "default") != "default":
+        raise ToolError("暂不支持恢复重复或特殊日程")
+    body = {key: resource[key] for key in ("summary", "description", "location", "start", "end",
+            "reminders", "colorId", "visibility", "transparency") if key in resource}
+    with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
+        try:
+            created = calendar.events().insert(calendarId="primary", body=body).execute()
+        except Exception as exc:
+            return _task_result("恢复结果未知，可能已生效，不要重试", {
+                "status": "unknown", "error": f"{type(exc).__name__}: {exc}",
+            }, is_error=True)
+    if not created.get("id"):
+        return _task_result("恢复结果未知，不要重试", {"status": "unknown"}, is_error=True)
+    return _task_result(f"已恢复日程：{body.get('summary', '（无标题）')}", {
+        "status": "succeeded", "event_id": created["id"],
     })
 
 

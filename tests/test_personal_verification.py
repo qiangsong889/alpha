@@ -101,3 +101,40 @@ class VerificationToolTests(unittest.IsolatedAsyncioTestCase):
         for tool in catalog:
             self.assertNotIn("operation_id", tool["input_schema"].get("properties", {}))
         self.assertNotIn("delete_reminder", {tool["name"] for tool in catalog})
+
+    async def test_task_snapshot_can_restore_title_notes_due_and_completion(self):
+        original = {"id": "old", "title": "牛奶", "notes": "两瓶", "due": "2026-10-16T00:00:00Z",
+                    "status": "completed", "completed": "2026-10-15T12:00:00Z", "etag": "old-tag"}
+        self.tasks.tasks.return_value.get.return_value.execute.return_value = original
+        inspected = await self.call("inspect_task", {"list_id": "list", "task_id": "old"})
+        self.assertEqual(inspected.structured_content["resource"], original)
+        self.tasks.tasks.return_value.insert.return_value.execute.return_value = {"id": "new"}
+        restored = await self.call("restore_task", {"list_id": "list", "resource": inspected.structured_content["resource"]})
+        self.assertFalse(restored.is_error)
+        self.assertEqual(restored.structured_content["task_id"], "new")
+        body = self.tasks.tasks.return_value.insert.call_args.kwargs["body"]
+        self.assertEqual(body, {k: v for k, v in original.items() if k not in {"id", "etag"}})
+
+    async def test_reminder_snapshot_restores_timing_and_popup_without_old_id(self):
+        original = {"id": "old-event", "summary": "开会", "description": "备注",
+                    "start": {"dateTime": "2026-10-16T08:00:00-07:00"},
+                    "end": {"dateTime": "2026-10-16T08:15:00-07:00"},
+                    "reminders": {"useDefault": False, "overrides": [{"method": "popup", "minutes": 10}]}}
+        self.events.get.return_value.execute.return_value = original
+        inspected = await self.call("inspect_reminder", {"event_id": "old-event"})
+        self.events.insert.return_value.execute.return_value = {"id": "restored-event"}
+        result = await self.call("restore_reminder", {"resource": inspected.structured_content["resource"]})
+        self.assertFalse(result.is_error)
+        self.assertEqual(self.events.insert.call_args.kwargs["body"], {k: v for k, v in original.items() if k != "id"})
+        self.assertEqual(result.structured_content["event_id"], "restored-event")
+
+    async def test_restore_transport_failure_is_unknown_not_retryable_failure(self):
+        self.tasks.tasks.return_value.insert.return_value.execute.side_effect = TimeoutError("响应丢失")
+        self.events.insert.return_value.execute.side_effect = TimeoutError("响应丢失")
+        for name, args in (("restore_task", {"list_id": "list", "resource": {"title": "牛奶"}}),
+                           ("restore_reminder", {"resource": {"start": {"date": "2026-10-16"},
+                                                               "end": {"date": "2026-10-17"}}})):
+            with self.subTest(name=name):
+                result = await self.call(name, args)
+                self.assertTrue(result.is_error)
+                self.assertEqual(result.structured_content["status"], "unknown")
