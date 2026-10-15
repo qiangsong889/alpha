@@ -55,6 +55,39 @@ class OperationTests(unittest.TestCase):
         self.assertIsNone(self.store.recent_succeeded(op.name, {"items": ["牛奶", "鸡蛋"]}))
         self.assertIsNone(self.store.recent_succeeded("add_items", op.arguments))
 
+    def test_recent_success_ignores_object_key_order_including_nested_objects(self):
+        op = self.create({"title": "开会", "details": {"time": "08:00", "items": ["牛奶", "鸡蛋", "牛奶"]}})
+        self.succeed(op)
+        found = self.store.recent_succeeded(op.name, {
+            "details": {"items": ["牛奶", "鸡蛋", "牛奶"], "time": "08:00"}, "title": "开会",
+        })
+        self.assertEqual(found.id, op.id)
+        self.assertIsNone(self.store.recent_succeeded(op.name, {
+            "title": " 开会 ", "details": {"time": "08:00", "items": ["牛奶", "鸡蛋", "牛奶"]},
+        }))
+
+    def test_transition_without_result_preserves_existing_result(self):
+        op = self.create()
+        self.store.transition(op.id, "pending", "approved")
+        self.store.transition(op.id, "approved", "executing", "等待响应")
+        self.assertTrue(self.store.transition(op.id, "executing", "succeeded"))
+        self.assertEqual(self.store.get(op.id).result, "等待响应")
+
+    def test_transition_explicit_result_replaces_existing_even_when_falsy(self):
+        for result in ({"event_id": "event-1"}, "", False, 0, {}):
+            with self.subTest(result=result):
+                op = self.create()
+                self.store.transition(op.id, "pending", "approved")
+                self.store.transition(op.id, "approved", "executing", "等待响应")
+                self.assertTrue(self.store.transition(op.id, "executing", "succeeded", result))
+                self.assertEqual(self.store.get(op.id).result, result)
+
+    def test_complete_items_is_deferred_and_not_retry_safe(self):
+        policy = get_policy("complete_items")
+        self.assertTrue(policy.mutates)
+        self.assertFalse(policy.retry_safe)
+        self.assertEqual(policy.commit, "deferred")
+
     def test_unknown_policy_is_not_allowed(self):
         self.assertIsNone(get_policy("不存在的工具"))
 

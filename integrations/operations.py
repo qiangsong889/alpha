@@ -33,9 +33,9 @@ class Operation:
 
 
 def _arguments_json(arguments: dict[str, Any]) -> str:
-    # 原样序列化，不排序键或列表、不去重、不 trim 字符串；参数键顺序不同也不会合并。
+    # JSON 对象的键顺序不影响含义，递归排序对象键；列表顺序、重复元素和字符串内容保留。
     # 参数应来自 JSON，拒绝 NaN/Infinity，避免保存无法可靠比较的非标准 JSON 值。
-    return json.dumps(arguments, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    return json.dumps(arguments, sort_keys=True, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
 
 
 class OperationStore:
@@ -92,14 +92,14 @@ class OperationStore:
         self, op_id: str, from_status: OperationStatus, to_status: OperationStatus,
         result: object | None = None,
     ) -> bool:
-        """只更新仍处于预期状态的记录；非法转换、记录不存在或状态不匹配均返回 False。"""
+        """条件更新状态；非法或不匹配时返回 False。result=None 表示保留旧结果，不表示清空。"""
         if to_status not in _TRANSITIONS.get(from_status, frozenset()):
             return False
         encoded_result = json.dumps(result, ensure_ascii=False, allow_nan=False) if result is not None else None
         with self._db:
             # 检查与状态修改合在一条 SQL 里，避免两个调用都先读到 approved，再各执行一次。
             cursor = self._db.execute("""
-                UPDATE operations SET status = ?, result = ?, updated_at = ?
+                UPDATE operations SET status = ?, result = COALESCE(?, result), updated_at = ?
                 WHERE id = ? AND status = ?
             """, (to_status, encoded_result, time.time(), op_id, from_status))
             return cursor.rowcount == 1
