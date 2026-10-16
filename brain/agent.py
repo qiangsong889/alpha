@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from copy import deepcopy
 from contextlib import AsyncExitStack
@@ -42,9 +43,22 @@ VOICE_RULES = (
     "例如‘购物清单已更新，日历失败。’‘日历结果未知，请先核实。’"
     "查询按实际结果简短回答，不用‘操作成功’代替查询答案。"
     "不加开场白、重复确认或‘还需要我帮忙吗’等结尾。"
-    "搜索开始时程序会播报‘好的，我查一查’，最终回答不要重复这句过渡话。"
+    "搜索开始时程序会播报‘我查一下’，最终回答不要重复这句过渡话。"
 )
 DUPLICATE_TOOLS = frozenset({"add_items", "create_reminder"})
+
+
+def search_answer(answer: str, found: bool) -> str:
+    """只有本轮确实拿到搜索结果，才在口语回答前报‘查到了’。"""
+    if not found:
+        return answer
+    if re.search(r"(?:没(?:有)?|未)(?:查到|找到|搜到)|搜索.{0,4}(?:失败|不可用)", answer):
+        return re.sub(r"^\s*查到了[，,。\s]*", "", answer, count=1)
+    if not answer.strip() or answer.lstrip().startswith("查到了"):
+        return answer
+    return "查到了，" + answer.lstrip()
+
+
 def web_search_tool(timezone: str) -> ToolUnionParam:
     """在 .env 加载后构建搜索工具；城市可选，不把空值传给 API。"""
     tool: dict[str, object] = {
@@ -370,15 +384,16 @@ class AlphaBrain:
         turn_ha_successes: list[bool] = []
         turn_action_replies: list[str | None] = []
         searched = False
+        search_found = False
 
         async def announce_search() -> None:
             nonlocal search_announced
             if search_announced:
                 return
             search_announced = True
-            logger.info("[搜索提示] 好的，我查一查。")
+            logger.info("[搜索提示] 我查一下。")
             if on_text is not None:
-                await on_text("好的，我查一查。")
+                await on_text("我查一下。")
 
         for request_index in range(1, 21 if on_text is not None else 11):
             # 设置轮数上限，避免模型一直调用工具而不结束；每次请求保留历史和本轮中间消息。
@@ -418,6 +433,8 @@ class AlphaBrain:
                     content = block.content
                     if not isinstance(content, list):
                         logger.warning("[搜索失败] %s", content.error_code)
+                    elif any(item.type == "web_search_result" for item in content):
+                        search_found = True
                 elif block.type == "text":
                     for citation in getattr(block, "citations", None) or []:
                         if citation.type == "web_search_result_location":
@@ -444,6 +461,7 @@ class AlphaBrain:
                         or any(block.type == "tool_use" and block.name != VOICE_REPLY
                                for block in response.content)):
                     raise RuntimeError("流式最终回答格式无效")
+                answer = search_answer(answer, search_found)
                 if mute_ha_summary:
                     assert on_signal is not None
                     await on_signal("ha_done")
@@ -465,6 +483,8 @@ class AlphaBrain:
                 answer = "".join(
                     block.text for block in response.content if block.type == "text"
                 )
+                if on_text is not None:
+                    answer = search_answer(answer, search_found)
                 if self.style == "text":
                     sources = dict.fromkeys(
                         (c.title or "来源", c.url)

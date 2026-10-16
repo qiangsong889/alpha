@@ -63,16 +63,32 @@ sentence-ending “，执行”) submits the current collection immediately afte
 speech/transcription completes. Ordinary phrases such as “提醒我执行” are not
 treated as the control command.
 
-After LiveKit commits the turn (and any optional collection), explicit web requests (“帮我搜一下”, “上网查”, “最新新闻”)
-first emit “好的，我查一查。” locally, before the brain POST. Local list/device
+After LiveKit commits the turn (and any optional collection), web requests
+(“帮我搜一下”, “上网查”, “帮我查一下…”, “最新新闻”)
+first emit “我查一下。” locally, before the brain POST. Local list/device
 queries and explicitly negated search requests do not trigger this heuristic.
-The prompt is synthesized as a separate finite TTS segment so the sentence
-tokenizer cannot hold it until the final answer arrives. Synthesis/playback and
-the brain request can overlap; the POST does not wait for playback completion.
+The prompt is synthesized as a separate finite TTS segment, accepting both the
+complete text and the version without its final period produced by LiveKit's
+default Markdown filter. The filter's delayed period is not read twice. This
+prevents either text filtering or sentence tokenization from holding the prompt
+until the final answer arrives. The brain POST and prompt synthesis run in
+parallel: the POST does not wait for a TTS first packet, `speaking`, or playback
+completion. The TTS node still finishes yielding the prompt's audio before
+yielding answer audio, preserving playback order without adding TTS latency
+to search latency. These guarantees concern the audio output pipeline, not
+an acoustic measurement of the physical speaker.
 The request carries `search_announced=true` to suppress the brain's search-start
 prompt. For searches missed by this narrow heuristic, the brain still prompts
 on its first actual search-start event. Misclassification is possible; this
 heuristic announces progress, not proof that a search actually succeeded.
+The immediately following search-related question (for example “台湾的呢” or
+“有没有别家”) can also trigger the local prompt. An unrelated or local-tool turn
+clears this context. Local list/device/weather queries and cancelled searches
+do not get a search prompt. This remains a heuristic, not full intent parsing.
+When this turn has nonempty successful web-search results, the final spoken
+answer starts with “查到了，…”. It is not added for search errors, empty results
+or answers explicitly saying no matching information was found; an existing
+“查到了” prefix is not repeated.
 
 Only in the optional collection mode, obvious unfinished endings (for example “然后……”, “还有”, “再帮我”, or
 “把牛奶” without an action) use a five-second continuation window instead

@@ -4,11 +4,11 @@ import asyncio
 import json
 import time
 import unittest
-from unittest.mock import AsyncMock, PropertyMock, patch
+from unittest.mock import AsyncMock, Mock, PropertyMock, patch
 
 import httpx
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, llm, stt, tokenize
+from livekit.agents import Agent, AgentSession, llm, stt, tokenize, tts
 from livekit.agents.voice import io
 from types import SimpleNamespace
 from array import array
@@ -31,6 +31,144 @@ async def collect(agent, context):
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    def test_log_search_phrases_and_contextual_followups_are_detected(self):
+        for text in ["帮我查一下家里附近好吃的中餐馆", "我帮我查一下Easville有没有RAS。"]:
+            self.assertTrue(explicit_web_request(text), text)
+        for text in ["有没有台湾的小吃的餐馆", "有没 没有台湾的小吃的餐馆。", "还有别家吗", "台湾的呢"]:
+            self.assertTrue(explicit_web_request(text, web_context=True), text)
+            self.assertFalse(explicit_web_request(text), text)
+        for text in ["查一下购物清单", "查一下客厅灯的状态", "查一下明天的天气", "不用查了", "算了"]:
+            self.assertFalse(explicit_web_request(text, web_context=True), text)
+
+    async def test_search_followup_is_announced_before_post_and_local_turn_resets_context(self):
+        requests = []
+        def handle(request):
+            requests.append(json.loads(request.content))
+            return stream_response("这是结果。")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
+            for text, expected_ack in [("帮我查一下家里附近好吃的中餐馆", True),
+                                       ("有没 没有台湾的小吃的餐馆。", True),
+                                       ("查一下购物清单", False), ("还有别家吗", False)]:
+                context = llm.ChatContext()
+                context.add_message(role="user", content=text)
+                output = agent.llm_node(context, [], None)
+                count = len(requests)
+                first = await anext(output)
+                if expected_ack:
+                    self.assertEqual(first, "我查一下。")
+                    self.assertEqual(len(requests), count)
+                else:
+                    self.assertEqual(first, "这是结果。")
+                _ = [part async for part in output]
+                self.assertEqual(requests[-1].get("search_announced", False), expected_ack)
+
+    async def test_backend_search_ack_enables_next_turn_followup(self):
+        async with httpx.AsyncClient(transport=httpx.MockTransport(
+                lambda request: stream_response("我查一下。"))) as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
+            context = llm.ChatContext()
+            context.add_message(role="user", content="附近有没有餐馆")
+            await collect(agent, context)
+            self.assertTrue(agent._web_context)
+
+    async def test_search_post_does_not_require_speaking_state(self):
+        session = SimpleNamespace(output=SimpleNamespace(audio_enabled=True, audio=object()),
+                                  on=Mock(), off=Mock())
+        requests = []
+        def handle(request):
+            requests.append(request)
+            return stream_response("查到了。")
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
+            context = llm.ChatContext()
+            context.add_message(role="user", content="上网查一下资料")
+            with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session):
+                output = agent.llm_node(context, [], None)
+                self.assertEqual(await anext(output), "我查一下。")
+                self.assertEqual(await asyncio.wait_for(anext(output), 0.5), "查到了。")
+                self.assertEqual([part async for part in output], [])
+                self.assertEqual(len(requests), 1)
+                session.on.assert_not_called()
+                session.off.assert_not_called()
+
+    async def test_real_session_plays_search_ack_while_brain_result_is_still_blocked(self):
+        release, requested, audible = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        tts_release = asyncio.Event()
+        synthesized = []
+
+        class SlowAnswer(httpx.AsyncByteStream):
+            async def __aiter__(self):
+                requested.set()
+                await release.wait()
+                yield '{"type":"delta","text":"查到结果了。"}\n{"type":"done"}\n'.encode()
+
+        class FakeStream(tts.ChunkedStream):
+            async def _run(self, output_emitter):
+                synthesized.append(self.input_text)
+                if self.input_text == "我查一下。":
+                    await tts_release.wait()  # 模拟 TTS 首包慢，但不应挡住搜索请求。
+                output_emitter.initialize(request_id="fake", sample_rate=24000,
+                                          num_channels=1, mime_type="audio/pcm", frame_size_ms=20)
+                output_emitter.push(bytes(4800))
+                output_emitter.end_input()
+
+        class FakeTTS(tts.TTS):
+            def __init__(self):
+                super().__init__(capabilities=tts.TTSCapabilities(streaming=False),
+                                 sample_rate=24000, num_channels=1)
+
+            def synthesize(self, text, *, conn_options):
+                return FakeStream(tts=self, input_text=text, conn_options=conn_options)
+
+        class Sink(io.AudioOutput):
+            def __init__(self):
+                super().__init__(label="ack-order-test", capabilities=io.AudioOutputCapabilities(pause=False))
+                self.duration = 0
+
+            async def capture_frame(self, frame):
+                await super().capture_frame(frame)
+                if self.duration == 0:
+                    self.on_playback_started(created_at=time.time())
+                self.duration += frame.duration
+                audible.set()
+
+            def flush(self):
+                super().flush()
+                self.on_playback_finished(playback_position=self.duration, interrupted=False)
+
+            def clear_buffer(self):
+                self.on_playback_finished(playback_position=self.duration, interrupted=True)
+
+        def handle_request(request):
+            self.assertFalse(audible.is_set(), "TTS 仍被测试阻塞，查询应已并行发起")
+            return httpx.Response(200, stream=SlowAnswer())
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle_request)) as client:
+            adapter = tts.StreamAdapter(tts=FakeTTS(), sentence_tokenizer=tokenize.blingfire.SentenceTokenizer(
+                min_sentence_len=4, stream_context_len=2, retain_format=True))
+            session = AgentSession(tts=adapter, turn_handling={"interruption": {"enabled": False}})
+            session.output.audio = Sink()
+            handle = None
+            try:
+                await session.start(agent=AlphaVoiceAgent(client, collection_window_s=0))
+                handle = session.generate_reply(user_input="帮我查一下家里附近好吃的中餐馆")
+                await asyncio.wait_for(requested.wait(), 1)
+                self.assertFalse(audible.is_set())
+                tts_release.set()
+                await asyncio.wait_for(audible.wait(), 1)
+                self.assertFalse(release.is_set())
+                self.assertEqual(synthesized, ["我查一下。"])
+            finally:
+                tts_release.set()
+                release.set()
+                if handle is not None:
+                    await handle
+                await session.aclose()
+                await adapter.aclose()
+            self.assertEqual(synthesized, ["我查一下。", "查到结果了。"])
+
     async def test_default_uses_livekit_turn_without_extra_window_or_rule_prompt(self):
         requests = []
         def handle(request):
@@ -66,9 +204,9 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                                num_channels=1, samples_per_channel=1)
 
         async def text():
-            yield "好的，我查一查。"
+            yield "我查一下。"
             await release.wait()
-            yield "查到结果了。"
+            yield "查到了。"
 
         async def synthesize(agent, stream, settings):
             inputs.append("".join([part async for part in stream]))
@@ -79,10 +217,10 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(Agent.default, "tts_node", side_effect=synthesize):
                 output = agent.tts_node(text(), None)
                 self.assertIs(await asyncio.wait_for(anext(output), 1), frame)
-                self.assertEqual(inputs, ["好的，我查一查。"])
+                self.assertEqual(inputs, ["我查一下。"])
                 release.set()
                 self.assertEqual([f async for f in output], [frame])
-                self.assertEqual(inputs, ["好的，我查一查。", "查到结果了。"])
+                self.assertEqual(inputs, ["我查一下。", "查到了。"])
 
     def test_explicit_search_detection_excludes_local_queries_and_negation(self):
         for text in ["帮我搜一下苹果发布会", "上网查一下天气", "查一下最新新闻", "今天有什么新闻"]:
@@ -101,7 +239,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             context = llm.ChatContext()
             context.add_message(role="user", content="帮我搜一下最新新闻")
             output = agent.llm_node(context, [], None)
-            self.assertEqual(await anext(output), "好的，我查一查。")
+            self.assertEqual(await anext(output), "我查一下。")
             self.assertEqual(requests, [])
             self.assertEqual("".join([part async for part in output]), "查到新闻了。")
         self.assertEqual(requests, [{"text": "帮我搜一下最新新闻", "search_announced": True}])
@@ -113,7 +251,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             context = llm.ChatContext()
             context.add_message(role="user", content="上网查一下天气")
             output = agent.llm_node(context, [], None)
-            self.assertEqual(await anext(output), "好的，我查一查。")
+            self.assertEqual(await anext(output), "我查一下。")
             await output.aclose()
 
     async def test_incomplete_prompt_does_not_call_brain_then_continuation_submits(self):

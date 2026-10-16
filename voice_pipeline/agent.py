@@ -46,18 +46,28 @@ load_dotenv(DIRECTORY.parent / ".env")
 
 logger = logging.getLogger("alpha.voice_pipeline")
 BRAIN_URL = "http://127.0.0.1:8765/ask/stream"
+SEARCH_ACK = "我查一下。"
 server = AgentServer()
 
 
-def explicit_web_request(text: str) -> bool:
-    """只匹配明确联网说法；不把查清单、查设备状态等本地查询当成搜索。"""
+def explicit_web_request(text: str, *, web_context: bool = False) -> bool:
+    """识别搜索表达和紧接搜索的追问；这是本地启发式，不做模型推理。"""
     for clause in re.split(r"[，。！？；,;!?]", text):
-        if re.search(r"(?:不要|不用|别|別|不必|无需|無需).{0,8}(?:搜|上网|上網|联网|聯網|查)", clause):
+        if re.search(r"(?:不要|不用|不需要|别|別|不必|无需|無需).{0,8}(?:搜|上网|上網|联网|聯網|查)", clause):
+            continue
+        if re.fullmatch(r"\s*(?:算了|不用了|取消|等等|等一下|我还没说完)\s*", clause):
             continue
         if re.search(
             r"搜索|搜一下|搜一搜|(?:上网|上網|联网|聯網|网上|網上|网络上).{0,8}(?:查|搜)"
             r"|(?:最新|今天|今日).{0,6}(?:新闻|新聞|消息|资讯|資訊)", clause
         ):
+            return True
+        # 模糊的“查一下”和追问只有在不是本地工具问题时才提前提示。
+        if re.search(r"清单|清單|待办|待辦|日历|日曆|提醒|购物|購物|灯|燈|空调|空調|窗帘|窗簾|设备|設備|天气|天氣|气温|氣溫", clause):
+            continue
+        if re.search(r"查一下|查一查|查查|查找|找一下|找一找|推荐|推薦", clause):
+            return True
+        if web_context and re.search(r"有没有|有没|有沒有|有沒|没有|沒有|还有|還有|哪[个個家]|换|換|呢|怎么|怎麼|如何", clause):
             return True
     return False
 
@@ -97,6 +107,7 @@ class AlphaVoiceAgent(Agent):
         )
         self.http_client = http_client
         self.interruptions = SpeechGate()
+        self._web_context = False
         # 默认只由 LiveKit 判断轮次结束，不再叠加业务层的静音计时。
         # 显式传 window 参数供旧窗口的回归测试使用；运行时可通过环境开关对比。
         self.collection_enabled = (collection_window_s is not None
@@ -162,12 +173,24 @@ class AlphaVoiceAgent(Agent):
         async def head() -> AsyncIterator[str]:
             yield first
 
-        if first == "好的，我查一查。":
+        if first.strip().rstrip("。") in {SEARCH_ACK.rstrip("。"), "好的，我查一查"}:
+            pending_period = not first.strip().endswith("。")
+            first = first.strip().rstrip("。") + "。"
             # 单句分词器默认会留住最后一句等后文；把固定提示作为独立、已结束的
-            # TTS 输入，才能在大脑结果回来之前合成播放，不被整段回答拖住。
+            # TTS 输入。LiveKit 的 Markdown 过滤器还可能单独扣住句尾句号，
+            # 所以不能只匹配带句号的完整原文。
             async for frame in Agent.default.tts_node(self, head(), model_settings):
                 yield frame
-            rest = iterator
+
+            async def after_ack() -> AsyncIterator[str]:
+                nonlocal pending_period
+                async for part in iterator:
+                    if pending_period and part:
+                        part = part.removeprefix("。")
+                        pending_period = False
+                    if part:
+                        yield part
+            rest = after_ack()
         else:
             async def combined() -> AsyncIterator[str]:
                 yield first
@@ -198,11 +221,15 @@ class AlphaVoiceAgent(Agent):
                     yield prompt  # 本地生成追问，走现有 TTS，不请求大脑或执行工具。
                 return
         # 固定进度提示先送入 LiveKit 的 TTS，再请求大脑；不是模型生成的答案。
-        announced = explicit_web_request(text)
+        announced = explicit_web_request(text, web_context=self._web_context)
+        logger.info("[搜索判断] 提前提示=%s ｜ 上轮搜索=%s", announced, self._web_context)
+        self._web_context = announced  # 闲聊或本地任务会结束搜索追问上下文。
         payload: dict[str, str | bool] = {"text": text}
         if announced:
-            logger.info("[搜索提示] 明确联网请求，先提示再交给大脑")
-            yield "好的，我查一查。"
+            logger.info("[搜索提示] 先输出提示文字，TTS 与查询并行")
+            # tts_node 将固定提示独立合成，并按顺序播放提示和答案；
+            # 此处不等待 TTS 首包或 speaking 状态，避免串行增加查询延迟。
+            yield SEARCH_ACK
             payload["search_announced"] = True
         # 窗口只能阻止尚未提交的请求；发出 POST 后不能撤回已执行的操作。
         started = time.perf_counter()
@@ -222,6 +249,8 @@ class AlphaVoiceAgent(Agent):
                         if not isinstance(delta, str):
                             raise ValueError("文字增量必须是字符串")
                         if delta:
+                            if delta.startswith(SEARCH_ACK):
+                                self._web_context = True  # 未提前识别、由大脑发出的实际搜索提示。
                             if not answer_parts:
                                 logger.info("[大脑] 首段文字 %.2fs", time.perf_counter() - started)
                             answer_parts.append(delta)
@@ -247,6 +276,7 @@ class AlphaVoiceAgent(Agent):
             yield "这次没能拿到完整结果，操作可能已经生效，请先查询确认。"
             return
         logger.info("[大脑] 完整回答 %.2fs ｜ Alpha：%s", time.perf_counter() - started, "".join(answer_parts))
+        self._web_context = self._web_context or announced
 
 
 def log_conversation(event: ConversationItemAddedEvent) -> None:

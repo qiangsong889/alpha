@@ -37,6 +37,26 @@ class FakeWorker:
 
 
 class BrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_result_prefix_requires_nonempty_success_and_is_not_repeated(self):
+        await self.brain.start()
+        for result, answer, expected in [
+            ([], "没有找到相关资料。", "没有找到相关资料。"),
+            (NS(type="web_search_tool_result_error", error_code="unavailable"), "搜索暂时不可用。", "搜索暂时不可用。"),
+            (self.search_blocks()[1].content, "资料说明可以这样做。", "查到了，资料说明可以这样做。"),
+            (self.search_blocks()[1].content, "查到了，资料说明可以这样做。", "查到了，资料说明可以这样做。"),
+            (self.search_blocks()[1].content, "没查到 Eastvale 有叫 RAS 的餐馆。", "没查到 Eastvale 有叫 RAS 的餐馆。"),
+            (self.search_blocks()[1].content, "查到了，没查到对应的餐馆。", "没查到对应的餐馆。"),
+        ]:
+            with self.subTest(expected=expected):
+                blocks = self.search_blocks()
+                blocks[1].content = result
+                voice = NS(type="tool_use", name=module.VOICE_REPLY, id="answer", input={"answer": answer})
+                self.client.messages.stream = Mock(return_value=self.fake_stream(reply([*blocks, voice], "tool_use")))
+                emit = AsyncMock()
+                self.assertEqual(await self.brain.ask("上网查资料", on_text=emit), expected)
+                emit.assert_awaited_once_with(expected)
+        self.executor.assert_not_awaited()
+
     async def test_web_search_location_loaded_on_start_from_environment(self):
         with patch.dict(module.os.environ, {"HOME_CITY": " Sunnyvale ", "HOME_REGION": " CA ",
                                             "HOME_COUNTRY": " US "}):
@@ -94,19 +114,19 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         ])
         emit, signal = AsyncMock(), AsyncMock()
         await self.brain.ask("洛杉矶今天适合出门吗", on_text=emit, on_signal=signal)
-        emit.assert_awaited_once_with("预报有雨，出门记得带伞。")
+        emit.assert_awaited_once_with("查到了，预报有雨，出门记得带伞。")
         signal.assert_not_called()
         self.executor.assert_awaited_once_with("homeassistant__GetLiveContext", {})
 
     async def test_preannounced_search_does_not_repeat_ack(self):
         await self.brain.start()
         event = NS(type="content_block_start", content_block=self.search_blocks()[0])
-        call = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": "查到结果了。"}, id="final")
+        call = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": "查到了。"}, id="final")
         self.client.messages.stream = Mock(return_value=self.fake_stream(
             reply([*self.search_blocks(), call], "tool_use"), [event, event]))
         emit = AsyncMock()
         await self.brain.ask("搜索新闻", on_text=emit, search_announced=True)
-        emit.assert_awaited_once_with("查到结果了。")
+        emit.assert_awaited_once_with("查到了。")
 
     async def test_search_ack_is_sent_before_search_finishes_and_only_once_per_turn(self):
         await self.brain.start()
@@ -116,20 +136,20 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.client.messages.stream = Mock(side_effect=[
             self.fake_stream(reply(blocks, "pause_turn"), [event, event], gate, arrived),
             self.fake_stream(reply([NS(type="tool_use", name=module.VOICE_REPLY,
-                id="final", input={"answer": "查到结果了。"})], "tool_use"), [event]),
+                id="final", input={"answer": "查到了。"})], "tool_use"), [event]),
         ])
         emit = AsyncMock()
         task = asyncio.create_task(self.brain.ask("搜索最新消息", on_text=emit))
         try:
             await asyncio.wait_for(arrived.wait(), 1)
             self.assertFalse(task.done())
-            emit.assert_awaited_once_with("好的，我查一查。")
+            emit.assert_awaited_once_with("我查一下。")
         finally:
             gate.set()
             answer = await task
-        self.assertEqual(answer, "查到结果了。")
-        self.assertEqual([c.args[0] for c in emit.await_args_list], ["好的，我查一查。", "查到结果了。"])
-        self.assertEqual(self.brain.messages[-1]["content"], "查到结果了。")
+        self.assertEqual(answer, "查到了。")
+        self.assertEqual([c.args[0] for c in emit.await_args_list], ["我查一下。", "查到了。"])
+        self.assertEqual(self.brain.messages[-1]["content"], "查到了。")
         self.executor.assert_not_awaited()
 
     def search_blocks(self):
@@ -153,12 +173,12 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         await self.brain.start()
         code = NS(type="server_tool_use", id="code1", name="code_execution", input={"code": "filter results"})
         result = NS(type="code_execution_tool_result", tool_use_id="code1", content={})
-        voice = NS(type="tool_use", name=module.VOICE_REPLY, id="final", input={"answer": "查到结果了。"})
+        voice = NS(type="tool_use", name=module.VOICE_REPLY, id="final", input={"answer": "查到了。"})
         self.client.messages.stream = Mock(return_value=self.fake_stream(reply(
             [code, result, *self.search_blocks(), voice], "tool_use")))
         emit = AsyncMock()
-        self.assertEqual(await self.brain.ask("搜索新闻", on_text=emit), "查到结果了。")
-        emit.assert_awaited_once_with("查到结果了。")
+        self.assertEqual(await self.brain.ask("搜索新闻", on_text=emit), "查到了。")
+        emit.assert_awaited_once_with("查到了。")
         self.assertEqual(self.brain.messages[-1]["content"][:2], [code, result])
         self.executor.assert_not_awaited()
 
@@ -181,7 +201,7 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.client.messages.stream = Mock(return_value=self.fake_stream(reply([*blocks, call], "tool_use")))
         emit = AsyncMock()
         await self.brain.ask("搜索新闻", on_text=emit)
-        emit.assert_awaited_once_with("据官方新闻，今天有更新。")
+        emit.assert_awaited_once_with("查到了，据官方新闻，今天有更新。")
         self.assertEqual(self.brain.messages[-1]["content"][:2], blocks)
         self.assertEqual(self.brain.messages[-1]["content"][1].content[0].encrypted_content, "must-preserve")
         self.executor.assert_not_awaited()
@@ -209,7 +229,7 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         ])
         emit = AsyncMock()
         await self.brain.ask("搜索最新消息", on_text=emit)
-        emit.assert_awaited_once_with("官方有更新。")
+        emit.assert_awaited_once_with("查到了，官方有更新。")
         self.assertTrue(self.brain.messages[2]["content"][0]["is_error"])
         self.assertEqual(self.brain.messages[2]["content"][0]["tool_use_id"], "early")
         self.executor.assert_not_awaited()
@@ -222,7 +242,7 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
             self.fake_stream(reply([*self.search_blocks(), voice], "tool_use"))])
         emit, signal = AsyncMock(), AsyncMock()
         await self.brain.ask("开灯并搜索新闻", on_text=emit, on_signal=signal)
-        emit.assert_awaited_once_with("灯已打开，查到新闻了。")
+        emit.assert_awaited_once_with("查到了，灯已打开，查到新闻了。")
         signal.assert_not_awaited()
         self.executor.assert_awaited_once()
 

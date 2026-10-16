@@ -15,7 +15,7 @@ The current implementation includes a command-line agent connected to both Home 
   MCP server or search API key is needed. Search queries, errors and cited sources
   appear in brain logs; text answers include source links, while voice answers
   stay brief and do not read URLs. For explicit requests such as “帮我搜一下”,
-  “上网查” or “最新新闻”, LiveKit emits “好的，我查一查。” before the brain
+  “上网查” or “最新新闻”, LiveKit emits “我查一下。” before the brain
   POST. It sends `search_announced=true` so the brain does not repeat it.
   Otherwise, the first streamed search-start event triggers the same phrase.
   This fixed progress phrase is emitted once and is
