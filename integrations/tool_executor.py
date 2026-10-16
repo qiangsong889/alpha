@@ -12,13 +12,13 @@ from mcp.types import CallToolResult, TextContent
 from integrations.mcp_client import call_ha_tool, device_action_succeeded
 from integrations.operations import Operation
 from integrations.personal_worker import PersonalWorker
-from integrations.tool_gateway import CURRENT_OPERATION_ID, Executor, ExecutorResult, ToolNotSent, ToolOutcomeUnknown
-from integrations.tool_policy import INTERNAL_TOOLS, get_policy
+from integrations.tool_gateway import CURRENT_OPERATION_ID, EMAIL_CONFIRMATION, Executor, ExecutorResult, ToolNotSent, ToolOutcomeUnknown
+from integrations.tool_policy import GOOGLE_TOOLS, INTERNAL_TOOLS, get_policy
 
 
 HA_ACTION_TOOLS = {"intent__HassTurnOn", "intent__HassTurnOff", "light__HassLightSet"}
 HA_DEVICE_TOOLS = HA_ACTION_TOOLS | {"homeassistant__GetLiveContext"}
-PERSONAL_TOOLS = {"list_items", "list_reminders", "get_weather", "add_items", "complete_items", "create_reminder"}
+PERSONAL_TOOLS = {"list_items", "list_reminders", "get_weather", "add_items", "complete_items", "create_reminder"} | GOOGLE_TOOLS
 
 
 def make_executor(
@@ -39,7 +39,12 @@ def make_executor(
                 raise ToolNotSent("个人服务未启动或已关闭，工具请求尚未发出")
             # 即使这里超时，也可能已经入队或执行，不能把它包装成 ToolNotSent。
             sent_arguments = dict(arguments)
-            if name in {"add_items", "create_reminder"} and CURRENT_OPERATION_ID.get():
+            if name in {"send_email", "reply_email"}:
+                token = EMAIL_CONFIRMATION.get()
+                if not token:
+                    raise ToolNotSent("邮件尚未经过用户确认，本次没有发送")
+                sent_arguments.update(confirmed=True, confirmation_token=token)
+            if name in {"add_items", "create_reminder", "create_event"} and CURRENT_OPERATION_ID.get():
                 sent_arguments["operation_id"] = CURRENT_OPERATION_ID.get()
             result = await worker.call(name, sent_arguments)
         else:

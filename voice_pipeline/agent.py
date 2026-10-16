@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import json
+import math
 import os
 import re
 import time
@@ -33,10 +34,14 @@ if __package__:
     from .collection import RequestCollection
     from .interruptions import SpeechGate, is_meaningful
     from .sounds import confirmation_tone
+    from .search_router import JevSearchRouter
+    from .turn_detector import JevTurnDetector
 else:
     from collection import RequestCollection
     from interruptions import SpeechGate, is_meaningful
     from sounds import confirmation_tone
+    from search_router import JevSearchRouter
+    from turn_detector import JevTurnDetector
 
 
 DIRECTORY = Path(__file__).resolve().parent
@@ -108,10 +113,30 @@ class AlphaVoiceAgent(Agent):
         self.http_client = http_client
         self.interruptions = SpeechGate()
         self._web_context = False
+        gateway_key = os.getenv("AI_GATEWAY_API_KEY", "").strip()
+        provider = os.getenv("JEV_PROVIDER", "vercel" if gateway_key else "typesafe").strip().lower()
+        key = gateway_key if provider == "vercel" else os.getenv("TYPESAFE_API_KEY", "").strip()
+        self.search_router_mode = os.getenv("ALPHA_SEARCH_ROUTER", "jev" if key else "rules").strip().lower()
+        if self.search_router_mode not in {"jev", "rules", "off"}:
+            raise ValueError("ALPHA_SEARCH_ROUTER 必须是 jev、rules 或 off")
+        self.search_router = JevSearchRouter(
+            http_client, api_key=key, provider=provider, model=os.getenv("JEV_MODEL") or None,
+            timeout_s=float(os.getenv("JEV_TIMEOUT_MS", "300")) / 1000,
+            min_confidence=float(os.getenv("JEV_MIN_CONFIDENCE", "0.8")),
+        )
+        self.jev_interruptions = os.getenv("ALPHA_JEV_INTERRUPTIONS", "1" if key else "0") == "1"
+        self.answer_window_s = float(os.getenv("ALPHA_ANSWER_WINDOW_SECONDS", "10"))
+        if not math.isfinite(self.answer_window_s) or self.answer_window_s <= 0:
+            raise ValueError("ALPHA_ANSWER_WINDOW_SECONDS 必须大于零且有限")
+        self._reply_text = ""
+        self._question_finished_at = 0.0
+        self._question_deadline = 0.0
         # 默认只由 LiveKit 判断轮次结束，不再叠加业务层的静音计时。
         # 显式传 window 参数供旧窗口的回归测试使用；运行时可通过环境开关对比。
         self.collection_enabled = (collection_window_s is not None
                                    or os.getenv("ALPHA_COLLECTION_ENABLED", "0") == "1")
+        if os.getenv("ALPHA_TURN_DETECTOR", "livekit").strip().lower() == "jev":
+            self.collection_enabled = False  # 替换轮次模型，不叠加旧的收集窗口。
         self.collection = RequestCollection(
             float(os.getenv("ALPHA_COLLECTION_SECONDS", "2"))
             if collection_window_s is None else collection_window_s,
@@ -120,14 +145,51 @@ class AlphaVoiceAgent(Agent):
 
     async def on_enter(self) -> None:
         self.interruptions.attach(self.session)
+        self.session.on("conversation_item_added", self._reply_played)
         if self.collection_enabled:
             self.session.on("user_state_changed", self._collection_user_state)
 
     async def on_exit(self) -> None:
         self.interruptions.close()
+        self.session.off("conversation_item_added", self._reply_played)
         if self.collection_enabled:
             self.session.off("user_state_changed", self._collection_user_state)
         self.collection.close()
+
+    def _reply_played(self, event: ConversationItemAddedEvent) -> None:
+        # 当前安装的 LiveKit 在实际播放结束后发出 assistant 的此事件。
+        item = event.item
+        if not isinstance(item, llm.ChatMessage) or item.role != "assistant":
+            return
+        self._question_deadline = 0.0
+        text = (item.text_content or "").strip()
+        if not item.interrupted and re.search(r"[？?]$|(?:吗|嗎|呢)[。！!]*$", text):
+            self._question_finished_at = time.monotonic()
+            self._question_deadline = self._question_finished_at + self.answer_window_s
+
+    async def _accept_transcript(self, text: str) -> bool:
+        if not self.jev_interruptions:
+            return True  # 无 key 或显式关闭实验时，保持原先的转写打断行为。
+        if re.match(r"^\s*(?:(?:嘿|你好|hey)[，,\s]*)?(?:alpha\b|阿尔法|阿爾法)", text, re.I):
+            logger.info("[打断判断] 明确呼叫 Alpha，接收")
+            return True
+        now = time.monotonic()
+        started = self.interruptions.utterance_started_at
+        in_answer_window = (now <= self._question_deadline and
+                            (started is None or started >= self._question_finished_at))
+        if in_answer_window and re.fullmatch(
+                r"\s*(?:对|對|是的|不是|不对|不對|好|好的|可以|不用了|不要了|取消|嗯)[。！!，,\s]*", text):
+            logger.info("[打断判断] 提问后的短回答，接收")
+            return True
+        overlapping = self.interruptions.overlapped or self.session.agent_state == "speaking"
+        if not overlapping:
+            return True  # 目前尚未接入待机时的 wake word 门控。
+        # 在 STT 的 yield 之前决定；丢弃的文字不会进入 LiveKit 历史或 AlphaBrain。
+        decision = await self.search_router.interruption(
+            text, assistant=self._reply_text, question_open=in_answer_window)
+        logger.info("[打断判断] %s", "对 Alpha 说话，接收" if decision is True
+                    else "旁聊、附和或无法确定，继续汇报")
+        return decision is True
 
     def _collection_user_state(self, event: UserStateChangedEvent) -> None:
         if event.new_state == "speaking":
@@ -151,9 +213,19 @@ class AlphaVoiceAgent(Agent):
                 text = event.alternatives[0].text if event.alternatives else ""
                 self.interruptions.restore()
                 if not is_meaningful(text):
+                    self.interruptions.overlapped = False
+                    self.interruptions.utterance_started_at = None
                     self.collection.transcript_resolved()
                     logger.info("[忽略] 非语言转写 %r，恢复音量，继续汇报", text)
                     continue  # 必须在进入 LiveKit 的取消逻辑之前丢弃。
+                accepted = await self._accept_transcript(text)
+                self.interruptions.overlapped = False
+                self.interruptions.utterance_started_at = None
+                self.interruptions.restore()
+                if not accepted:
+                    self.collection.transcript_resolved()
+                    continue
+                self._question_deadline = 0.0  # 回答机会只用于当前这一句。
                 if self.session.agent_state in {"speaking", "thinking"}:
                     logger.info("[确认打断] 有效转写 %r，停止旧回答", text)
                 # 状态可能仍显示 listening，但队列中已有回答；也要取消这些旧任务。
@@ -210,6 +282,8 @@ class AlphaVoiceAgent(Agent):
         text = last_user_text(chat_ctx)
         if not text:
             return
+        self._reply_text = ""
+        self._question_deadline = 0.0
         if self.collection_enabled:
             if not self.collection.parts:
                 # console 文字输入/直接 generate_reply 不经过语音 turn-completed hook。
@@ -221,8 +295,20 @@ class AlphaVoiceAgent(Agent):
                     yield prompt  # 本地生成追问，走现有 TTS，不请求大脑或执行工具。
                 return
         # 固定进度提示先送入 LiveKit 的 TTS，再请求大脑；不是模型生成的答案。
-        announced = explicit_web_request(text, web_context=self._web_context)
-        logger.info("[搜索判断] 提前提示=%s ｜ 上轮搜索=%s", announced, self._web_context)
+        if self.search_router_mode == "jev":
+            recent = [{"role": item.role, "content": item.text_content or ""}
+                      for item in chat_ctx.items if isinstance(item, llm.ChatMessage)
+                      and item.role in {"user", "assistant"}]
+            if recent and recent[-1]["role"] == "user":
+                recent.pop()  # 最新请求已在 request 字段里，不重复传一份。
+            announced = await self.search_router.classify(text, recent) is True
+            # 低置信度、超时、失败不再套关键词规则，直接把原请求交给 Claude。
+        elif self.search_router_mode == "rules":
+            announced = explicit_web_request(text, web_context=self._web_context)
+        else:
+            announced = False
+        logger.info("[搜索判断] mode=%s 提前提示=%s ｜ 上轮搜索=%s",
+                    self.search_router_mode, announced, self._web_context)
         self._web_context = announced  # 闲聊或本地任务会结束搜索追问上下文。
         payload: dict[str, str | bool] = {"text": text}
         if announced:
@@ -254,6 +340,7 @@ class AlphaVoiceAgent(Agent):
                             if not answer_parts:
                                 logger.info("[大脑] 首段文字 %.2fs", time.perf_counter() - started)
                             answer_parts.append(delta)
+                            self._reply_text = "".join(answer_parts)
                             yield delta  # LiveKit 按句送给 TTS，不再等待全部回答。
                     elif event.get("type") == "signal":
                         if event.get("name") != "ha_done":
@@ -305,7 +392,18 @@ def log_metrics(event: MetricsCollectedEvent) -> None:
         logger.info("[分段耗时] TTS 首个音频包 %.2fs", metric.ttfb)
 
 
-def create_session() -> AgentSession:
+def create_session(*, jev_router: JevSearchRouter | None = None) -> AgentSession:
+    turn_mode = os.getenv("ALPHA_TURN_DETECTOR", "livekit").strip().lower()
+    if turn_mode not in {"livekit", "jev"}:
+        raise ValueError("ALPHA_TURN_DETECTOR 必须是 livekit 或 jev")
+    detector: MultilingualModel | JevTurnDetector = MultilingualModel()
+    if turn_mode == "jev":
+        if jev_router is None or not jev_router.api_key:
+            raise ValueError("Jev 轮次检测需要已配置的 Jev API key")
+        detector = JevTurnDetector(jev_router, fallback=detector)
+    max_delay = float(os.getenv("ALPHA_TURN_MAX_DELAY", "5" if turn_mode == "jev" else "3"))
+    if not math.isfinite(max_delay) or max_delay < 0.5:
+        raise ValueError("ALPHA_TURN_MAX_DELAY 必须是不小于 0.5 的有限数字")
     return AgentSession(
         vad=silero.VAD.load(min_speech_duration=0.1),
         stt=openai.STT(
@@ -326,8 +424,8 @@ def create_session() -> AgentSession:
             min_sentence_len=4, stream_context_len=2, retain_format=True,
         )),
         turn_handling={
-            "turn_detection": MultilingualModel(),
-            "endpointing": {"min_delay": 0.5, "max_delay": 3.0},
+            "turn_detection": detector,
+            "endpointing": {"min_delay": 0.5, "max_delay": max_delay},
             # 大脑的请求会执行真实操作，绝不能在用户轮次确认之前提前生成。
             "preemptive_generation": {"enabled": False},
             "interruption": {
@@ -352,12 +450,14 @@ async def entrypoint(ctx: JobContext) -> None:
     health = await http_client.get("http://127.0.0.1:8765/health", timeout=5.0)
     health.raise_for_status()
 
-    session = create_session()
+    agent = AlphaVoiceAgent(http_client)
+    session = create_session(jev_router=agent.search_router)
     session.on("user_input_transcribed", log_transcript)
     session.on("conversation_item_added", log_conversation)
     session.on("metrics_collected", log_metrics)
-    await session.start(agent=AlphaVoiceAgent(http_client), room=ctx.room)
-    logger.info("[就绪] 中文语音 ｜ Silero + 多语言轮次检测 ｜ OpenAI STT/TTS ｜ AlphaBrain")
+    await session.start(agent=agent, room=ctx.room)
+    logger.info("[就绪] 中文语音 ｜ Silero + %s 轮次检测 ｜ OpenAI STT/TTS ｜ AlphaBrain",
+                os.getenv("ALPHA_TURN_DETECTOR", "livekit"))
 
 
 if __name__ == "__main__":

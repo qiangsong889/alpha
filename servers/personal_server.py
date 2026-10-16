@@ -1,6 +1,6 @@
-"""Google Tasks MCP Server。启动：alpha/.venv/bin/python alpha/personal_server.py。
+"""Google 个人服务 MCP Server。启动：.venv/bin/python -m servers.personal_server。
 
-使用 MCP SDK 2.3.0 的 MCPServer；请先运行 google_auth.py 完成授权。
+使用 MCP SDK 2.3.0 的 MCPServer；请先运行 python -m servers.google_auth 完成授权。
 """
 from datetime import datetime, timedelta, timezone
 import os
@@ -21,6 +21,7 @@ from opencc import OpenCC
 
 from servers.google_auth import get_credentials
 from servers import weather
+from servers.google_tools import register_google_tools
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -523,6 +524,9 @@ def complete_items(list_name: str, item_titles: list[str]) -> str:
         
     
     
+register_google_tools(mcp)
+
+
 if __name__ == "__main__":
     # 客户端启动此子进程后，经 stdin/stdout 收发 MCP 消息，不监听 HTTP 端口。
     mcp.run(transport="stdio")

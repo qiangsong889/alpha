@@ -31,6 +31,134 @@ async def collect(agent, context):
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        # 测试不能因为用户后来填入真实密钥而意外发出 Jev 请求。
+        env = patch.dict("os.environ", {"ALPHA_SEARCH_ROUTER": "rules", "TYPESAFE_API_KEY": "",
+                                       "AI_GATEWAY_API_KEY": "", "JEV_PROVIDER": "typesafe",
+                                       "ALPHA_JEV_INTERRUPTIONS": "0", "ALPHA_TURN_DETECTOR": "livekit"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    async def test_jev_gate_filters_before_livekit_or_brain_sees_text(self):
+        for decision in [True, False, None]:
+            with self.subTest(decision=decision):
+                async def events():
+                    yield stt.SpeechEvent(type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                                          alternatives=[stt.SpeechData(language="zh", text="小王晚上吃什么")])
+                async with httpx.AsyncClient(transport=httpx.MockTransport(
+                        lambda request: self.fail("STT 门控不应请求大脑"))) as client:
+                    agent = AlphaVoiceAgent(client)
+                    agent.jev_interruptions = True
+                    agent._reply_text = "购物清单里有牛奶。"
+                    agent.search_router.interruption = AsyncMock(return_value=decision)
+                    agent.interruptions.speech_started()
+                    session = SimpleNamespace(agent_state="speaking", interrupt=AsyncMock())
+                    with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session), \
+                            patch.object(Agent.default, "stt_node", return_value=events()):
+                        output = [event async for event in agent.stt_node(None, None)]
+                    self.assertEqual(len(output), int(decision is True))
+                    self.assertEqual(session.interrupt.await_count, int(decision is True))
+                    self.assertEqual(agent.interruptions.gain, 1.0)
+                    agent.search_router.interruption.assert_awaited_once_with(
+                        "小王晚上吃什么", assistant="购物清单里有牛奶。", question_open=False)
+
+    async def test_wake_name_bypasses_jev_and_question_window_accepts_short_answers(self):
+        async with httpx.AsyncClient() as client:
+            agent = AlphaVoiceAgent(client)
+            agent.jev_interruptions = True
+            agent.search_router.interruption = AsyncMock(return_value=False)
+            session = SimpleNamespace(agent_state="speaking")
+            with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session):
+                self.assertTrue(await agent._accept_transcript("Alpha，停一下"))
+                agent.search_router.interruption.assert_not_called()
+                with patch("agent.time.monotonic", return_value=100):
+                    agent._reply_played(ConversationItemAddedEvent(item=llm.ChatMessage(
+                        role="assistant", content=["你是说牛奶吗？"])))
+                with patch("agent.time.monotonic", return_value=105):
+                    self.assertTrue(await agent._accept_transcript("对。"))
+                    self.assertTrue(await agent._accept_transcript("不要了"))
+                agent.search_router.interruption.assert_not_called()
+                with patch("agent.time.monotonic", return_value=111):
+                    self.assertFalse(await agent._accept_transcript("对"))
+                agent.search_router.interruption.assert_awaited_once()
+
+    async def test_interrupted_question_does_not_open_answer_window(self):
+        async with httpx.AsyncClient() as client:
+            agent = AlphaVoiceAgent(client)
+            agent.jev_interruptions = True
+            agent.search_router.interruption = AsyncMock(return_value=False)
+            agent._reply_played(ConversationItemAddedEvent(item=llm.ChatMessage(
+                role="assistant", content=["要牛奶吗？"], interrupted=True)))
+            session = SimpleNamespace(agent_state="speaking")
+            with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session):
+                self.assertFalse(await agent._accept_transcript("对"))
+            self.assertEqual(agent._question_deadline, 0)
+
+    async def test_speech_that_started_during_report_stays_gated_after_playback_ends(self):
+        async with httpx.AsyncClient() as client:
+            agent = AlphaVoiceAgent(client)
+            agent.jev_interruptions = True
+            agent.search_router.interruption = AsyncMock(return_value=False)
+            agent.interruptions.overlapped = True
+            agent.interruptions.utterance_started_at = 99
+            with patch("agent.time.monotonic", return_value=100):
+                agent._reply_played(ConversationItemAddedEvent(item=llm.ChatMessage(
+                    role="assistant", content=["还有吗？"])))
+            session = SimpleNamespace(agent_state="listening")
+            with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session), \
+                    patch("agent.time.monotonic", return_value=101):
+                self.assertFalse(await agent._accept_transcript("对"))
+            agent.search_router.interruption.assert_awaited_once()
+
+    async def test_idle_requests_do_not_pay_extra_interruption_classification(self):
+        async with httpx.AsyncClient() as client:
+            agent = AlphaVoiceAgent(client)
+            agent.jev_interruptions = True
+            agent.search_router.interruption = AsyncMock()
+            session = SimpleNamespace(agent_state="listening")
+            with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session):
+                self.assertTrue(await agent._accept_transcript("买牛奶"))
+            agent.search_router.interruption.assert_not_called()
+
+    async def test_jev_controls_ack_and_never_blocks_forwarding_to_brain(self):
+        for decision in [True, False, None]:
+            requests = []
+            def handle(request):
+                requests.append(json.loads(request.content))
+                return stream_response("回答。")
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                agent = AlphaVoiceAgent(client, collection_window_s=0)
+                agent.search_router_mode = "jev"
+                agent.search_router.classify = AsyncMock(return_value=decision)
+                context = llm.ChatContext()
+                context.add_message(role="user", content="帮我查一下附近餐馆")
+                context.add_message(role="assistant", content="附近有中餐馆。")
+                context.add_message(role="user", content="台湾的呢？")
+                result = await collect(agent, context)
+                self.assertEqual(result, ("我查一下。" if decision is True else "") + "回答。")
+                self.assertEqual(requests, [{"text": "台湾的呢？", **({"search_announced": True} if decision is True else {})}])
+                agent.search_router.classify.assert_awaited_once_with("台湾的呢？", [
+                    {"role": "user", "content": "帮我查一下附近餐馆"},
+                    {"role": "assistant", "content": "附近有中餐馆。"},
+                ])
+
+    async def test_jev_timeout_goes_direct_to_brain_even_if_keyword_rule_would_match(self):
+        requests = []
+        async def handle(request):
+            if request.url.host == "api.typesafe.ai":
+                await asyncio.Future()
+            requests.append(json.loads(request.content))
+            return stream_response("大脑回答。")
+        with patch.dict("os.environ", {"ALPHA_SEARCH_ROUTER": "jev", "TYPESAFE_API_KEY": "fake",
+                                       "JEV_TIMEOUT_MS": "10"}):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                agent = AlphaVoiceAgent(client, collection_window_s=0)
+                context = llm.ChatContext()
+                context.add_message(role="user", content="帮我上网查一下资料")
+                result = await asyncio.wait_for(collect(agent, context), 0.5)
+        self.assertEqual(result, "大脑回答。")
+        self.assertEqual(requests, [{"text": "帮我上网查一下资料"}])
+
     def test_log_search_phrases_and_contextual_followups_are_detected(self):
         for text in ["帮我查一下家里附近好吃的中餐馆", "我帮我查一下Easville有没有RAS。"]:
             self.assertTrue(explicit_web_request(text), text)

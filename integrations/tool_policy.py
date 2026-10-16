@@ -11,7 +11,18 @@ class ToolPolicy:
     commit: Literal["immediate", "deferred", "confirm"]
 
 
+GOOGLE_READ_TOOLS = frozenset({"read_document", "search_drive", "read_drive_file", "list_calendars",
+                              "list_events", "search_email", "read_email", "get_youtube_analytics"})
+GOOGLE_WRITE_TOOLS = frozenset({"create_document", "append_document", "create_drive_folder",
+                               "create_event", "send_email", "reply_email"})
+GOOGLE_TOOLS = GOOGLE_READ_TOOLS | GOOGLE_WRITE_TOOLS
+EMAIL_TOOLS = frozenset({"send_email", "reply_email"})
+
+
 TOOL_POLICY: dict[str, ToolPolicy] = {
+    **{name: ToolPolicy(False, True, "immediate") for name in GOOGLE_READ_TOOLS},
+    **{name: ToolPolicy(True, False, "confirm" if name in EMAIL_TOOLS else "deferred") for name in GOOGLE_WRITE_TOOLS},
+    "prepare_email": ToolPolicy(False, True, "immediate"),
     "list_items": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
     "list_reminders": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
     "get_weather": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
@@ -35,7 +46,7 @@ TOOL_POLICY: dict[str, ToolPolicy] = {
 
 # 仅供代码根据执行记录构造撤销，不发布到 Claude/Qwen 的模型工具目录。
 INTERNAL_TOOLS = frozenset({"delete_task", "delete_reminder", "restore_task", "restore_reminder",
-                            "inspect_task", "inspect_reminder", "find_created_items"})
+                            "inspect_task", "inspect_reminder", "find_created_items", "prepare_email"})
 
 
 def get_policy(name: str) -> ToolPolicy | None:

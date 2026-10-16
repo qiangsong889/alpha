@@ -12,6 +12,8 @@ __pycache__/
 *.log
 .DS_Store
 token.json
+youtube_token.json
 credentials.json
+credentials_*.json
 client_secret*.json
 data/

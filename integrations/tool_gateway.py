@@ -9,6 +9,7 @@ from integrations.operations import Operation, OperationStatus, OperationStore
 from integrations.tool_policy import get_policy
 
 CURRENT_OPERATION_ID: ContextVar[str | None] = ContextVar("alpha_operation_id", default=None)
+EMAIL_CONFIRMATION: ContextVar[str | None] = ContextVar("alpha_email_confirmation", default=None)
 
 
 class ToolNotSent(RuntimeError):

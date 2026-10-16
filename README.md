@@ -2,7 +2,7 @@
 
 Alpha is a personal AI assistant under development. Its goal is to control home devices through natural language and connect personal services, such as tasks and calendars, through MCP. The project also provides hands-on practice with asynchronous Python, model tool calling, MCP, and OAuth.
 
-The current implementation includes a command-line agent connected to both Home Assistant and a local Google Tasks MCP server. Calendar support includes authorization, a basic read check, and reminder creation.
+The current implementation connects AlphaBrain and its voice/CLI frontends to Home Assistant and a local Google personal-services MCP server, including Tasks, Calendar, Docs, Drive, Gmail and YouTube Analytics.
 
 ## Current Features
 
@@ -64,7 +64,7 @@ The current allowlist is shown below. Available tools depend on what the Home As
 - Browser-based OAuth authorization, saved credentials in `token.json`, and automatic refresh of expired credentials.
 - Google Tasks API verification: list task list names and IDs.
 - Google Calendar API verification: retrieve up to three upcoming events from the primary calendar.
-- A local stdio MCP server exposing Google Tasks operations.
+- A local stdio MCP server exposing Google personal-services tools (see the tool list below).
 
 | MCP Tool | Input | Output |
 | --- | --- | --- |
@@ -140,13 +140,29 @@ Enter `exit`, `quit`, or `退出`, or press Ctrl+C to stop. Conversation history
 
 ## Google Authorization and API Verification
 
-Enable the Google Tasks API and Google Calendar API in your Google Cloud project. Configure the OAuth consent screen, create a desktop application OAuth client, and save its downloaded configuration as `credentials.json` in this directory. If the app is in testing mode, add the Google account used for authorization as a test user.
+Enable Google Tasks API, Google Calendar API, Google Docs API, Google Drive API, Gmail API and YouTube Analytics API in your Google Cloud project. Configure the OAuth consent screen, create a desktop application OAuth client, and save its downloaded configuration as `credentials.json` in this directory. If the app is in testing mode, add the Google account used for authorization as a test user.
 
-The code requests these scopes:
+Scopes are requested in **two separate OAuth flows**, using the same desktop
+client configuration. Google rejects `drive.file` combined with YouTube scopes
+in one request.
+
+Workspace (`token.json`):
 
 ```text
+https://www.googleapis.com/auth/calendar
 https://www.googleapis.com/auth/tasks
-https://www.googleapis.com/auth/calendar.events
+https://www.googleapis.com/auth/drive.readonly
+https://www.googleapis.com/auth/drive.file
+https://www.googleapis.com/auth/gmail.readonly
+https://www.googleapis.com/auth/gmail.send
+```
+
+YouTube (`youtube_token.json`):
+
+```text
+https://www.googleapis.com/auth/yt-analytics.readonly
+https://www.googleapis.com/auth/yt-analytics-monetary.readonly
+https://www.googleapis.com/auth/youtube.readonly
 ```
 
 Run:
@@ -155,11 +171,11 @@ Run:
 python -m servers.google_auth
 ```
 
-On the first run, a browser opens for Google sign-in and permission approval. A temporary local server receives the authorization callback on an available port. Credentials are saved to `token.json` and reused or refreshed on subsequent runs.
+On the first run, the script authorizes Workspace and YouTube sequentially in the browser. A temporary local server receives each authorization callback on an available port. Credentials are saved separately to `token.json` and `youtube_token.json`, then reused or refreshed independently on subsequent runs.
 
-The credentials belong to the account that grants authorization. The current implementation uses one `token.json` and is intended for local, single-user use.
+Credentials belong to the account that grants authorization. This is a local, single-user setup; the Workspace account and the YouTube channel are selected separately.
 
-Names such as `My Tasks` in this script's output represent task lists, not individual tasks. The Calendar check uses `events().list()`; Tasks entries are not returned as Calendar events. The requested `calendar.events` scope does not authorize `calendarList().list()`.
+Names such as `My Tasks` in this script's output represent task lists, not individual tasks. The Calendar check uses `events().list()`; Tasks entries are not returned as Calendar events. The full `calendar` scope now also permits listing calendars. Running the module performs authorization only; its optional `main()` function contains the Tasks/Calendar read checks. If saved credentials lack the new scopes, the authorization flow opens again without manually deleting `token.json`.
 
 ## Test Tasks Tools with MCP Inspector
 
@@ -461,3 +477,162 @@ Regression tests (no external API requests):
 ```bash
 .venv/bin/python -m unittest tests.test_brain -v
 ```
+
+
+## Google personal-service tools
+
+`servers/google_tools.py` holds the additional tool logic; `personal_server.py`
+registers it in the same stdio server. Alpha discovers these tools through MCP.
+No separate service or API key is needed beyond Google OAuth.
+
+| Service | Tools |
+| --- | --- |
+| Docs | `read_document`, `create_document`, `append_document` |
+| Drive | `search_drive`, `read_drive_file`, `create_drive_folder` |
+| Calendar | `list_calendars`, `list_events`, `create_event` |
+| Gmail | `search_email`, `read_email`, `send_email`, `reply_email` |
+| YouTube Analytics | `get_youtube_analytics` |
+
+Existing Tasks, reminder and weather tools remain available. Docs creation makes
+an empty document; append adds text to the first tab or a specified `tab_id`.
+Reads include nested tabs and table text. Drive search matches a filename keyword;
+reading supports Google Docs export and UTF-8 text/JSON/XML up to 2 MB, not PDF,
+Office files or images. Long text results are marked truncated at 20,000 characters.
+Search/list tools expose a next-page token; pass it back to continue.
+
+Calendar queries and event creation take `local_start` and `local_end` in
+`YYYY-MM-DDTHH:MM:SS` format, interpreted in `REMINDER_TIMEZONE`. Nonexistent or
+ambiguous DST times are rejected. `create_event` supports an explicit calendar,
+description and location, without invitations; use `create_reminder` for a simple
+popup reminder, not both for the same request. Calendar creations receive an
+internal operation ID that is hidden from the model's schema.
+
+Gmail uses only `gmail.readonly` and `gmail.send`. Reading does not mark mail read;
+there are no delete, trash, archive, draft or label-modification tools. Search
+accepts Gmail query syntax and returns metadata; `read_email` extracts plain text
+or HTML text without downloading attachments. Sending uses plain text, explicit
+recipients and the account's sender address. Reply uses Reply-To (or From), the
+original thread and RFC reply headers; it is not Reply All. Alpha is instructed
+to send only on an explicit user request, never on instructions embedded in mail
+or documents. Creating a draft for review in conversation does not send it.
+
+YouTube reports summarize the channel selected during OAuth, with an explicit
+inclusive date range. `include_revenue=true` includes estimated revenue in USD.
+Reporting dates use YouTube's Pacific reporting timezone; recent data may lag and
+empty results are not zero. Google's [reports.query documentation](https://developers.google.com/youtube/analytics/reference/reports/query)
+now additionally requires `youtube.readonly`; this scope is included alongside
+both Analytics scopes. Channel switching requires authorizing the intended channel.
+
+All new writes pass through ToolGateway and SQLite records. AlphaBrain suppresses
+identical successful non-email writes for ten minutes unless the user explicitly
+asks to repeat (`confirm_duplicate` is stripped before the MCP call). Emails use
+the separate mandatory confirmation flow below. Transport failures
+or HTTP 408/5xx after a write yield `unknown`, with no automatic retry; query to
+verify before trying again. HTTP permission/validation errors yield failures.
+Docs/Drive/mail creations do not have remote idempotency keys; local records do
+not guarantee exactly-once delivery. Services share a 15-second HTTP timeout,
+a cached credential object and a lock for the non-thread-safe Google transport.
+
+After adding scopes, run `.venv/bin/python -m servers.google_auth`, finish consent,
+then restart the brain (and any standalone Inspector/server processes) to refresh
+the cached tool catalog. Scope consent and enabling an API are separate steps.
+The tests use fake Google services and an actual local stdio handshake; they do
+not send real email or create remote files/events.
+
+
+### Mandatory email confirmation (AlphaBrain)
+
+`send_email` and `reply_email` have `commit="confirm"`. They are not automatically
+approved as ordinary deferred writes. AlphaBrain's CLI and LiveKit pipeline use
+`brain/email_confirmation.py`; the older Qwen coordinator has no equivalent flow
+and refuses these tools. Even a manually approved gateway operation cannot send
+without a code-owned confirmation token.
+
+1. The first model call prepares a local snapshot through internal `prepare_email`
+   (a read-only operation recorded by the gateway). It resolves the account sender,
+   actual recipient and, for replies, subject/thread/reply headers. It does not
+   create a Gmail draft or send a message. The server freezes the MIME bytes.
+2. Code directly outputs the actual recipient, subject, complete body and
+   `确认发送吗？`, without letting the model shorten or rewrite this preview.
+3. Only after another nonempty user request can the model call the original tool
+   with identical arguments and `confirmed=true`. The coordinator checks the new
+   user turn, exact arguments, a two-minute lifetime and an unused confirmation.
+   Model-internal tool iterations do not count as new user input. Whether the
+   latest user sentence means agreement still relies on Claude; a new sentence
+   alone does not prove consent. Questions, rejection and ambiguity must not be
+   treated as agreement.
+4. Code approves the original pending operation, consumes confirmation before
+   awaiting execution, and supplies a private token to the executor. The model
+   cannot set this token. The MCP server checks the same snapshot and consumes
+   its token before issuing a single send request. Addresses are not resolved again.
+5. Parameter changes prepare a new snapshot and cancel the previous pending
+   operation. The changed snapshot needs another user turn before sending.
+   Only one email can await confirmation at a time; preparing a different one
+   replaces the previous unsent draft. Expiration is checked on access. Close
+   cancels pending mail; neither drafts nor confirmation survive process restart.
+   If the worker restarts, its frozen snapshot is lost and confirmation fails closed.
+
+Timeout or cancellation after sending begins produces `unknown` and consumes
+confirmation. Query sent mail before any new attempt. A successful previous
+identical mail is explicitly distinguished from a new draft; another send still
+needs a fresh preview and confirmation. `confirm_duplicate` is not a mail override.
+No real mail is sent by the tests. They cover same-turn auto-confirmation, altered
+parameters, frozen reply addresses, expiration, restart, replay and unknown results.
+
+
+### Narrow Drive / Docs authorization
+
+The app now requests `drive.readonly` (search/read all accessible files) plus
+`drive.file` (create and modify files within the application's per-file access).
+It no longer requests full `drive` or `documents` access. Docs reading accepts
+`drive.readonly`; Docs creation and append accept `drive.file`.
+
+Per-file access includes files created by Alpha and files explicitly opened or
+shared with the application through an authorization flow such as Google Picker;
+it is not literally an only-created-by-Alpha scope. No Picker is implemented here.
+Searching or reading an existing file does not grant permission to modify it.
+Existing documents outside this scope remain read-only; Google rejects writes.
+See [Drive scopes](https://developers.google.com/workspace/drive/api/guides/api-specific-auth)
+and [Docs batchUpdate scopes](https://developers.google.com/workspace/docs/api/reference/rest/v1/documents/batchUpdate).
+
+Changing the requested scope list does not revoke already-issued broad grants.
+The auth loader rejects cached credentials carrying the removed full scopes,
+requests desktop-app consent without the unsupported `include_granted_scopes` parameter, validates the actual returned
+grants, and saves actual scopes instead of merely requested scopes. If Google
+still returns broad permissions, it fails without overwriting the token.
+
+To fully migrate an existing broad grant: stop Alpha and standalone personal
+servers, remove this app's old connection at
+[Google account connections](https://myaccount.google.com/connections), then run
+`.venv/bin/python -m servers.google_auth` and approve the narrower permissions.
+Restart Alpha afterward so cached services and credentials are replaced. Removing
+the connection also invalidates the app's other Google API grants; the same auth
+flow requests their configured scopes again. No token revocation or interactive
+Google sign-in is performed by the tests.
+
+
+### Separate Workspace and YouTube tokens
+
+The reported Google `invalid_request` error explicitly disallows requesting
+`drive.file` and the YouTube scopes together. The scope groups above are now
+separate: `get_credentials()` remains the Workspace entry point for Tasks,
+Calendar, Docs, Drive and Gmail. `get_youtube_credentials()` uses only the three
+YouTube read scopes and a different token file. `youtubeAnalytics` uses its own
+cached credential object and transport; it never falls back to the Workspace token.
+Both token files are ignored by Git and saved with mode 0600. Actual mixed-group
+grants are rejected rather than silently persisted.
+
+```bash
+# Both groups, sequentially (the default):
+.venv/bin/python -m servers.google_auth
+# Or authorize only one group:
+.venv/bin/python -m servers.google_auth --service workspace
+.venv/bin/python -m servers.google_auth --service youtube
+```
+
+Use the same `credentials.json` for both. During YouTube authorization, select
+the channel whose Analytics reports you need. Neither flow requests
+`include_granted_scopes`. Existing Workspace credentials can be reused if already
+compatible; existing broad or mixed credentials trigger fresh consent. No manual
+copying of a Workspace token into `youtube_token.json` is supported. Restart the
+brain/personal server after authorization to replace any previously cached clients.

@@ -63,6 +63,58 @@ sentence-ending “，执行”) submits the current collection immediately afte
 speech/transcription completes. Ordinary phrases such as “提醒我执行” are not
 treated as the control command.
 
+An optional **Jev search router** can replace the keyword heuristic. Configure
+a Vercel AI Gateway key or TypeSafe official API key in `alpha/.env` (or the overriding
+`voice_pipeline/.env`):
+
+```dotenv
+AI_GATEWAY_API_KEY=your_vercel_gateway_key
+JEV_PROVIDER=vercel
+# Optional experiment settings:
+ALPHA_SEARCH_ROUTER=jev
+# JEV_MODEL=typesafe-ai/jev
+JEV_TIMEOUT_MS=300
+JEV_MIN_CONFIDENCE=0.8
+```
+
+Restart the voice process after changing these values. With a key present,
+`jev` is the default; otherwise the default stays `rules`. Explicit modes:
+`jev` uses the classifier, `rules` uses the existing heuristic, and `off` skips
+early classification/prompting. The brain can still independently decide to
+search and emit its search-start prompt in every mode.
+
+With `JEV_PROVIDER=vercel`, the router uses the [Vercel TypeSafe-compatible API](https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe)
+at `https://ai-gateway.vercel.sh/typesafe/v1/systemone`, with model `typesafe-ai/jev`.
+For direct TypeSafe access, use `JEV_PROVIDER=typesafe`, `TYPESAFE_API_KEY` and model
+`jev-latest`. Without an explicit provider, a nonempty `AI_GATEWAY_API_KEY` selects
+Vercel; otherwise TypeSafe is used. Keys are not shared between providers.
+
+The router calls the [official TypeSafe API](https://docs.typesafe.ai/api) with
+one Choice question (`web` / `direct` / `uncertain`). It sends the current
+transcript and at most six recent user/assistant messages, capped at 800
+characters each, together with the distinction between public web search and
+HA, personal-list/calendar and home-weather tools. It does not call business
+tools, modify Claude's prompt, or restrict Claude's tools. Only a `web`
+decision meeting the confidence threshold triggers “我查一下。” locally.
+Low confidence, uncertainty, missing credentials, HTTP/format errors or timeouts
+go directly to the brain, without retries or a second keyword-rule decision.
+Cancellation propagates and does not start an outdated brain request.
+
+`JEV_TIMEOUT_MS` is a total classification budget, including connection and
+reading the response. This extra stage can add up to the budget to each turn;
+300 ms is an initial experiment setting, not a measured service latency.
+`[Jev] route=... confidence=... ｜ ...ms` records decision timing without raw
+prompts or keys. Measure Chinese queries and contextual followups on your
+network before choosing a different budget or threshold. No new SDK dependency
+is needed; the existing async HTTP client is reused.
+
+A small Vercel probe on this setup classified four Chinese synthetic examples
+correctly: restaurant search, contextual cuisine followup, a light command and
+home weather. The first request took 1.40 s; subsequent requests took 287–310 ms.
+These are a small sample, not a latency guarantee. The local `.env` budget is
+600 ms to allow more room than the initial 300 ms experiment; a slow first
+connection can still time out and fall through to Claude without an early prompt.
+
 After LiveKit commits the turn (and any optional collection), web requests
 (“帮我搜一下”, “上网查”, “帮我查一下…”, “最新新闻”)
 first emit “我查一下。” locally, before the brain POST. Local list/device
@@ -230,3 +282,85 @@ References: [pipeline nodes](https://docs.livekit.io/agents/logic/nodes/),
 [console mode](https://docs.livekit.io/agents/server/startup-modes/),
 [OpenAI realtime transcription](https://developers.openai.com/api/docs/guides/realtime-transcription),
 [OpenAI TTS](https://developers.openai.com/api/docs/guides/text-to-speech).
+
+### Jev interruption filtering
+
+With a Jev key configured, interruption filtering is enabled by default. Optional
+settings in `alpha/.env` or `voice_pipeline/.env`:
+
+```dotenv
+ALPHA_JEV_INTERRUPTIONS=1
+ALPHA_ANSWER_WINDOW_SECONDS=10
+```
+
+During playback, VAD only lowers the volume; it does not cancel the report.
+The final transcript is evaluated before it reaches LiveKit's conversation or
+AlphaBrain. An explicit leading `Alpha` / `阿尔法` is accepted locally. Otherwise,
+Jev receives the new text, the current generated reply (at most 2,000 characters),
+and whether a question-answer window is open. Only an `addressed` decision with
+confidence at least `max(0.9, JEV_MIN_CONFIDENCE)` interrupts. Side conversation,
+backchanneling, uncertainty, HTTP failures and timeouts leave the report running.
+Noise markers are still rejected locally without any model call.
+
+After an uninterrupted reply ending in a question finishes playback, a 10-second
+window accepts short answers such as `对` or `不要了` without a model call. Speech
+that started before the question finished does not get this shortcut. The next
+accepted input consumes the window. The installed LiveKit version emits the
+assistant `conversation_item_added` event after playback; interrupted replies do
+not open a window.
+
+This is transcript-based addressing detection, not speaker identification or an
+acoustic wake-word engine. Outside playback, normal requests are still accepted
+as before. It cannot reliably know whom you are looking at. Set
+`ALPHA_JEV_INTERRUPTIONS=0` to restore the previous meaningful-transcript policy.
+It reuses the Jev endpoint, credentials and total timeout budget configured above.
+
+A synthetic Vercel probe preserved playback for third-party chat and backchannel
+examples (both below the confidence threshold), and accepted an explicit task
+correction and a direct question answer. Requests took 221–559 ms. Real microphone
+and household conversation accuracy still need evaluation.
+
+### Experimental Jev end-of-turn detector
+
+The local experiment is enabled with:
+
+```dotenv
+ALPHA_TURN_DETECTOR=jev
+ALPHA_TURN_MAX_DELAY=5
+```
+
+Restart the voice process to apply it. Set `ALPHA_TURN_DETECTOR=livekit` to return
+to the original multilingual detector (its default maximum delay is 3 seconds;
+remove `ALPHA_TURN_MAX_DELAY` or set it to `3` when comparing defaults).
+
+`JevTurnDetector` implements the installed LiveKit 1.8.8 turn detector protocol.
+It replaces the multilingual predictor; it does not add a second collection
+window. The old `ALPHA_COLLECTION_ENABLED` window is disabled in this mode.
+VAD/STT still detect pauses and provide text. Jev sees the current accumulated
+user turn and up to six recent messages. A high-confidence complete result uses
+LiveKit's 0.5-second minimum silence; an incomplete result uses its configured
+maximum silence. These are measured from the framework's last speaking anchor,
+not an additional delay after Jev. The STT and network latency still apply.
+
+Uncertain, low-confidence, HTTP-error or timed-out results fall back to the
+original local multilingual model, interpreted using its own threshold. If the
+fallback fails, the long silence limit is used. User speech cancels the old
+prediction through LiveKit; later transcripts are merged by the framework.
+Preemptive tool execution stays disabled.
+
+The adapter's logged probability is a 0/1 control value, not calibrated model
+confidence. The `[Jev] turn_complete` log shows actual classifier confidence and
+request time. `[轮次判断]` shows which decision/fallback was used.
+
+A five-example synthetic probe classified `关客厅灯` and a complete reminder as
+complete, `把牛奶` and a request ending in `还有` as incomplete, and `对` after a
+question as complete. The first request took 981 ms; subsequent requests took
+267–449 ms. The diagnostic probe used a five-second timeout; normal requests
+retain the local 600 ms budget, so a slow first call can fall back.
+
+This predicts semantic completeness, not future intent. A complete `加牛奶` may
+still be followed by `还有鸡蛋` after a long pause. The maximum silence remains a
+hard framework limit: at five seconds it submits the text even if Jev called it
+incomplete; it does not wait indefinitely or guarantee that partial tasks cannot
+execute. Compare real short commands and a compound request with a one-second
+pause before deciding whether to keep this mode.

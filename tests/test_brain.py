@@ -37,6 +37,56 @@ class FakeWorker:
 
 
 class BrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_email_preview_is_generated_by_code_and_only_next_turn_can_send(self):
+        self.add_catalog_tools(*module.GOOGLE_WRITE_TOOLS)
+        async def execute(name, args):
+            if name == "prepare_email":
+                return ExecutorResult(True, {"structured_content": {
+                    "confirmation_token": "opaque", "preview": {"to": args["arguments"]["to"],
+                        "subject": args["arguments"]["subject"], "body": args["arguments"]["body"]}}})
+            return ExecutorResult(True, "邮件已发送")
+        self.executor.side_effect = execute
+        await self.brain.start()
+        args = {"to": "person@example.com", "subject": "会议", "body": "明天见"}
+        call = NS(type="tool_use", name="send_email", input=args, id="prepare")
+        self.client.messages.create.side_effect = [reply([call], "tool_use")]
+        answer = await self.brain.ask("给 person@example.com 发邮件，说明天见")
+        self.assertIn("person@example.com", answer)
+        self.assertIn("明天见", answer)
+        self.assertIn("确认发送吗", answer)
+        self.executor.assert_awaited_once_with("prepare_email", {"tool_name": "send_email", "arguments": args})
+        result = await self.invoke_tool("send_email", {**args, "confirmed": True}, request="确认发送")
+        self.assertFalse(result["is_error"])
+        self.executor.assert_awaited_with("send_email", args)
+        count = self.executor.await_count
+        again = await self.invoke_tool("send_email", {**args, "confirmed": True}, request="是的")
+        self.assertTrue(again["is_error"])
+        self.assertEqual(self.executor.await_count, count)
+        for tool in self.brain.tools:
+            if tool["name"] in {"send_email", "reply_email"}:
+                self.assertNotIn("confirm_duplicate", tool["input_schema"]["properties"])
+        self.assertIn("起草、分析或阅读邮件不等于授权发送", self.brain.system[0]["text"])
+
+    async def test_voice_mail_snapshot_is_emitted_even_if_model_also_tries_to_confirm(self):
+        self.add_catalog_tools("send_email")
+        args = {"to": "person@example.com", "subject": "会议", "body": "明天见"}
+        self.executor.return_value = ExecutorResult(True, {"structured_content": {
+            "confirmation_token": "private", "preview": args}})
+        await self.brain.start()
+        calls = [NS(type="tool_use", name="send_email", id="prepare", input=args),
+                 NS(type="tool_use", name="send_email", id="confirm", input={**args, "confirmed": True})]
+        self.client.messages.stream = Mock(return_value=self.fake_stream(reply(calls, "tool_use")))
+        emit = AsyncMock()
+        answer = await self.brain.ask("发邮件", on_text=emit)
+        self.assertIn("person@example.com", answer)
+        self.assertIn("明天见", answer)
+        self.assertNotIn("private", answer)
+        emit.assert_awaited_once_with(answer)
+        self.assertEqual(self.client.messages.stream.call_count, 1)
+        self.executor.assert_awaited_once_with("prepare_email", {"tool_name": "send_email", "arguments": args})
+        results = self.brain.messages[-2]["content"]
+        self.assertTrue(results[1]["is_error"])
+
     async def test_search_result_prefix_requires_nonempty_success_and_is_not_repeated(self):
         await self.brain.start()
         for result, answer, expected in [

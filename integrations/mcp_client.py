@@ -57,8 +57,10 @@ async def load_tools(session: ClientSession) -> list[ToolParam]:
         )
         for tool in result.tools:
             schema = deepcopy(tool.input_schema)
-            if tool.name in {"add_items", "create_reminder"}:
+            if tool.name in {"add_items", "create_reminder", "create_event"}:
                 schema.get("properties", {}).pop("operation_id", None)
+            if tool.name in {"send_email", "reply_email"}:
+                schema.get("properties", {}).pop("confirmation_token", None)
             # MCP schema 转成 Claude 所需的字段名；这里只转换描述，不执行工具。
             tools.append({
                 "name": tool.name,

@@ -12,3 +12,4 @@ OPERATIONS_DB = PROJECT_ROOT / "data" / "operations.db"
 # Google OAuth：客户端凭据和授权后保存的令牌（都不进 git）。
 GOOGLE_CREDENTIALS = PROJECT_ROOT / "credentials.json"
 GOOGLE_TOKEN = PROJECT_ROOT / "token.json"
+GOOGLE_YOUTUBE_TOKEN = PROJECT_ROOT / "youtube_token.json"

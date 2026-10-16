@@ -1,10 +1,11 @@
-"""声音只触发降音量，最终转写决定是否打断；不调用另一个模型。"""
+"""声音只触发降音量；最终转写由语音入口判断，不在这里取消回答。"""
 
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
+import time
 import unicodedata
 from array import array
 from collections.abc import Callable
@@ -67,6 +68,8 @@ class SpeechGate:
         self._session: AgentSession | None = None
         self._output: DuckingOutput | None = None
         self._original: io.AudioOutput | None = None
+        self.overlapped = False
+        self.utterance_started_at: float | None = None
 
     def attach(self, session: AgentSession) -> None:
         self._session = session
@@ -78,12 +81,15 @@ class SpeechGate:
 
     def _user_state_changed(self, event: UserStateChangedEvent) -> None:
         if event.new_state == "speaking":
+            self.utterance_started_at = time.monotonic()
+            self.overlapped = False
             if self._session is not None and self._session.agent_state == "speaking":
                 self.speech_started()
         elif event.old_state == "speaking":
             self.speech_stopped()
 
     def speech_started(self) -> None:
+        self.overlapped = True
         self._cancel_timer()
         self.gain = 0.2
         logger.info("[疑似打断] 降低音量到 20%，保留汇报，等待最终转写")
