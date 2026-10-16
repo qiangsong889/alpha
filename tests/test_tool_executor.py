@@ -2,6 +2,7 @@
 
 from contextlib import asynccontextmanager
 from dataclasses import replace
+import json
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -90,7 +91,7 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(module, "call_ha_tool", AsyncMock(return_value=response)):
                 outcome = await executor("intent__HassTurnOff", {"name": "客厅灯"})
             self.assertEqual(outcome.ok, ok)
-            self.assertIn("response_type", outcome.result)
+            self.assertEqual(outcome.result["structured_content"]["response"], payload)
 
     async def test_read_only_and_personal_tools_use_is_error_and_return_text(self):
         worker = Mock(closed=False, call=AsyncMock())
@@ -138,6 +139,28 @@ class ModelFormatTests(unittest.TestCase):
         self.assertIn("先向用户确认", formatted["text"])
         with self.assertRaises(ValueError):
             module.format_for_model(previous, duplicate_of=previous)
+
+    def test_success_includes_document_id_alongside_text(self):
+        payload = {"text": "已创建文档：采购计划", "structured_content": {
+            "document_id": "doc-eval-01", "title": "采购计划"}}
+        op = replace(self.op, name="create_document", status="succeeded", result=payload)
+        formatted = module.format_for_model(op)
+        text, data = formatted["text"].split("\n", 1)
+        self.assertEqual(text, payload["text"])
+        self.assertEqual(json.loads(data)["document_id"], "doc-eval-01")
+        self.assertFalse(formatted["is_error"])
+
+    def test_private_email_token_is_not_exposed_with_structured_results(self):
+        payload = {"text": "草稿已准备", "structured_content": {
+            "confirmation_token": "secret", "preview": {"to": "person@example.com"}}}
+        text = module.format_for_model(replace(self.op, status="succeeded", result=payload))["text"]
+        self.assertNotIn("secret", text)
+        self.assertNotIn("confirmation_token", text)
+        self.assertIn("person@example.com", text)
+        payload["text"] = json.dumps(payload["structured_content"])
+        text = module.format_for_model(replace(self.op, status="succeeded", result=payload))["text"]
+        self.assertNotIn("secret", text)
+        self.assertEqual(json.loads(text), {"preview": {"to": "person@example.com"}})
 
 
 if __name__ == "__main__":

@@ -56,7 +56,7 @@ def make_executor(
         if not text and result.structured_content is not None:
             text = json.dumps(result.structured_content, ensure_ascii=False)
         ok = device_action_succeeded(name, result) if name in HA_ACTION_TOOLS else not result.is_error
-        if name in PERSONAL_TOOLS | INTERNAL_TOOLS and result.structured_content is not None:
+        if result.structured_content is not None:
             payload = {"text": text or "工具未返回文字", "structured_content": result.structured_content}
             if (policy := get_policy(name)) is not None and policy.mutates and result.structured_content.get("status") == "unknown":
                 raise ToolOutcomeUnknown(payload)
@@ -75,7 +75,27 @@ def _result_text(result: object | None) -> str:
     if isinstance(result, str):
         return result
     if isinstance(result, dict) and isinstance(result.get("text"), str):
-        return result["text"]
+        text = result["text"]
+        if result.get("structured_content") is not None:
+            # ID 等结构化结果也是执行事实，后续工具需要它们。确认凭据只在代码内使用。
+            def public_data(value):
+                if isinstance(value, dict):
+                    return {key: public_data(item) for key, item in value.items()
+                            if key != "confirmation_token"}
+                if isinstance(value, list):
+                    return [public_data(item) for item in value]
+                return value
+
+            data = json.dumps(public_data(result["structured_content"]), ensure_ascii=False)
+            # structured-only MCP 结果可能已被 executor 编成 text；也要过滤其中的私有字段。
+            try:
+                if json.loads(text) == result["structured_content"]:
+                    return data
+            except (ValueError, TypeError):
+                pass
+            if text.strip() != data:
+                return f"{text}\n{data}" if text else data
+        return text
     if isinstance(result, dict) and isinstance(result.get("error"), str):
         return result["error"]
     return json.dumps(result, ensure_ascii=False) if result is not None else ""

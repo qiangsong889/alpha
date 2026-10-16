@@ -37,6 +37,41 @@ class FakeWorker:
 
 
 class BrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_created_document_id_reaches_next_claude_request(self):
+        self.add_catalog_tools("create_document", "append_document")
+        self.executor.side_effect = [
+            ExecutorResult(True, {"text": "已创建文档：采购计划", "structured_content": {
+                "document_id": "doc-eval-01", "title": "采购计划"}}),
+            ExecutorResult(True, "文档已追加"),
+        ]
+        await self.brain.start()
+        self.client.messages.create.side_effect = [
+            reply([NS(type="tool_use", name="create_document", id="create",
+                      input={"title": "采购计划"})], "tool_use"),
+            reply([NS(type="tool_use", name="append_document", id="append",
+                      input={"document_id": "doc-eval-01", "text": "牛奶和鸡蛋"})], "tool_use"),
+            reply([NS(type="text", text="文档已写好。")]),
+        ]
+        await self.brain.ask("创建采购计划并写入牛奶和鸡蛋")
+        next_request = self.client.messages.create.call_args_list[1].kwargs["messages"]
+        tool_result = next_request[-1]["content"][0]
+        self.assertIn('"document_id": "doc-eval-01"', tool_result["content"])
+        self.assertEqual(self.executor.await_count, 2)
+
+    async def test_broad_light_action_reports_actual_successful_names(self):
+        self.ha[0].append({"name": "intent__HassTurnOff", "input_schema": {"type": "object"}})
+        self.executor.return_value = ExecutorResult(True, {"text": "完成", "structured_content": {
+            "response_type": "action_done", "data": {"success": [
+                {"name": "客厅灯", "type": "entity"}, {"name": "厨房灯", "type": "entity"}], "failed": []}}})
+        await self.brain.start()
+        self.client.messages.create.side_effect = [
+            reply([NS(type="tool_use", name="intent__HassTurnOff", id="lights",
+                      input={"domain": ["light"]})], "tool_use"),
+            reply([NS(type="text", text="已关闭设备。")]),
+        ]
+        answer = await self.brain.ask("把灯关了")
+        self.assertEqual(answer, "已关闭客厅灯和厨房灯。")
+
     async def test_email_preview_is_generated_by_code_and_only_next_turn_can_send(self):
         self.add_catalog_tools(*module.GOOGLE_WRITE_TOOLS)
         async def execute(name, args):

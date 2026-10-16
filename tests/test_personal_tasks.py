@@ -1,5 +1,6 @@
 """假的 Google service；不读取真实 .env、凭据，不调用 Google 或麦克风。"""
 
+import json
 import unittest
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -54,7 +55,9 @@ class PersonalTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(added.status, "succeeded")
         saved = self.store.get(added.id)
         self.assertEqual(saved.result["structured_content"]["created"][0]["task_id"], "new-milk")
-        self.assertEqual(format_for_model(saved)["text"], "已添加到 购物清单：牛奶")
+        text, data = format_for_model(saved)["text"].split("\n", 1)
+        self.assertEqual(text, "已添加到 购物清单：牛奶")
+        self.assertEqual(json.loads(data), saved.result["structured_content"])
         request = undo_add_items(saved)[0]
         undo = await gateway.submit("undo-turn", request.name, request.arguments)
         self.assertEqual(undo.status, "pending")  # 删除不会直接执行。
