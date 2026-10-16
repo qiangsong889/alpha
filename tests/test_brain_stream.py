@@ -10,8 +10,21 @@ from brain import server
 
 
 class BrainStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_search_announcement_marker_is_forwarded(self):
+        seen = []
+        async def ask(text, *, on_text, on_signal, search_announced=False):
+            seen.append(search_announced)
+            await on_text("查到了。")
+            return "查到了。"
+
+        with patch.object(server, "brain", SimpleNamespace(ask=ask, last_timings=[])):
+            for marker in [False, True]:
+                response = await server.ask_stream(server.AskRequest(text="搜索新闻", search_announced=marker))
+                events = [json.loads(line) async for line in response.body_iterator]
+                self.assertEqual(events[0], {"type": "delta", "text": "查到了。"})
+        self.assertEqual(seen, [False, True])
     async def test_ha_signal_is_delivered_without_tts_text(self):
-        async def ask(text, *, on_text, on_signal):
+        async def ask(text, *, on_text, on_signal, search_announced=False):
             await on_signal("ha_done")
             return "开灯成功"
 
@@ -23,7 +36,7 @@ class BrainStreamTests(unittest.IsolatedAsyncioTestCase):
     async def test_delta_arrives_before_done_and_disconnect_does_not_cancel_brain(self):
         gate, finished = asyncio.Event(), asyncio.Event()
 
-        async def ask(text, *, on_text, on_signal):
+        async def ask(text, *, on_text, on_signal, search_announced=False):
             await on_text("第一句。")
             await gate.wait()
             finished.set()
@@ -42,7 +55,7 @@ class BrainStreamTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(finished.is_set())
 
     async def test_done_has_timings(self):
-        async def ask(text, *, on_text, on_signal):
+        async def ask(text, *, on_text, on_signal, search_announced=False):
             await on_text("好了。")
             return "好了。"
 
@@ -54,7 +67,7 @@ class BrainStreamTests(unittest.IsolatedAsyncioTestCase):
     async def test_processing_error_is_terminal_and_does_not_retry(self):
         calls = []
 
-        async def ask(text, *, on_text, on_signal):
+        async def ask(text, *, on_text, on_signal, search_announced=False):
             calls.append(text)
             raise TimeoutError()
 

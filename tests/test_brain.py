@@ -37,6 +37,195 @@ class FakeWorker:
 
 
 class BrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_web_search_location_loaded_on_start_from_environment(self):
+        with patch.dict(module.os.environ, {"HOME_CITY": " Sunnyvale ", "HOME_REGION": " CA ",
+                                            "HOME_COUNTRY": " US "}):
+            await self.brain.start()
+        self.assertEqual(self.brain.web_search["user_location"], {
+            "type": "approximate", "city": "Sunnyvale", "region": "CA", "country": "US",
+            "timezone": self.brain.reminder_tz.key,
+        })
+
+    def test_web_search_without_city_omits_user_location(self):
+        with patch.dict(module.os.environ, {"HOME_REGION": "CA", "HOME_COUNTRY": "US"}, clear=True):
+            self.assertNotIn("user_location", module.web_search_tool("America/Los_Angeles"))
+
+    def test_web_search_omits_blank_optional_location_fields(self):
+        with patch.dict(module.os.environ, {"HOME_CITY": "Sunnyvale", "HOME_REGION": " ",
+                                            "HOME_COUNTRY": ""}, clear=True):
+            self.assertEqual(module.web_search_tool("America/Los_Angeles")["user_location"], {
+                "type": "approximate", "city": "Sunnyvale", "timezone": "America/Los_Angeles",
+            })
+
+    async def test_weather_tool_is_loaded_and_answer_is_spoken_without_ha_tone(self):
+        self.add_catalog_tools("get_weather")
+        await self.brain.start()
+        tool = NS(type="tool_use", name="get_weather", input={"day": "tomorrow"}, id="weather")
+        self.executor.return_value = ExecutorResult(ok=True, result="明天雨，10 到 17 度，降雨概率 80%")
+        self.client.messages.stream = Mock(side_effect=[
+            self.fake_stream(reply([tool], "tool_use")), self.final_stream("明天有雨，出门带伞。")])
+        emit, signal = AsyncMock(), AsyncMock()
+        await self.brain.ask("明天适合出门吗", on_text=emit, on_signal=signal)
+        self.executor.assert_awaited_once_with("get_weather", {"day": "tomorrow"})
+        emit.assert_awaited_once_with("明天有雨，出门带伞。")
+        signal.assert_not_called()
+
+    async def test_weather_routing_rules_do_not_require_ha_sensor_or_infer_city_from_timezone(self):
+        with patch.dict(module.os.environ, {"HOME_CITY": ""}):
+            await self.brain.start()
+        prompt = self.brain.system[0]["text"]
+        self.assertIn("不要求用户家里有天气传感器", prompt)
+        self.assertIn("优先用 get_weather，不用 web_search", prompt)
+        self.assertNotIn("\n用户配置的默认查询地点：", prompt)
+        with patch.dict(module.os.environ, {"HOME_CITY": "Seattle", "HOME_REGION": "WA", "HOME_COUNTRY": "US"}):
+            self.brain._prepare_catalog()
+        self.assertIn("用户配置的默认查询地点：Seattle, WA", self.brain.system[0]["text"])
+
+    async def test_ha_context_then_web_weather_answer_is_spoken(self):
+        self.ha[0].append({"name": "homeassistant__GetLiveContext", "input_schema": {"type": "object"}})
+        await self.brain.start()
+        self.executor.return_value = ExecutorResult(ok=True, result="家里没有天气传感器")
+        query = NS(type="tool_use", name="homeassistant__GetLiveContext", input={}, id="context")
+        voice = NS(type="tool_use", name=module.VOICE_REPLY,
+                   input={"answer": "预报有雨，出门记得带伞。"}, id="final")
+        self.client.messages.stream = Mock(side_effect=[
+            self.fake_stream(reply([query], "tool_use")),
+            self.fake_stream(reply([*self.search_blocks(), voice], "tool_use")),
+        ])
+        emit, signal = AsyncMock(), AsyncMock()
+        await self.brain.ask("洛杉矶今天适合出门吗", on_text=emit, on_signal=signal)
+        emit.assert_awaited_once_with("预报有雨，出门记得带伞。")
+        signal.assert_not_called()
+        self.executor.assert_awaited_once_with("homeassistant__GetLiveContext", {})
+
+    async def test_preannounced_search_does_not_repeat_ack(self):
+        await self.brain.start()
+        event = NS(type="content_block_start", content_block=self.search_blocks()[0])
+        call = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": "查到结果了。"}, id="final")
+        self.client.messages.stream = Mock(return_value=self.fake_stream(
+            reply([*self.search_blocks(), call], "tool_use"), [event, event]))
+        emit = AsyncMock()
+        await self.brain.ask("搜索新闻", on_text=emit, search_announced=True)
+        emit.assert_awaited_once_with("查到结果了。")
+
+    async def test_search_ack_is_sent_before_search_finishes_and_only_once_per_turn(self):
+        await self.brain.start()
+        blocks = self.search_blocks()
+        event = NS(type="content_block_start", content_block=blocks[0])
+        gate, arrived = asyncio.Event(), asyncio.Event()
+        self.client.messages.stream = Mock(side_effect=[
+            self.fake_stream(reply(blocks, "pause_turn"), [event, event], gate, arrived),
+            self.fake_stream(reply([NS(type="tool_use", name=module.VOICE_REPLY,
+                id="final", input={"answer": "查到结果了。"})], "tool_use"), [event]),
+        ])
+        emit = AsyncMock()
+        task = asyncio.create_task(self.brain.ask("搜索最新消息", on_text=emit))
+        try:
+            await asyncio.wait_for(arrived.wait(), 1)
+            self.assertFalse(task.done())
+            emit.assert_awaited_once_with("好的，我查一查。")
+        finally:
+            gate.set()
+            answer = await task
+        self.assertEqual(answer, "查到结果了。")
+        self.assertEqual([c.args[0] for c in emit.await_args_list], ["好的，我查一查。", "查到结果了。"])
+        self.assertEqual(self.brain.messages[-1]["content"], "查到结果了。")
+        self.executor.assert_not_awaited()
+
+    def search_blocks(self):
+        return [NS(type="server_tool_use", id="srv1", name="web_search", input={"query": "官方新闻"}),
+                NS(type="web_search_tool_result", tool_use_id="srv1", content=[
+                    NS(type="web_search_result", url="https://example.com/news", title="官方新闻",
+                       encrypted_content="must-preserve")])]
+
+    async def test_web_search_enabled_in_text_and_stream_requests(self):
+        await self.brain.start()
+        self.assertEqual(self.brain.web_search["type"], "web_search_20260209")
+        self.client.messages.create.return_value = reply([NS(type="text", text="你好")])
+        await self.brain.ask("你好")
+        self.assertIn(self.brain.web_search, self.client.messages.create.call_args.kwargs["tools"])
+        self.client.messages.stream = Mock(return_value=self.final_stream("你好"))
+        await self.brain.ask("你好", on_text=AsyncMock())
+        self.assertIn(self.brain.web_search, self.client.messages.stream.call_args.kwargs["tools"])
+        self.assertNotIn("web_search", self.brain.tool_owners)
+
+    async def test_dynamic_search_code_result_does_not_block_final_voice_reply(self):
+        await self.brain.start()
+        code = NS(type="server_tool_use", id="code1", name="code_execution", input={"code": "filter results"})
+        result = NS(type="code_execution_tool_result", tool_use_id="code1", content={})
+        voice = NS(type="tool_use", name=module.VOICE_REPLY, id="final", input={"answer": "查到结果了。"})
+        self.client.messages.stream = Mock(return_value=self.fake_stream(reply(
+            [code, result, *self.search_blocks(), voice], "tool_use")))
+        emit = AsyncMock()
+        self.assertEqual(await self.brain.ask("搜索新闻", on_text=emit), "查到结果了。")
+        emit.assert_awaited_once_with("查到结果了。")
+        self.assertEqual(self.brain.messages[-1]["content"][:2], [code, result])
+        self.executor.assert_not_awaited()
+
+    async def test_search_pause_preserves_encrypted_results_and_prints_citations(self):
+        await self.brain.start()
+        blocks = self.search_blocks()
+        citation = NS(type="web_search_result_location", title="官方新闻", url="https://example.com/news")
+        self.client.messages.create.side_effect = [reply(blocks, "pause_turn"),
+            reply([NS(type="text", text="查到新闻了。", citations=[citation])])]
+        answer = await self.brain.ask("搜索官方新闻")
+        self.assertIn("[官方新闻](https://example.com/news)", answer)
+        self.assertIs(self.client.messages.create.call_args.kwargs["messages"][1]["content"], blocks)
+        self.executor.assert_not_awaited()
+
+    async def test_stream_search_with_voice_reply_keeps_server_blocks_and_never_reads_url(self):
+        self.brain.style = "voice"
+        await self.brain.start()
+        blocks = self.search_blocks()
+        call = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": "据官方新闻，今天有更新。"}, id="final")
+        self.client.messages.stream = Mock(return_value=self.fake_stream(reply([*blocks, call], "tool_use")))
+        emit = AsyncMock()
+        await self.brain.ask("搜索新闻", on_text=emit)
+        emit.assert_awaited_once_with("据官方新闻，今天有更新。")
+        self.assertEqual(self.brain.messages[-1]["content"][:2], blocks)
+        self.assertEqual(self.brain.messages[-1]["content"][1].content[0].encrypted_content, "must-preserve")
+        self.executor.assert_not_awaited()
+
+    async def test_search_error_is_logged_and_not_sent_to_gateway(self):
+        await self.brain.start()
+        failed = NS(type="web_search_tool_result", tool_use_id="srv1",
+                    content=NS(type="web_search_tool_result_error", error_code="unavailable"))
+        self.client.messages.create.return_value = reply([
+            *self.search_blocks()[:1], failed, NS(type="text", text="搜索暂时不可用。")])
+        with self.assertLogs("alpha.brain", level="WARNING") as logs:
+            self.assertEqual(await self.brain.ask("搜索新闻"), "搜索暂时不可用。")
+        self.assertIn("unavailable", " ".join(logs.output))
+        self.executor.assert_not_awaited()
+
+    async def test_parallel_search_and_voice_reply_waits_for_search_result(self):
+        self.brain.style = "voice"
+        await self.brain.start()
+        blocks = self.search_blocks()
+        early = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": "未经搜索的回答"}, id="early")
+        final = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": "官方有更新。"}, id="final")
+        self.client.messages.stream = Mock(side_effect=[
+            self.fake_stream(reply([blocks[0], early], "tool_use")),
+            self.fake_stream(reply([blocks[1], final], "tool_use")),
+        ])
+        emit = AsyncMock()
+        await self.brain.ask("搜索最新消息", on_text=emit)
+        emit.assert_awaited_once_with("官方有更新。")
+        self.assertTrue(self.brain.messages[2]["content"][0]["is_error"])
+        self.assertEqual(self.brain.messages[2]["content"][0]["tool_use_id"], "early")
+        self.executor.assert_not_awaited()
+
+    async def test_ha_and_search_mixed_turn_is_not_muted(self):
+        await self.brain.start()
+        tool = NS(type="tool_use", name="intent__HassTurnOn", input={"name": "客厅灯"}, id="light")
+        voice = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": "灯已打开，查到新闻了。"}, id="final")
+        self.client.messages.stream = Mock(side_effect=[self.fake_stream(reply([tool], "tool_use")),
+            self.fake_stream(reply([*self.search_blocks(), voice], "tool_use"))])
+        emit, signal = AsyncMock(), AsyncMock()
+        await self.brain.ask("开灯并搜索新闻", on_text=emit, on_signal=signal)
+        emit.assert_awaited_once_with("灯已打开，查到新闻了。")
+        signal.assert_not_awaited()
+        self.executor.assert_awaited_once()
+
     def final_stream(self, answer="已完成。"):
         call = NS(type="tool_use", name=module.VOICE_REPLY, input={"answer": answer}, id="final")
         return self.fake_stream(reply([call], "tool_use"),
@@ -401,7 +590,7 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         signal.assert_awaited_once_with("ha_done")
         self.assertEqual(self.client.messages.stream.call_count, 2)
 
-    async def test_ha_query_also_uses_completion_tone(self):
+    async def test_ha_query_speaks_answer_instead_of_completion_tone(self):
         self.ha[0].append({"name": "homeassistant__GetLiveContext", "input_schema": {"type": "object"}})
         await self.brain.start()
         tool = NS(type="tool_use", name="homeassistant__GetLiveContext", input={}, id="ha")
@@ -412,8 +601,8 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         ])
         emit, signal = AsyncMock(), AsyncMock()
         await self.brain.ask("查一下状态", on_text=emit, on_signal=signal)
-        emit.assert_not_called()
-        signal.assert_awaited_once_with("ha_done")
+        emit.assert_awaited_once_with("客厅灯开着。")
+        signal.assert_not_called()
 
     async def test_ha_query_then_action_does_not_stop_after_query(self):
         self.ha[0].append({"name": "homeassistant__GetLiveContext", "input_schema": {"type": "object"}})
@@ -427,8 +616,8 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         emit, signal = AsyncMock(), AsyncMock()
         await self.brain.ask("先查询再开灯", on_text=emit, on_signal=signal)
         self.assertEqual(self.executor.await_count, 2)
-        emit.assert_not_called()
-        signal.assert_awaited_once_with("ha_done")
+        emit.assert_awaited_once_with("已完成。")
+        signal.assert_not_called()
 
     async def test_ha_failure_does_not_play_success_tone(self):
         await self.brain.start()

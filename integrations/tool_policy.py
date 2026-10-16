@@ -14,6 +14,7 @@ class ToolPolicy:
 TOOL_POLICY: dict[str, ToolPolicy] = {
     "list_items": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
     "list_reminders": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
+    "get_weather": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
     "homeassistant__GetLiveContext": ToolPolicy(mutates=False, retry_safe=True, commit="immediate"),
     "intent__HassTurnOn": ToolPolicy(mutates=True, retry_safe=True, commit="immediate"),
     "intent__HassTurnOff": ToolPolicy(mutates=True, retry_safe=True, commit="immediate"),

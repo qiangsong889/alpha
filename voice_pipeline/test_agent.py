@@ -15,7 +15,7 @@ from array import array
 
 from livekit.agents.voice.events import ConversationItemAddedEvent
 
-from agent import AlphaVoiceAgent, create_session, log_conversation
+from agent import AlphaVoiceAgent, create_session, log_conversation, explicit_web_request
 from interruptions import DuckingOutput, SpeechGate, is_meaningful
 from sounds import confirmation_tone
 
@@ -31,6 +31,141 @@ async def collect(agent, context):
 
 
 class AgentTests(unittest.IsolatedAsyncioTestCase):
+    async def test_default_uses_livekit_turn_without_extra_window_or_rule_prompt(self):
+        requests = []
+        def handle(request):
+            requests.append(json.loads(request.content))
+            return stream_response("请继续。")
+
+        # 即使保留旧的窗口时长配置，也不会意外重新打开额外等待。
+        with patch.dict("os.environ", {"ALPHA_COLLECTION_ENABLED": "0",
+                                       "ALPHA_COLLECTION_SECONDS": "30",
+                                       "ALPHA_CONTINUATION_SECONDS": "30"}):
+            async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+                agent = AlphaVoiceAgent(client)
+                self.assertFalse(agent.collection_enabled)
+                for text in ["关厨房灯", "你好", "把牛奶加到清单，然后……"]:
+                    context = llm.ChatContext()
+                    message = llm.ChatMessage(role="user", content=[text])
+                    context.items.append(message)
+                    await agent.on_user_turn_completed(context, message)
+                    self.assertEqual(agent.collection.parts, [])
+                    self.assertEqual(await asyncio.wait_for(collect(agent, context), 0.5), "请继续。")
+                self.assertIsNone(agent.collection.prompt)
+        self.assertEqual([r["text"] for r in requests], ["关厨房灯", "你好", "把牛奶加到清单，然后……"])
+
+    async def test_extra_collection_is_explicit_opt_in(self):
+        with patch.dict("os.environ", {"ALPHA_COLLECTION_ENABLED": "1"}):
+            async with httpx.AsyncClient() as client:
+                self.assertTrue(AlphaVoiceAgent(client).collection_enabled)
+
+    async def test_search_ack_is_synthesized_without_waiting_for_final_answer(self):
+        release = asyncio.Event()
+        inputs = []
+        frame = rtc.AudioFrame(data=array("h", [0]).tobytes(), sample_rate=24000,
+                               num_channels=1, samples_per_channel=1)
+
+        async def text():
+            yield "好的，我查一查。"
+            await release.wait()
+            yield "查到结果了。"
+
+        async def synthesize(agent, stream, settings):
+            inputs.append("".join([part async for part in stream]))
+            yield frame
+
+        async with httpx.AsyncClient() as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
+            with patch.object(Agent.default, "tts_node", side_effect=synthesize):
+                output = agent.tts_node(text(), None)
+                self.assertIs(await asyncio.wait_for(anext(output), 1), frame)
+                self.assertEqual(inputs, ["好的，我查一查。"])
+                release.set()
+                self.assertEqual([f async for f in output], [frame])
+                self.assertEqual(inputs, ["好的，我查一查。", "查到结果了。"])
+
+    def test_explicit_search_detection_excludes_local_queries_and_negation(self):
+        for text in ["帮我搜一下苹果发布会", "上网查一下天气", "查一下最新新闻", "今天有什么新闻"]:
+            self.assertTrue(explicit_web_request(text), text)
+        for text in ["购物清单里有什么", "查一下客厅灯状态", "不用上网查", "不要搜索新闻"]:
+            self.assertFalse(explicit_web_request(text), text)
+
+    async def test_search_ack_precedes_brain_post_and_sends_dedup_marker(self):
+        requests = []
+        def handle(request):
+            requests.append(json.loads(request.content))
+            return stream_response("查到新闻了。")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
+            context = llm.ChatContext()
+            context.add_message(role="user", content="帮我搜一下最新新闻")
+            output = agent.llm_node(context, [], None)
+            self.assertEqual(await anext(output), "好的，我查一查。")
+            self.assertEqual(requests, [])
+            self.assertEqual("".join([part async for part in output]), "查到新闻了。")
+        self.assertEqual(requests, [{"text": "帮我搜一下最新新闻", "search_announced": True}])
+
+    async def test_interrupting_early_search_ack_sends_no_brain_request(self):
+        transport = httpx.MockTransport(lambda request: self.fail("不应提交被取消的请求"))
+        async with httpx.AsyncClient(transport=transport) as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
+            context = llm.ChatContext()
+            context.add_message(role="user", content="上网查一下天气")
+            output = agent.llm_node(context, [], None)
+            self.assertEqual(await anext(output), "好的，我查一查。")
+            await output.aclose()
+
+    async def test_incomplete_prompt_does_not_call_brain_then_continuation_submits(self):
+        requests = []
+        def handle(request):
+            requests.append(json.loads(request.content))
+            return stream_response("已完成。")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
+            agent.collection.continuation_s = 0
+            context = llm.ChatContext()
+            first = llm.ChatMessage(role="user", content=["关灯，然后……"])
+            context.items.append(first)
+            await agent.on_user_turn_completed(context, first)
+            self.assertIn("接下来", await collect(agent, context))
+            self.assertEqual(requests, [])
+            self.assertEqual(await collect(agent, context), "")
+            second = llm.ChatMessage(role="user", content=["加牛奶到购物清单"])
+            context.items.append(second)
+            await agent.on_user_turn_completed(context, second)
+            self.assertEqual(await collect(agent, context), "已完成。")
+            self.assertEqual(requests, [{"text": "关灯，然后……；加牛奶到购物清单"}])
+
+    async def test_collection_merges_turns_before_any_brain_request(self):
+        requests = []
+        def handle(request):
+            requests.append(json.loads(request.content))
+            return stream_response("已完成。")
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
+            agent = AlphaVoiceAgent(client, collection_window_s=0.03)
+            context = llm.ChatContext()
+            first = llm.ChatMessage(role="user", content=["关厨房灯"])
+            context.items.append(first)
+            await agent.on_user_turn_completed(context, first)
+            old = asyncio.create_task(collect(agent, context))
+            await asyncio.sleep(0.01)
+            agent.collection.speech_started()
+            await asyncio.sleep(0.04)
+            self.assertEqual(requests, [])
+            old.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await old
+            agent.collection.speech_stopped()
+            agent.collection.transcript_resolved()
+            second = llm.ChatMessage(role="user", content=["再加牛奶"])
+            context.items.append(second)
+            await agent.on_user_turn_completed(context, second)
+            self.assertEqual(await collect(agent, context), "已完成。")
+        self.assertEqual(requests, [{"text": "关厨房灯；再加牛奶"}])
+
     async def test_ha_signal_plays_local_tone_without_tts_or_chat_message(self):
         class Sink(io.AudioOutput):
             def __init__(self):
@@ -59,7 +194,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             session = AgentSession(turn_handling={"interruption": {"enabled": False}})
             session.output.audio = sink
             try:
-                await session.start(agent=AlphaVoiceAgent(client))
+                await session.start(agent=AlphaVoiceAgent(client, collection_window_s=0))
                 await session.generate_reply(user_input="开灯")
                 await asyncio.wait_for(sink.played.wait(), 1)
                 self.assertEqual(sum(f.samples_per_channel for f in sink.frames), 2880)
@@ -94,7 +229,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
             session = AgentSession(turn_handling={"interruption": {
                 "enabled": False, "discard_audio_if_uninterruptible": False,
             }})
-            agent = AlphaVoiceAgent(client)
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
             try:
                 await session.start(agent=agent)
                 report = session.generate_reply(user_input="汇报一下")
@@ -129,7 +264,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 yield stt.SpeechEvent(type=kind, alternatives=[stt.SpeechData(language="zh", text=text)])
 
         async with httpx.AsyncClient() as client:
-            agent = AlphaVoiceAgent(client)
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
             agent.interruptions.speech_started()
             session = SimpleNamespace(agent_state="speaking", interrupt=AsyncMock())
             with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session), \
@@ -145,7 +280,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                                   alternatives=[stt.SpeechData(language="zh", text="[cough]")])
 
         async with httpx.AsyncClient() as client:
-            agent = AlphaVoiceAgent(client)
+            agent = AlphaVoiceAgent(client, collection_window_s=0)
             agent.interruptions.speech_started()
             session = SimpleNamespace(agent_state="speaking", interrupt=AsyncMock())
             with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session), \
@@ -223,7 +358,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             session = AgentSession()
             try:
-                await session.start(agent=AlphaVoiceAgent(client))
+                await session.start(agent=AlphaVoiceAgent(client, collection_window_s=0))
                 await session.generate_reply(user_input="把客厅灯关了")
                 self.assertEqual(len(requests), 1)
                 self.assertEqual(session.history.items[-1].text_content, "已关闭客厅灯。")
@@ -256,7 +391,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         context.add_message(role="assistant", content="已关闭客厅灯。")
         context.add_message(role="user", content="对")
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-            answer = await collect(AlphaVoiceAgent(client), context)
+            answer = await collect(AlphaVoiceAgent(client, collection_window_s=0), context)
         self.assertEqual(answer, "听到了。")
         self.assertEqual(len(requests), 1)
         self.assertEqual(str(requests[0].url), "http://127.0.0.1:8765/ask/stream")
@@ -272,7 +407,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         context.add_message(role="user", content="加牛奶")
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             with self.assertLogs("alpha.voice_pipeline", level="ERROR"):
-                answer = await collect(AlphaVoiceAgent(client), context)
+                answer = await collect(AlphaVoiceAgent(client, collection_window_s=0), context)
         self.assertEqual(len(calls), 1)
         self.assertIn("可能已经生效", answer)
 
@@ -284,7 +419,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         context.add_message(role="user", content="你好")
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             with self.assertRaises(asyncio.CancelledError):
-                await collect(AlphaVoiceAgent(client), context)
+                await collect(AlphaVoiceAgent(client, collection_window_s=0), context)
 
     async def test_text_is_forwarded_before_stream_finishes(self):
         gate = asyncio.Event()
@@ -300,7 +435,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(
             lambda request: httpx.Response(200, stream=Body())
         )) as client:
-            output = AlphaVoiceAgent(client).llm_node(context, [], None)
+            output = AlphaVoiceAgent(client, collection_window_s=0).llm_node(context, [], None)
             self.assertEqual(await anext(output), "第一句。")
             gate.set()
             self.assertEqual("".join([part async for part in output]), "第二句。")
@@ -316,7 +451,7 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
         context.add_message(role="user", content="你好")
         async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
             with self.assertLogs("alpha.voice_pipeline", level="ERROR"):
-                text = await collect(AlphaVoiceAgent(client), context)
+                text = await collect(AlphaVoiceAgent(client, collection_window_s=0), context)
         self.assertIn("先查询确认", text)
         self.assertEqual(len(calls), 1)
 

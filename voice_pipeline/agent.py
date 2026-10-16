@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import re
 import time
 from pathlib import Path
 from collections.abc import AsyncIterable, AsyncIterator
@@ -23,14 +24,17 @@ from livekit.agents.voice.events import (
     ConversationItemAddedEvent,
     UserInputTranscribedEvent,
     MetricsCollectedEvent,
+    UserStateChangedEvent,
 )
 from livekit.plugins import openai, silero
 from livekit.plugins.turn_detector.multilingual import MultilingualModel
 
 if __package__:
+    from .collection import RequestCollection
     from .interruptions import SpeechGate, is_meaningful
     from .sounds import confirmation_tone
 else:
+    from collection import RequestCollection
     from interruptions import SpeechGate, is_meaningful
     from sounds import confirmation_tone
 
@@ -43,6 +47,19 @@ load_dotenv(DIRECTORY.parent / ".env")
 logger = logging.getLogger("alpha.voice_pipeline")
 BRAIN_URL = "http://127.0.0.1:8765/ask/stream"
 server = AgentServer()
+
+
+def explicit_web_request(text: str) -> bool:
+    """只匹配明确联网说法；不把查清单、查设备状态等本地查询当成搜索。"""
+    for clause in re.split(r"[，。！？；,;!?]", text):
+        if re.search(r"(?:不要|不用|别|別|不必|无需|無需).{0,8}(?:搜|上网|上網|联网|聯網|查)", clause):
+            continue
+        if re.search(
+            r"搜索|搜一下|搜一搜|(?:上网|上網|联网|聯網|网上|網上|网络上).{0,8}(?:查|搜)"
+            r"|(?:最新|今天|今日).{0,6}(?:新闻|新聞|消息|资讯|資訊)", clause
+        ):
+            return True
+    return False
 
 
 def last_user_text(chat_ctx: llm.ChatContext) -> str:
@@ -73,19 +90,44 @@ class BrainNodeLLM(llm.LLM):
 
 
 class AlphaVoiceAgent(Agent):
-    def __init__(self, http_client: httpx.AsyncClient) -> None:
+    def __init__(self, http_client: httpx.AsyncClient, *, collection_window_s: float | None = None) -> None:
         super().__init__(
             instructions="你是 Alpha 的语音接口。原样朗读大脑返回的回答。",
             llm=BrainNodeLLM(),
         )
         self.http_client = http_client
         self.interruptions = SpeechGate()
+        # 默认只由 LiveKit 判断轮次结束，不再叠加业务层的静音计时。
+        # 显式传 window 参数供旧窗口的回归测试使用；运行时可通过环境开关对比。
+        self.collection_enabled = (collection_window_s is not None
+                                   or os.getenv("ALPHA_COLLECTION_ENABLED", "0") == "1")
+        self.collection = RequestCollection(
+            float(os.getenv("ALPHA_COLLECTION_SECONDS", "2"))
+            if collection_window_s is None else collection_window_s,
+            continuation_s=float(os.getenv("ALPHA_CONTINUATION_SECONDS", "5")),
+        )
 
     async def on_enter(self) -> None:
         self.interruptions.attach(self.session)
+        if self.collection_enabled:
+            self.session.on("user_state_changed", self._collection_user_state)
 
     async def on_exit(self) -> None:
         self.interruptions.close()
+        if self.collection_enabled:
+            self.session.off("user_state_changed", self._collection_user_state)
+        self.collection.close()
+
+    def _collection_user_state(self, event: UserStateChangedEvent) -> None:
+        if event.new_state == "speaking":
+            self.collection.speech_started()
+        elif event.old_state == "speaking":
+            self.collection.speech_stopped()
+
+    async def on_user_turn_completed(self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage) -> None:
+        # 这里只登记，不等待；LiveKit 会等这个 hook 返回，才能安排下一轮。
+        if self.collection_enabled:
+            self.collection.add(new_message.text_content or "")
 
     async def stt_node(
         self, audio: AsyncIterable[rtc.AudioFrame], model_settings: ModelSettings,
@@ -98,13 +140,42 @@ class AlphaVoiceAgent(Agent):
                 text = event.alternatives[0].text if event.alternatives else ""
                 self.interruptions.restore()
                 if not is_meaningful(text):
+                    self.collection.transcript_resolved()
                     logger.info("[忽略] 非语言转写 %r，恢复音量，继续汇报", text)
                     continue  # 必须在进入 LiveKit 的取消逻辑之前丢弃。
                 if self.session.agent_state in {"speaking", "thinking"}:
                     logger.info("[确认打断] 有效转写 %r，停止旧回答", text)
                 # 状态可能仍显示 listening，但队列中已有回答；也要取消这些旧任务。
                 await self.session.interrupt(force=True)
+                self.collection.transcript_resolved()
             yield event
+
+    async def tts_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings,
+    ) -> AsyncIterator[rtc.AudioFrame]:
+        iterator = text.__aiter__()
+        try:
+            first = await anext(iterator)
+        except StopAsyncIteration:
+            return
+
+        async def head() -> AsyncIterator[str]:
+            yield first
+
+        if first == "好的，我查一查。":
+            # 单句分词器默认会留住最后一句等后文；把固定提示作为独立、已结束的
+            # TTS 输入，才能在大脑结果回来之前合成播放，不被整段回答拖住。
+            async for frame in Agent.default.tts_node(self, head(), model_settings):
+                yield frame
+            rest = iterator
+        else:
+            async def combined() -> AsyncIterator[str]:
+                yield first
+                async for part in iterator:
+                    yield part
+            rest = combined()
+        async for frame in Agent.default.tts_node(self, rest, model_settings):
+            yield frame
 
     async def llm_node(
         self,
@@ -116,11 +187,29 @@ class AlphaVoiceAgent(Agent):
         text = last_user_text(chat_ctx)
         if not text:
             return
+        if self.collection_enabled:
+            if not self.collection.parts:
+                # console 文字输入/直接 generate_reply 不经过语音 turn-completed hook。
+                self.collection.add(text)
+            text = await self.collection.take()
+            if not text:
+                if self.collection.prompt:
+                    prompt, self.collection.prompt = self.collection.prompt, None
+                    yield prompt  # 本地生成追问，走现有 TTS，不请求大脑或执行工具。
+                return
+        # 固定进度提示先送入 LiveKit 的 TTS，再请求大脑；不是模型生成的答案。
+        announced = explicit_web_request(text)
+        payload: dict[str, str | bool] = {"text": text}
+        if announced:
+            logger.info("[搜索提示] 明确联网请求，先提示再交给大脑")
+            yield "好的，我查一查。"
+            payload["search_announced"] = True
+        # 窗口只能阻止尚未提交的请求；发出 POST 后不能撤回已执行的操作。
         started = time.perf_counter()
         answer_parts: list[str] = []
         completed = False
         try:
-            async with self.http_client.stream("POST", BRAIN_URL, json={"text": text}) as response:
+            async with self.http_client.stream("POST", BRAIN_URL, json=payload) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
                     if not line.strip():

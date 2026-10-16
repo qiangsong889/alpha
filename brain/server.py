@@ -32,6 +32,7 @@ stream_tasks: set[asyncio.Task[None]] = set()
 
 class AskRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
+    search_announced: bool = False
 
 
 class AskResponse(BaseModel):
@@ -71,7 +72,7 @@ async def ask(body: AskRequest) -> AskResponse:
     # 语音层被打断时会断开连接，但这里不会被取消：正在执行的工具调用会完整做完，
     # 避免“写到一半”的状态；之后语音层再通过 /interrupted 告诉大脑用户实际听到了哪里。
     try:
-        answer = await brain.ask(body.text)
+        answer = await brain.ask(body.text, search_announced=body.search_announced)
     except Exception as exc:
         logger.exception("brain.ask 失败")
         raise HTTPException(status_code=502, detail="大脑处理失败") from exc
@@ -96,7 +97,8 @@ async def ask_stream(body: AskRequest) -> StreamingResponse:
 
     async def produce() -> None:
         try:
-            await brain.ask(body.text, on_text=emit, on_signal=signal)
+            await brain.ask(body.text, on_text=emit, on_signal=signal,
+                            search_announced=body.search_announced)
             events.put_nowait({"type": "done", "timings": brain.last_timings})
         except Exception:
             logger.exception("brain.ask 流式处理失败")

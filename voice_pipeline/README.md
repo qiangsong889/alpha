@@ -45,6 +45,50 @@ Defaults:
 Preemptive generation is disabled: the brain must not execute tools while a user
 turn is still tentative. Failed POST requests are not automatically retried.
 Interrupting speech does not roll back a tool already executed by the brain.
+
+By default, a completed LiveKit turn goes straight to the brain, without an
+additional collection timer or rule-based five-second prompt. Turn boundaries
+are handled by `MultilingualModel` with endpointing `min_delay=0.5` and
+`max_delay=3.0`. This removes the extra two seconds; it does not guarantee that
+every unfinished sentence will be recognized correctly. Tools still must not
+run speculatively (`preemptive_generation` stays disabled).
+
+For A/B testing only, set `ALPHA_COLLECTION_ENABLED=1` to restore the extra
+two-second collection window (`ALPHA_COLLECTION_SECONDS=2`). It is disabled
+even if old duration settings remain in `.env`. In this optional mode, further speech
+pauses submission; meaningful segments are combined into one request. The
+window restarts after the latest transcript/segment is collected, so it adds
+time beyond STT and LiveKit turn detection. Standalone “执行” (or a separated
+sentence-ending “，执行”) submits the current collection immediately after
+speech/transcription completes. Ordinary phrases such as “提醒我执行” are not
+treated as the control command.
+
+After LiveKit commits the turn (and any optional collection), explicit web requests (“帮我搜一下”, “上网查”, “最新新闻”)
+first emit “好的，我查一查。” locally, before the brain POST. Local list/device
+queries and explicitly negated search requests do not trigger this heuristic.
+The prompt is synthesized as a separate finite TTS segment so the sentence
+tokenizer cannot hold it until the final answer arrives. Synthesis/playback and
+the brain request can overlap; the POST does not wait for playback completion.
+The request carries `search_announced=true` to suppress the brain's search-start
+prompt. For searches missed by this narrow heuristic, the brain still prompts
+on its first actual search-start event. Misclassification is possible; this
+heuristic announces progress, not proof that a search actually succeeded.
+
+Only in the optional collection mode, obvious unfinished endings (for example “然后……”, “还有”, “再帮我”, or
+“把牛奶” without an action) use a five-second continuation window instead
+(`ALPHA_CONTINUATION_SECONDS=5`). Connectors inside complete instructions do
+not extend the window. After that window, the voice layer asks once:
+“你还没说完，我在听。接下来要做什么？” No brain request is sent. Unfinished
+tasks stay in memory until continued or the voice process exits; silence does
+not execute them and there is no repeated prompting. “就这些” / “没了” also
+submit complete collections immediately, but cannot override a known
+unfinished ending. These narrow text rules do not guarantee semantic
+completeness; missing tool parameters still require validation by the brain.
+
+In that optional mode, cancelling a waiting LiveKit generation preserves unsubmitted text for the next
+turn. Noise transcripts are not appended. If a new speech segment has no final
+transcript yet, pending tasks remain held rather than executing prematurely.
+Once the POST starts, a later correction cannot undo a tool already dispatched.
 During playback, detected speech lowers outgoing audio to 20% while the report
 keeps playing. The `stt_node` waits for a final transcript before deciding:
 
@@ -95,10 +139,11 @@ For correctness, answer text now waits for response validation instead of being
 spoken token by token while that same response may still contain later tools.
 The HTTP transport and TTS audio remain streaming, with short-sentence playback.
 
-Successful HA-only turns use a local 120 ms confirmation tone instead of spoken
-results. This includes HA status queries: they may still need further tool
-decisions, but the final summary is not sent to TTS. One tone is played only after
-the complete HA-only turn succeeds. Failures and unknown outcomes are still explained verbally;
+Turns containing only successful HA device actions (on/off/brightness) use a
+local 120 ms confirmation tone instead of spoken results. HA status queries
+must speak their answers; any turn with a query or web search is not muted.
+One tone is played only after the complete device-action-only turn succeeds.
+Failures and unknown outcomes are still explained verbally;
 personal-tool results continue to use speech. The tone is delivered as a
 `signal` event with `name="ha_done"` and played through LiveKit's existing audio
 queue, without a TTS request or an extra conversational message.

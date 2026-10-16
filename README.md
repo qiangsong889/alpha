@@ -9,6 +9,35 @@ The current implementation includes a command-line agent connected to both Home 
 ### Home Assistant Agent
 
 - Calls Claude using `AsyncAnthropic` and responds briefly in Chinese.
+- Enables Anthropic's server-side `web_search_20260209` tool with its default
+  dynamic filtering for current information and
+  explicit search requests (up to five searches per API request). No additional
+  MCP server or search API key is needed. Search queries, errors and cited sources
+  appear in brain logs; text answers include source links, while voice answers
+  stay brief and do not read URLs. For explicit requests such as “帮我搜一下”,
+  “上网查” or “最新新闻”, LiveKit emits “好的，我查一查。” before the brain
+  POST. It sends `search_announced=true` so the brain does not repeat it.
+  Otherwise, the first streamed search-start event triggers the same phrase.
+  This fixed progress phrase is emitted once and is
+  separate from the final answer. Search results stay in conversation history.
+  Search has additional Anthropic usage charges. If the API reports that search
+  is disabled, enable web search for your organization in the Claude Console.
+  Home weather and outdoor advice now prefer `get_weather(day="today"|"tomorrow")`,
+  using Open-Meteo rather than web search or a home weather sensor. The tool
+  reads home coordinates and timezone from HA's authenticated `GET /api/config`
+  with existing `HA_URL`/`HA_TOKEN`, caches the valid location until restart,
+  and refreshes weather on each call. Missing coordinates and `(0, 0)` are errors.
+  Both services have five-second request timeouts. Results contain only selected
+  weather data, never coordinates; tomorrow's summary does not mix in current
+  temperatures. Errors distinguish location lookup from weather-service failure.
+  Web search uses the optional `HOME_CITY`, `HOME_REGION` and `HOME_COUNTRY`
+  environment settings as an approximate location, with the configured
+  `REMINDER_TIMEZONE`. The tool definition is built after `.env` loads; without
+  `HOME_CITY`, no `user_location` is sent. These search settings do not override
+  the weather tool's fixed home location. The model has no separate home-location
+  tool: lookup remains internal to `get_weather`. HA Assist instructions apply to home devices, not to
+  external-information queries. See [Open-Meteo](https://open-meteo.com/en/docs)
+  for forecast data and WMO weather codes.
 - Connects to Home Assistant's `/api/mcp` endpoint over Streamable HTTP and initializes an MCP session.
 - Discovers tools from both sessions, rejects duplicate tool names at startup, filters tools through an allowlist, and converts their schemas to Claude's tool format.
 - Routes tool calls to the owning session. The HTTP client remains open for the process lifetime; personal tools are cached after a short discovery connection, and a background `PersonalWorker` holds the personal stdio subprocess/session and serializes calls through a queue; Home Assistant tools and the Assist prompt are cached after an initial discovery connection. Each HA tool call creates, initializes, and closes its own transport and session.

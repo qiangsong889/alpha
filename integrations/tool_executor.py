@@ -18,7 +18,7 @@ from integrations.tool_policy import INTERNAL_TOOLS, get_policy
 
 HA_ACTION_TOOLS = {"intent__HassTurnOn", "intent__HassTurnOff", "light__HassLightSet"}
 HA_DEVICE_TOOLS = HA_ACTION_TOOLS | {"homeassistant__GetLiveContext"}
-PERSONAL_TOOLS = {"list_items", "list_reminders", "add_items", "complete_items", "create_reminder"}
+PERSONAL_TOOLS = {"list_items", "list_reminders", "get_weather", "add_items", "complete_items", "create_reminder"}
 
 
 def make_executor(

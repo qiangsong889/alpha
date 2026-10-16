@@ -12,13 +12,15 @@ from threading import RLock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
 import hashlib
-from typing import Any
+import httpx2
+from typing import Any, Literal
 from dotenv import load_dotenv
 
 from core.paths import ENV_FILE
 from opencc import OpenCC
 
 from servers.google_auth import get_credentials
+from servers import weather
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -130,6 +132,29 @@ def list_reminders(max_results: int = 10) -> CallToolResult:
 def _task_result(text: str, data: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
     return CallToolResult(content=[TextContent(type="text", text=text)],
                           structured_content=data, is_error=is_error)
+
+
+@mcp.tool()
+def get_weather(day: Literal["today", "tomorrow"] = "today") -> CallToolResult:
+    """查询 HA 配置的家附近今天或明天的天气，摄氏度；不返回或朗读家的经纬度。
+
+    这是家庭位置的预报，不代表用户当前定位，也不用于查询其他城市。
+    """
+    if day not in ("today", "tomorrow"):
+        return _task_result("day 只能是 today 或 tomorrow", {}, is_error=True)
+    with httpx2.Client(timeout=5.0) as client:
+        try:
+            lat, lon, tz = weather.home_location(client)
+        except (httpx2.HTTPError, ValueError, KeyError, OverflowError) as exc:
+            # 不返回异常原文：请求 URL 或服务响应可能包含家的坐标。
+            reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx2.HTTPStatusError) else "请检查 HA 连接、家庭经纬度和时区配置"
+            return _task_result(f"读取家庭位置失败：{reason}", {}, is_error=True)
+        try:
+            data = weather.fetch_forecast(client, lat, lon, tz)
+            return _task_result(weather.summarize(data, day), weather.forecast_details(data, day))
+        except (httpx2.HTTPError, ValueError, KeyError, OverflowError) as exc:
+            reason = f"HTTP {exc.response.status_code}" if isinstance(exc, httpx2.HTTPStatusError) else "连接超时、网络故障或返回数据不完整"
+            return _task_result(f"天气服务暂时不可用：{reason}", {}, is_error=True)
 
 
 @mcp.tool()
