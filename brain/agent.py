@@ -5,28 +5,82 @@ import json
 import logging
 import os
 import time
+from copy import deepcopy
 from contextlib import AsyncExitStack
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
+from typing import Literal, cast
+from uuid import uuid4
 
 import httpx2
 from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, TextBlockParam, ToolParam, ToolResultBlockParam
 from dotenv import load_dotenv
 
-from core.paths import ENV_FILE, PROJECT_ROOT, VENV_PYTHON
+from core.paths import ENV_FILE, OPERATIONS_DB, PROJECT_ROOT, VENV_PYTHON
 from mcp import StdioServerParameters
-from mcp.types import CallToolResult, TextContent
+from integrations.operations import Operation, OperationStore
+from integrations.tool_executor import HA_ACTION_TOOLS, format_for_model, make_executor
+from integrations.tool_gateway import ToolGateway
+from integrations.tool_policy import INTERNAL_TOOLS, TOOL_POLICY, get_policy
 from integrations.personal_worker import PersonalWorker, stop_worker
 from integrations.mcp_client import (
-    ALLOWED_TOOLS, call_ha_tool, catalog_system, format_error,
+    catalog_system, format_error,
     load_ha_catalog, load_personal_catalog, merge_tools,
-    device_action_succeeded,
 )
 
 logger = logging.getLogger("alpha.brain")
 
-def device_action_reply(name: str, arguments: dict, result: CallToolResult) -> str | None:
+VOICE_RULES = (
+    "回答会被朗读出来：默认只说一句极简短的口语；不要用 Markdown、列表、符号或表情；"
+    "时间和数字用口语说（例如明天早上八点、百分之三十）；不要念出任何 ID。"
+    "任务执行汇报必须简短：按购物清单、日历、家居等类别合并，一类只提一次。"
+    "全部成功时，例如‘购物清单、日历已更新，家居操作成功。’或‘购物清单已更新。’"
+    "除非用户明确要求核对，不逐条复述条目、设备、日期、时间或操作过程。"
+    "有失败、未执行或结果未知时，必须简短指出对应类别及状态，不能笼统说全部成功；"
+    "例如‘购物清单已更新，日历失败。’‘日历结果未知，请先核实。’"
+    "查询按实际结果简短回答，不用‘操作成功’代替查询答案。"
+    "不加开场白、重复确认或‘还需要我帮忙吗’等结尾。"
+)
+DUPLICATE_TOOLS = frozenset({"add_items", "create_reminder"})
+TextSink = Callable[[str], Awaitable[None]]
+# 这是流式语音的输出格式，不是业务工具，不会经过网关或向 MCP 发布。
+VOICE_REPLY = "alpha_voice_reply"
+VOICE_REPLY_TOOL: ToolParam = {
+    "name": VOICE_REPLY,
+    "description": (
+        "所有需要的业务工具都已执行并取得结果后，单独调用此工具输出最终口语回答。"
+        "多个独立业务工具可以在一次回复中批量调用；依赖前一步结果的工具分轮调用。"
+        "不能用本工具代替业务工具，也不要在同一回复中混用本工具和业务工具。"
+    ),
+    "input_schema": {"type": "object", "properties": {
+        "answer": {"type": "string", "description": (
+            "给用户的一句极简短最终回答。任务汇报按类别合并，例如‘购物清单、日历已更新，家居操作成功。’"
+            "不逐项复述任务；部分失败或未知必须简短说清，查询则直接回答结果。"
+        )},
+    }, "required": ["answer"], "additionalProperties": False},
+}
+
+
+def spoken_number(value: int | float) -> str:
+    """设备亮度的零到一百用中文读法，小数逐位读。"""
+    digits = "零一二三四五六七八九"
+    whole, _, fraction = f"{value:g}".partition(".")
+    number = int(whole)
+    if not 0 <= number <= 100:
+        return str(value)
+    if number < 10:
+        text = digits[number]
+    elif number < 100:
+        tens, units = divmod(number, 10)
+        text = (digits[tens] if tens > 1 else "") + "十" + (digits[units] if units else "")
+    else:
+        text = "一百"
+    return text + ("点" + "".join(digits[int(n)] for n in fraction) if fraction else "")
+
+
+def device_action_reply(op: Operation, *, voice: bool = False) -> str | None:
     """只对明确成功的 HA 设备操作生成简短确认，其他结果交给模型。"""
     # 只有明确成功的设备操作才由代码直接说确认语，省掉再请求一次 Claude 的时间。
     # 查询、个人清单、失败或无法判断的结果返回 None，继续交给模型组织回答。
@@ -35,7 +89,8 @@ def device_action_reply(name: str, arguments: dict, result: CallToolResult) -> s
         "intent__HassTurnOff": "关闭",
         "light__HassLightSet": "调整",
     }
-    if not device_action_succeeded(name, result):
+    name, arguments = op.name, op.arguments
+    if op.status != "succeeded" or name not in HA_ACTION_TOOLS:
         return None
     target = arguments.get("name")
     if not isinstance(target, str) or not target.strip():
@@ -48,14 +103,18 @@ def device_action_reply(name: str, arguments: dict, result: CallToolResult) -> s
         if type(brightness) in (int, float) and set(arguments) <= {
             "name", "area", "floor", "domain", "brightness"
         }:
-            return f"已把{target}调到 {brightness:g}%"
+            amount = f"百分之{spoken_number(cast(int | float, brightness))}" if voice else f"{brightness:g}%"
+            return f"已把{target}调到{amount}" if voice else f"已把{target}调到 {amount}"
         return f"已调整{target}的灯光"
     return f"已{actions[name]}{target}"
 
 
 class AlphaBrain:
     # 大脑不读取麦克风、不直接朗读；CLI 或 HTTP 语音层都只需要调用 start/ask/close。
-    def __init__(self, *, model: str | None = None):
+    def __init__(self, *, model: str | None = None, style: Literal["text", "voice"] = "text"):
+        if style not in {"text", "voice"}:
+            raise ValueError("style 必须是 text 或 voice")
+        self.style = style
         self._model_override = model
         self.model = ""
         self.ha_url = ""
@@ -65,6 +124,8 @@ class AlphaBrain:
         self.http_client: httpx2.AsyncClient | None = None
         self.worker: PersonalWorker | None = None
         self.worker_task: asyncio.Task[None] | None = None
+        self.store: OperationStore | None = None
+        self.gateway: ToolGateway | None = None
         # 放在实例上的对话历史和目录会跨 ask 保留，而不是每句话都重新建立一份。
         self.messages: list[MessageParam] = []
         self.personal_tools: list[ToolParam] | None = None
@@ -88,8 +149,31 @@ class AlphaBrain:
         self.tools, self.tool_owners = merge_tools({
             "personal": self.personal_tools if self.personal_tools is not None else [],
             "home_assistant": self.ha_catalog[0] if self.ha_catalog is not None else [],
-        })
+        }, allowed_names=set(TOOL_POLICY) - INTERNAL_TOOLS)
+        # 在本地 schema 副本添加控制参数，不能污染 MCP 原目录或传给真实工具。
+        self.tools = deepcopy([tool for tool in self.tools if get_policy(tool["name"]) is not None])
+        for tool in self.tools:
+            if tool["name"] in DUPLICATE_TOOLS:
+                schema = tool["input_schema"]
+                properties = schema.setdefault("properties", {})
+                if not isinstance(properties, dict):
+                    raise ValueError(f"工具 {tool['name']} 的 properties 必须是对象")
+                properties["confirm_duplicate"] = {
+                    "type": "boolean",
+                    "description": "仅当用户明确要求重复执行之前已成功的同一操作时设为 true。",
+                }
         self.system = catalog_system(self.ha_catalog, self.personal_tools)
+        self.system = deepcopy(self.system)
+        self.system[0]["text"] += (
+            "\n工具结果是执行事实。同一轮结果未知时不要自动重试，先查询核实。"
+            "用户在新一轮明确再次要求时，重新提交给网关判定，不凭历史 unknown 永久拒绝。"
+            "本次没有执行时不能声称已经完成。只有用户明确要求再做一次时，"
+            "才能在下次调用中添加 confirm_duplicate=true；不能自行确认重复。"
+            "开关灯、调亮度等可安全重试的操作：同一轮出错不要自动重试，"
+            "但收到用户新的一次明确命令时应重新调用工具，不因历史 unknown 拒绝。"
+        )
+        if self.style == "voice":
+            self.system[0]["text"] += "\n" + VOICE_RULES
 
     async def start(self) -> None:
         async with self._lock:
@@ -113,6 +197,14 @@ class AlphaBrain:
             await stack.__aenter__()
             self._stack = stack
             try:
+                OPERATIONS_DB.parent.mkdir(parents=True, exist_ok=True)
+                self.store = OperationStore(OPERATIONS_DB)
+                stack.callback(self.store.close)
+                self.store.acquire_process_lock()
+                for op in self.store.recover_on_startup():
+                    logger.warning("[恢复] %s %s → unknown，不自动重试", op.id, op.name)
+                for op in self.store.discard_unsubmitted():
+                    logger.info("[恢复] 旧进程未提交操作 %s 已取消", op.id)
                 self.http_client = await stack.enter_async_context(httpx2.AsyncClient(
                     headers={"Authorization": f"Bearer {token}"},
                     timeout=httpx2.Timeout(30.0, read=300.0),
@@ -122,6 +214,9 @@ class AlphaBrain:
                 # run 长期等队列，必须安排为后台任务；直接 await 会停在这里，无法完成启动。
                 self.worker_task = asyncio.create_task(self.worker.run(), name="personal-worker")
                 stack.push_async_callback(stop_worker, self.worker_task)
+                self.gateway = ToolGateway(self.store, make_executor(
+                    ha_url=self.ha_url, http_client=self.http_client, worker=self.worker,
+                ))
                 self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
                 self._prepare_catalog()
                 logger.info("可用工具：%s", "、".join(tool["name"] for tool in self.tools) or "无")
@@ -134,9 +229,11 @@ class AlphaBrain:
                     self._stack = None
                     self.client = self.http_client = self.worker = None
                     self.worker_task = None
+                    self.store = self.gateway = None
                 raise
 
-    async def ask(self, request: str) -> str:
+    async def ask(self, request: str, *, on_text: TextSink | None = None,
+                  on_signal: TextSink | None = None) -> str:
         # 一次用户提问的入口：确认启动状态、重试失败的目录发现、注入时间、进入工具循环。
         async with self._lock:
             if (not self._started or self.http_client is None or self.personal_server is None
@@ -156,7 +253,8 @@ class AlphaBrain:
             timed_request = (
                 f"[当前本地时间：{current_time}；时区：{self.reminder_tz.key}]\n{request}"
             )
-            answer = await self._agent_turn(timed_request, self.last_timings)
+            answer = await self._agent_turn(timed_request, self.last_timings,
+                                            turn_id=uuid4().hex, on_text=on_text, on_signal=on_signal)
             logger.debug("[耗时] %s ｜ brain总计 %.2fs", " ｜ ".join(
                 f"{label} {elapsed:.2f}s" for label, elapsed in self.last_timings
             ), time.perf_counter() - started)
@@ -187,31 +285,56 @@ class AlphaBrain:
             finally:
                 self.client = self.http_client = self.worker = None
                 self.worker_task = None
+                self.store = self.gateway = None
 
-    async def _agent_turn(self, user_text: str, timings: list[tuple[str, float]]) -> str:
+    async def _stream_response(self, messages: list[MessageParam]):
+        """允许批量工具，完整检查本次回复后才决定是否可以朗读。
+
+        即使最终回答字段先到，也可能随后跟着业务工具；不能在检查前播放。
+        """
+        assert self.client is not None
+        async with self.client.messages.stream(
+            model=self.model, max_tokens=4096, system=self.system,
+            tools=[*self.tools, VOICE_REPLY_TOOL], messages=messages,
+            tool_choice={"type": "any"},
+            cache_control={"type": "ephemeral"},
+        ) as stream:
+            async for _event in stream:
+                pass
+            response = await stream.get_final_message()
+        return response
+
+    async def _agent_turn(self, user_text: str, timings: list[tuple[str, float]], *, turn_id: str,
+                          on_text: TextSink | None = None, on_signal: TextSink | None = None) -> str:
         # 一轮用户输入可能需要多次 Claude 请求：先决策工具 → 执行工具 → 再生成回答。
         client = self.client
-        worker = self.worker
-        http_client = self.http_client
-        if client is None or worker is None or http_client is None:
+        gateway, store = self.gateway, self.store
+        if client is None or gateway is None or store is None:
             raise RuntimeError("请先调用 AlphaBrain.start()")
         tool_owners, model, system = self.tool_owners, self.model, self.system
-        tools, messages, ha_url = self.tools, self.messages, self.ha_url
+        tools, messages = self.tools, self.messages
         # 成功完成这一轮后才保存，避免 API 失败留下不完整的工具消息。
         current: list[MessageParam] = [{"role": "user", "content": user_text}]
         available_names = {tool["name"] for tool in tools}
-        for request_index in range(1, 11):
+        turn_ha_successes: list[bool] = []
+        turn_action_replies: list[str | None] = []
+
+        for request_index in range(1, 21 if on_text is not None else 11):
             # 设置轮数上限，避免模型一直调用工具而不结束；每次请求保留历史和本轮中间消息。
             started = time.perf_counter()
-            response = await client.messages.create(
-                # await 等这次 Claude 返回，但不阻止 MCP worker 等其他任务继续执行。
-                model=model,
-                max_tokens=4096,
-                system=system,
-                tools=tools,
-                messages=messages + current,
-                cache_control={"type": "ephemeral"}
-            )
+            mute_ha_summary = on_signal is not None and bool(turn_ha_successes) and all(turn_ha_successes)
+            if on_text is not None:
+                response = await self._stream_response(messages + current)
+            else:
+                response = await client.messages.create(
+                    # await 等这次 Claude 返回，但不阻止 MCP worker 等其他任务继续执行。
+                    model=model,
+                    max_tokens=4096,
+                    system=system,
+                    tools=tools,
+                    messages=messages + current,
+                    cache_control={"type": "ephemeral"},
+                )
             if timings is not None:
                 timings.append((f"Claude 第{request_index}次", time.perf_counter() - started))
             logger.info(
@@ -224,48 +347,105 @@ class AlphaBrain:
             if response.stop_reason not in {"end_turn", "tool_use"}:
                 raise RuntimeError(f"未处理的停止原因：{response.stop_reason}")
 
+            voice_calls = [block for block in response.content
+                           if block.type == "tool_use" and block.name == VOICE_REPLY]
+            business_calls = [block for block in response.content
+                              if block.type == "tool_use" and block.name != VOICE_REPLY]
+            if on_text is not None and voice_calls and not business_calls:
+                call = voice_calls[0]
+                answer = call.input.get("answer") if isinstance(call.input, dict) else None
+                if (len(voice_calls) != 1 or not isinstance(answer, str)
+                        or any(block.type == "tool_use" and block.name != VOICE_REPLY
+                               for block in response.content)):
+                    raise RuntimeError("流式最终回答格式无效")
+                if mute_ha_summary:
+                    assert on_signal is not None
+                    await on_signal("ha_done")
+                else:
+                    await on_text(answer)
+                # 私有输出工具只是一种传输格式，历史中存正常 assistant 回答。
+                current.append({"role": "assistant", "content": answer})
+                messages.extend(current)
+                return answer
+
             current.append({"role": "assistant", "content": response.content})
             if response.stop_reason == "end_turn":
                 # end_turn 才是模型结束本轮；tool_use 则需要客户端执行动作后再提供结果。
-                messages.extend(current)
-                return "".join(
+                answer = "".join(
                     block.text for block in response.content if block.type == "text"
                 )
+                if on_text is None and turn_action_replies and all(r is not None for r in turn_action_replies):
+                    answer = "，".join(r for r in turn_action_replies if r is not None) + "。"
+                    current[-1] = {"role": "assistant", "content": answer}
+                messages.extend(current)
+                if mute_ha_summary:
+                    assert on_signal is not None
+                    await on_signal("ha_done")
+                elif on_text is not None and answer:
+                    await on_text(answer)
+                return answer
 
             calls = [block for block in response.content if block.type == "tool_use"]
             if not calls:
                 raise RuntimeError("模型要求调用工具，但没有返回工具调用")
 
             results: list[ToolResultBlockParam] = []
-            action_replies: list[str | None] = []
             for block in calls:
+                if on_text is not None and block.name == VOICE_REPLY:
+                    # 同轮还有业务工具：不要朗读提前生成的总结，但每个 call_id 都要有结果。
+                    results.append({"type": "tool_result", "tool_use_id": block.id,
+                                    "is_error": True,
+                                    "content": "本次总结未播报；同轮业务工具尚待执行，请根据执行结果重新生成最终回答。"})
+                    continue
                 logger.info("[工具] %s 参数：%s", block.name, json.dumps(block.input, ensure_ascii=False))
                 tool_started = time.perf_counter()
                 action_reply = None
+                ha_success = False
                 try:
-                    if block.name not in ALLOWED_TOOLS or block.name not in available_names:
+                    policy = get_policy(block.name)
+                    if policy is None or block.name not in available_names:
                         raise ValueError(f"工具不在可用白名单中：{block.name}")
                     if not isinstance(block.input, dict):
                         raise ValueError("工具参数必须是对象")
-                    owner = tool_owners.get(block.name)
-                    # 根据启动时建立的路由表分发，不把工具名当 Python 代码直接执行。
-                    if owner == "home_assistant":
-                        result = await call_ha_tool(
-                            block.name, block.input, url=ha_url, http_client=http_client
-                        )
-                    elif owner == "personal":
-                        result = await worker.call(block.name, block.input)
+                    args = dict(block.input)
+                    confirmed = args.pop("confirm_duplicate", False) is True
+                    # 可安全重试的开关灯不受旧 unknown 阻塞；新增等操作仅短时保护。
+                    unknown = store.recent_unknown(block.name, args) if policy.mutates else None
+                    if unknown is not None and policy.retry_safe and unknown.turn_id != turn_id:
+                        unknown = None  # 新一轮明确命令可重试；本轮仍禁止自动重放。
+                    duplicate = (store.recent_succeeded(block.name, args)
+                                 if block.name in DUPLICATE_TOOLS and not confirmed else None)
+                    if unknown is not None or duplicate is not None:
+                        # submit(immediate) 会直接执行，因此拦截路径必须只登记，再取消。
+                        op = gateway.register(turn_id, block.name, args)
+                        gateway.cancel(op.id)
+                        cancelled = store.get(op.id)
+                        assert cancelled is not None
+                        op = cancelled
+                        if unknown is not None:
+                            text = ("本次没有执行。十分钟内相同操作的结果未知，可能已经生效。"
+                                    "不要重试，先查询确认。保护窗口过后用户可重新提交，但仍有重复风险。")
+                            is_error = True
+                        else:
+                            formatted = format_for_model(op, duplicate_of=duplicate)
+                            text = formatted["text"] + (
+                                '如果用户明确要再做一次，下次调用时在参数里加上 "confirm_duplicate": true。'
+                            )
+                            is_error = formatted["is_error"]
                     else:
-                        raise ValueError(f"工具没有对应服务器：{block.name}")
-                    if not isinstance(result, CallToolResult):
-                        raise RuntimeError("工具未返回完整结果")
-                    text = "\n".join(
-                        content.text for content in result.content
-                        if isinstance(content, TextContent)
-                    )
-                    is_error = result.is_error
-                    if owner == "home_assistant":
-                        action_reply = device_action_reply(block.name, block.input, result)
+                        op = await gateway.submit(turn_id, block.name, args)
+                        if op.status == "pending":
+                            if policy.commit == "confirm":
+                                # 未来的高风险工具不能因为没有等待窗口就跳过确认。
+                                gateway.cancel(op.id)
+                                raise ValueError("此工具需要单独的用户确认流程，当前入口尚未支持，本次没有执行")
+                            gateway.approve(op.id)
+                            op = await gateway.execute(op.id)
+                        formatted = format_for_model(op)
+                        text, is_error = formatted["text"], formatted["is_error"]
+                        if tool_owners.get(block.name) == "home_assistant":
+                            action_reply = device_action_reply(op, voice=self.style == "voice")
+                            ha_success = op.status == "succeeded"
                 except Exception as exc:
                     text = f"工具执行失败：{format_error(exc)}。操作可能已生效，写入操作不要盲目重试。"
                     is_error = True
@@ -274,7 +454,8 @@ class AlphaBrain:
                         timings.append(("工具", time.perf_counter() - tool_started))
 
                 logger.info("[结果] isError=%s %s", is_error, text[:100])
-                action_replies.append(action_reply)
+                turn_action_replies.append(action_reply)
+                turn_ha_successes.append(ha_success)
                 results.append({
                     # tool_use_id 必须对应模型发来的 block.id，模型才能把结果配回原调用。
                     "type": "tool_result",
@@ -283,11 +464,7 @@ class AlphaBrain:
                     "is_error": is_error,
                 })
             current.append({"role": "user", "content": results})
-            # Claude 协议中工具结果放在 user 消息里；它是程序回传，不是用户又输入了一句。
-            if all(reply is not None for reply in action_replies):
-                answer = "，".join(reply for reply in action_replies if reply is not None) + "。"
-                current.append({"role": "assistant", "content": answer})
-                messages.extend(current)
-                return answer
+            # 一次 tool_use 只是本轮的一步，不代表用户的所有任务都已完成。
+            # 必须回传结果并继续循环，直到 end_turn 或最终语音回答明确结束整轮。
 
         raise RuntimeError("达到最大调用次数，仍未生成最终回答")

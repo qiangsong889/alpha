@@ -1170,6 +1170,7 @@ async def main() -> None:
         OPERATIONS_DB.parent.mkdir(parents=True, exist_ok=True)
         store = OperationStore(OPERATIONS_DB)
         stack.callback(store.close)
+        store.acquire_process_lock()
         for recovered in store.recover_on_startup():
             print(f"[恢复] 操作 {recovered.id} {recovered.name}：executing → unknown，不自动重试")
         for discarded in store.discard_unsubmitted():

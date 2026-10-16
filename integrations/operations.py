@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import time
-from typing import Any, Literal, cast
+from typing import IO, Any, Literal, cast
 from uuid import uuid4
 
 
@@ -42,6 +42,8 @@ class OperationStore:
     """一个实例持有一个同步 SQLite 连接，应在创建它的线程使用，结束时调用 close。"""
 
     def __init__(self, db_path: str | Path):
+        self._db_path = str(db_path)
+        self._process_lock: IO[str] | None = None
         self._db = sqlite3.connect(str(db_path))
         self._db.row_factory = sqlite3.Row
         with self._db:
@@ -151,8 +153,37 @@ class OperationStore:
             """, (now,))
             return [replace(self._from_row(row), status="unknown", updated_at=now) for row in rows]
 
+    def recent_unknown(self, name: str, arguments: dict[str, Any], within_s: float = 600) -> Operation | None:
+        """有界的重提保护；过期不等于执行失败，原 unknown 记录仍保留。"""
+        if within_s < 0:
+            raise ValueError("within_s 不能为负数")
+        row = self._db.execute("""
+            SELECT * FROM operations WHERE name=? AND arguments=? AND status='unknown' AND updated_at>=?
+            ORDER BY updated_at DESC, rowid DESC LIMIT 1
+        """, (name, _arguments_json(arguments), time.time() - within_s)).fetchone()
+        return self._from_row(row) if row is not None else None
+
+    def acquire_process_lock(self) -> None:
+        """生产入口在恢复前独占操作库，防止把另一进程的 executing 当成崩溃遗留。"""
+        if self._db_path == ":memory:" or self._process_lock is not None:
+            return
+        import fcntl
+
+        lock_file = open(self._db_path + ".lock", "a")
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            lock_file.close()
+            raise RuntimeError("操作库正在被另一个 Alpha/Qwen 入口使用，请先关闭那个进程") from None
+        self._process_lock = lock_file
+
     def close(self) -> None:
-        self._db.close()
+        try:
+            self._db.close()
+        finally:
+            if self._process_lock is not None:
+                self._process_lock.close()
+                self._process_lock = None
 
     def discard_unsubmitted(self) -> list[Operation]:
         """程序重启不恢复旧计划；明确取消旧进程遗留的未发送操作。"""

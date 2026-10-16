@@ -387,12 +387,48 @@ async def handle_requests():
         await brain.close()
 ```
 
-`ask()` injects current local time, retries catalogs that failed discovery, and preserves the existing tool loop and successful-device shortcut. `close()` stops the personal worker and closes the clients. Calls are serialized to keep history consistent. Use `python -m apps.cli` or the existing `python alpha.py`; both retain `--voice`.
+`ask()` injects current local time, retries catalogs that failed discovery, and continues the tool loop until Claude explicitly finishes the user turn. A successful device tool is one step, not an early exit: later device or personal tasks in the same request must still run. `close()` stops the personal worker and closes the clients. Calls are serialized to keep history consistent. Use `python -m apps.cli` or the existing `python alpha.py`; both retain `--voice`.
+
+All brain tool calls pass through `ToolGateway` and are recorded in
+`data/operations.db`. Only loaded, policy-approved public tools are exposed.
+Deferred operations execute immediately after registration in this pipeline;
+there is no additional two-second window. Lights retain their immediate execution
+and factual device summaries. Completing even a single device request requires
+a final Claude completion decision; the former one-request shortcut could
+silently discard the remaining tasks and has been removed.
+
+The voice brain now accepts multiple business tool calls per Claude response,
+executes them in order, and returns their tool results together. It validates the
+entire response before speaking; a summary accompanying unfinished business calls
+is rejected rather than played. This reduces model round trips for independent
+tasks without executing writes concurrently or ending after the first tool.
+
+Identical `add_items` and `create_reminder` calls within ten minutes are recorded
+as cancelled without execution. Claude may request an intentional repeat using
+the brain-only boolean `confirm_duplicate: true`; this parameter is removed
+before recording or executing tool arguments. An identical `unknown` write that
+is unsafe to retry blocks another attempt for ten minutes, even with that flag;
+query its actual outcome first. Blocked attempts do not extend that window.
+After it expires, a new explicit user request may execute; expiration does not
+prove the previous request failed, so duplicate creation remains possible.
+Old records remain `unknown`. Retry-safe operations such as HA lights accept a
+new user turn immediately, while automatic retries in the same turn stay blocked.
+
+`brain.server` uses `AlphaBrain(style="voice")`: short spoken answers, oral time
+and number phrasing, and no IDs. The factual device brightness summary also uses
+spoken percentages. Text CLI behavior is unchanged.
+
+The brain and Qwen entrypoints take an exclusive lock on the operation database
+before startup recovery. Run one of these entrypoints at a time; a second one
+fails with an explanation instead of changing an active operation to `unknown`.
+On startup, abandoned `executing` records become `unknown`, and unsubmitted old
+operations are cancelled. Records survive restarts; `close()` releases the store
+and its lock.
 
 Brain and MCP debug output uses the `alpha.brain`, `alpha.mcp`, and `alpha.personal_worker` logging namespaces. CLI timing uses `alpha.cli`. The CLI enables INFO logs on stderr; library imports do not configure global logging. Other voice layers can configure these loggers independently.
 
 Regression tests (no external API requests):
 
 ```bash
-.venv/bin/python -m unittest test_brain -v
+.venv/bin/python -m unittest tests.test_brain -v
 ```

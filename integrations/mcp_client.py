@@ -72,7 +72,9 @@ async def load_tools(session: ClientSession) -> list[ToolParam]:
 
 def merge_tools(
     catalogs: dict[str, list[ToolParam]],
+    *, allowed_names: set[str] | frozenset[str] | None = None,
 ) -> tuple[list[ToolParam], dict[str, str]]:
+    allowed = ALLOWED_TOOLS if allowed_names is None else allowed_names
     tools: list[ToolParam] = []
     # owners 是“工具名 → 所属服务器”的路由表，执行时据此选择正确的 MCP 连接。
     owners: dict[str, str] = {}
@@ -83,7 +85,7 @@ def merge_tools(
                 # 白名单过滤之前就检查重名，防止两个 server 的同名工具被悄悄覆盖。
                 raise RuntimeError(f"工具重名：{name}（{owners[name]} / {server_name}）")
             owners[name] = server_name
-            if name in ALLOWED_TOOLS:
+            if name in allowed:
                 tools.append(tool)
     return tools, {tool["name"]: owners[tool["name"]] for tool in tools}
 

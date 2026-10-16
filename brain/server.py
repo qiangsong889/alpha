@@ -4,25 +4,30 @@
 两边不能装在同一个虚拟环境里。用 HTTP 隔开，两边各用各的依赖。
 
 运行（alpha 的虚拟环境）：
-    .venv/bin/python brain_server.py
+    .venv/bin/python -m brain.server
 接口：
     POST /ask          {"text": "..."}    → {"answer": "...", "timings": [...]}
+    POST /ask/stream   {"text": "..."}    → NDJSON delta / done / error
     POST /interrupted  {"spoken": "..."}  → {"ok": true}
     GET  /health
 """
 
 import logging
+import asyncio
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import uvicorn
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from brain.agent import AlphaBrain
 
 logger = logging.getLogger("alpha.brain_server")
-brain = AlphaBrain()
+brain = AlphaBrain(style="voice")
+stream_tasks: set[asyncio.Task[None]] = set()
 
 
 class AskRequest(BaseModel):
@@ -46,6 +51,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # 语音断开后生产任务仍完成当前工具请求；退出前等它写好操作记录。
+        if stream_tasks:
+            await asyncio.gather(*stream_tasks, return_exceptions=True)
         await brain.close()
 
 
@@ -73,6 +81,41 @@ async def ask(body: AskRequest) -> AskResponse:
 @app.post("/interrupted")
 async def interrupted(body: InterruptedRequest) -> dict[str, bool]:
     return {"ok": await brain.mark_interrupted(body.spoken)}
+
+
+@app.post("/ask/stream")
+async def ask_stream(body: AskRequest) -> StreamingResponse:
+    """NDJSON：delta（文字增量）、done（完成及耗时）、error（不可自动重试）。"""
+    events: asyncio.Queue[dict] = asyncio.Queue()
+
+    async def emit(text: str) -> None:
+        events.put_nowait({"type": "delta", "text": text})
+
+    async def signal(name: str) -> None:
+        events.put_nowait({"type": "signal", "name": name})
+
+    async def produce() -> None:
+        try:
+            await brain.ask(body.text, on_text=emit, on_signal=signal)
+            events.put_nowait({"type": "done", "timings": brain.last_timings})
+        except Exception:
+            logger.exception("brain.ask 流式处理失败")
+            events.put_nowait({"type": "error", "text": "未能拿到完整结果，操作可能已生效，请先查询确认。"})
+
+    # 与 HTTP 消费者分开，断线不取消正在发出的工具操作，也不会自动重发。
+    task = asyncio.create_task(produce(), name="brain-stream")
+    stream_tasks.add(task)
+    task.add_done_callback(stream_tasks.discard)
+
+    async def content() -> AsyncIterator[str]:
+        while True:
+            event = await events.get()
+            yield json.dumps(event, ensure_ascii=False) + "\n"
+            if event["type"] in {"done", "error"}:
+                return
+
+    return StreamingResponse(content(), media_type="application/x-ndjson",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 if __name__ == "__main__":

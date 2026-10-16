@@ -10,6 +10,40 @@ from integrations.tool_policy import get_policy
 
 
 class OperationTests(unittest.TestCase):
+    def test_process_lock_prevents_competing_recovery_and_releases_on_close(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "operations.db"
+            first, second = OperationStore(path), OperationStore(path)
+            try:
+                first.acquire_process_lock()
+                op = first.create("turn", "create_reminder", {"title": "开会"})
+                first.transition(op.id, "pending", "approved")
+                first.transition(op.id, "approved", "executing")
+                with self.assertRaisesRegex(RuntimeError, "另一个 Alpha/Qwen"):
+                    second.acquire_process_lock()
+                self.assertEqual(second.get(op.id).status, "executing")
+                first.close()
+                second.acquire_process_lock()
+                self.assertEqual(second.recover_on_startup()[0].status, "unknown")
+            finally:
+                first.close()
+                second.close()
+
+    def test_unknown_lookup_preserves_arguments_and_expires_without_changing_record(self):
+        args = {"items": ["牛奶", "鸡蛋"], "list_name": "购物清单"}
+        op = self.store.create("turn", "add_items", args)
+        self.store.transition(op.id, "pending", "approved")
+        self.store.transition(op.id, "approved", "executing")
+        self.store.transition(op.id, "executing", "unknown")
+        with patch("integrations.operations.time.time", return_value=op.created_at + 60):
+            self.assertEqual(self.store.recent_unknown("add_items", dict(reversed(list(args.items())))).id, op.id)
+            self.assertIsNone(self.store.recent_unknown("add_items", {**args, "items": ["鸡蛋", "牛奶"]}))
+        with patch("integrations.operations.time.time", return_value=op.created_at + 601):
+            self.assertIsNone(self.store.recent_unknown("add_items", args))
+        self.assertEqual(self.store.get(op.id).status, "unknown")
+        with self.assertRaises(ValueError):
+            self.store.recent_unknown("add_items", args, within_s=-1)
+
     def setUp(self):
         self.store = OperationStore(":memory:")
         self.addCleanup(self.store.close)
