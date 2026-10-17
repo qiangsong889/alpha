@@ -13,6 +13,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+from tempfile import TemporaryDirectory
 import time
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -30,6 +31,7 @@ from jsonschema import Draft202012Validator  # type: ignore[import-untyped]
 from mcp.types import CallToolResult, TextContent
 
 import brain.agent as agent
+import core.memory as memory_module
 import integrations.operations as operations
 from brain.email_confirmation import EmailConfirmation
 from core.rules import ALPHA_RULES
@@ -350,8 +352,9 @@ class FakeServices:
 class EvalBrain(agent.AlphaBrain):
     """只替换启动依赖；ask 和完整 agent 循环保持原样。"""
 
-    def __init__(self, context, client, services, clock, model):
+    def __init__(self, context, client, services, clock, model, *, db_path=':memory:'):
         super().__init__(model=model, style='text')
+        self.db_path = db_path
         self.context = context
         self.test_client = client
         self.services = services
@@ -364,8 +367,8 @@ class EvalBrain(agent.AlphaBrain):
         self.http_client = SimpleNamespace(is_closed=False)
         self.personal_tools = await personal_catalog()
         self.ha_catalog = ha_catalog(self.services.devices)
-        self.store = operations.OperationStore(':memory:')
-        self.memory_store = agent.MemoryStore(':memory:')
+        self.store = operations.OperationStore(self.db_path)
+        self.memory_store = agent.MemoryStore(self.db_path)
         self.worker = self.services
         self.ha_url = 'https://ha.invalid/api/mcp'
         mcp_executor = make_executor(ha_url=self.ha_url, http_client=self.http_client, worker=self.worker, ha_tools=self.ha_tools)
@@ -415,11 +418,24 @@ def load_cases(path: Path) -> list[dict]:
             raise ValueError(f'第 {line_number} 行 ID 缺失或重复')
         if ('input' in row) == ('turns' in row):
             raise ValueError(f"{row['id']}: input / turns 必须二选一")
+        memories = row.get('context', {}).get('memories', [])
+        if not isinstance(memories, list) or any(
+            not isinstance(m, dict) or m.get('kind') not in ('preference', 'fact')
+            or not isinstance(m.get('content'), str) or not m['content'].strip() for m in memories
+        ):
+            raise ValueError(f"{row['id']}: context.memories 必须含合法 kind 和非空 content")
         if 'turns' in row and not row['turns']:
             raise ValueError(f"{row['id']}: turns 不能为空")
         for turn in row.get('turns', [row]):
             if not isinstance(turn.get('input'), str) or not turn['input'].strip():
                 raise ValueError(f"{row['id']}: input 不能为空")
+            if 'new_session' in turn and type(turn['new_session']) is not bool:
+                raise ValueError(f"{row['id']}: new_session 必须是布尔值")
+            memory_effects = turn.get('expect_effects', {})
+            if 'memories_count' in memory_effects and (type(memory_effects['memories_count']) is not int or memory_effects['memories_count'] < 0):
+                raise ValueError(f"{row['id']}: memories_count 必须为非负整数")
+            if 'memory_contains' in memory_effects and (not isinstance(memory_effects['memory_contains'], list) or not all(isinstance(v, str) and v for v in memory_effects['memory_contains'])):
+                raise ValueError(f"{row['id']}: memory_contains 必须为非空字符串的列表")
             required, allowed, forbidden = (set(turn.get(k, [])) for k in ('expect_tools', 'allow_tools', 'must_not'))
             if 'expect_tools' not in turn or (required | allowed) & forbidden or required & allowed:
                 raise ValueError(f"{row['id']}: 工具规则缺失或冲突")
@@ -433,7 +449,7 @@ def load_cases(path: Path) -> list[dict]:
             if unknown:
                 raise ValueError(f"{row['id']}: 未实现的评分字段：{sorted(unknown)}")
             for key in turn.get('expect_effects', {}):
-                if key not in {'emails_sent', 'confirmation_required', 'items_created'} and not (
+                if key not in {'emails_sent', 'confirmation_required', 'items_created', 'memories_count', 'memory_contains'} and not (
                     key.endswith('_executions') and key.removesuffix('_executions') in {*TOOL_POLICY, 'web_search'}
                 ):
                     raise ValueError(f"{row['id']}: 未实现的副作用计数：{key}")
@@ -513,8 +529,12 @@ def score_turn(expected, observed, schemas, context):
             if word in answer:
                 errors.append(f'回答包含禁止表述：{word}')
     for key, value in expected.get('expect_effects', {}).items():
-        actual = observed['effects'].get(key, 0)
-        if actual != value:
+        actual = observed['effects'].get(key, [] if key == 'memory_contains' else 0)
+        if key == 'memory_contains':
+            for snippet in value:
+                if not any(snippet in content for content in actual):
+                    errors.append(f'记忆缺少：{snippet}')
+        elif actual != value:
             errors.append(f'副作用 {key}：预期 {value}，实际 {actual}')
     if context.get('home_city'):
         location = {'type': 'approximate', 'city': context['home_city'],
@@ -551,16 +571,19 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
     clock = FrozenClock(context.get('now', DEFAULT_NOW))
     services = FakeServices(context, clock)
     recorder = RecordingMessages(sdk_client.messages)
-    brain = EvalBrain(context, SimpleNamespace(messages=recorder), services, clock, model)
     env = {'HOME_CITY': context.get('home_city', ''), 'HOME_REGION': context.get('home_region', ''),
            'HOME_COUNTRY': context.get('home_country', ''),
            'REMINDER_TIMEZONE': context.get('timezone', 'America/Los_Angeles')}
     output = {'id': case['id'], 'model': model, 'turns': [], 'manual_checks': []}
     async with AsyncExitStack() as stack:
+        directory = stack.enter_context(TemporaryDirectory(prefix='alpha-eval-'))
+        db_path = Path(directory) / 'operations.db'
+        brain = EvalBrain(context, SimpleNamespace(messages=recorder), services, clock, model, db_path=db_path)
         stack.enter_context(patch.dict(os.environ, env))
         stack.enter_context(patch.dict(TOOL_POLICY, {'web_search': ToolPolicy(False, True, 'immediate')}))
         stack.enter_context(patch.object(agent, 'datetime', clock.datetime_type()))
         stack.enter_context(patch.object(operations, 'time', SimpleNamespace(time=clock.time)))
+        stack.enter_context(patch.object(memory_module, 'time', SimpleNamespace(time=clock.time)))
         stack.enter_context(patch('integrations.tool_executor.call_ha_tool', side_effect=services.call_ha))
         # 完整生命期均不允许真实发现连接或启动 worker。
         stack.enter_context(patch.object(agent, 'load_ha_catalog', side_effect=RuntimeError('eval 禁止 HA 发现')))
@@ -570,6 +593,9 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
         assert brain.email_confirmation is not None
         confirmation = brain.email_confirmation
         seed_operations(brain.store, context)
+        assert brain.memory_store is not None
+        for memory in context.get('memories', []):
+            brain.memory_store.add(memory['content'], memory['kind'], 'eval-seed')
         if draft := context.get('pending_email'):
             confirmation.begin_turn('seed-email')
             decision = await confirmation.handle(draft['name'], draft['arguments'])
@@ -579,6 +605,15 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
             confirmation.draft.created_at -= draft.get('age_s', 0)
             brain.messages.append({'role': 'assistant', 'content': decision.text})
         for index, turn in enumerate(case.get('turns', [case]), 1):
+            if turn.get('new_session') and index > 1:
+                await brain.close()
+                fresh_context = {**context, 'history': []}
+                brain = EvalBrain(fresh_context, SimpleNamespace(messages=recorder), services,
+                                  clock, model, db_path=db_path)
+                stack.push_async_callback(brain.close)
+                await brain.start()
+                assert brain.email_confirmation is not None
+                confirmation = brain.email_confirmation
             services.results = {**case.get('tool_results', {}), **turn.get('tool_results', {})}
             start_calls, start_responses = len(recorder.calls), len(recorder.responses)
             start_exec, start_errors = len(services.executions), len(services.errors)
@@ -592,16 +627,21 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
                     answer = await brain.ask(turn['input'])
             except Exception as exc:
                 exception = f'{type(exc).__name__}: {exc}'
-            effects = {k: services.effects[k] - before[k] for k in services.effects.keys() | before.keys()}
+            effects: dict[str, object] = {k: services.effects[k] - before[k] for k in services.effects.keys() | before.keys()}
             draft = confirmation.draft
             waiting = bool(draft and not draft.used)
             effects['confirmation_required'] = waiting
+            assert brain.memory_store is not None
+            memories = [vars(memory) for memory in brain.memory_store.list()]
+            effects['memories_count'] = len(memories)
+            effects['memory_contains'] = [memory['content'] for memory in memories]
             if brain.last_response_fallback:
                 services.errors.append('模型没有生成可见回答，最终使用了程序兜底提示')
             semantic_judge = judge is not None and bool(turn.get('reply_rubric'))
             if waiting and not semantic_judge and not any(s in answer for s in ('确认', '发送吗', '要发吗', '发出吗')):
                 services.errors.append('存在待确认草稿，但回答没有询问用户确认')
             observed = {'index': index, 'input': turn['input'], 'answer': answer,
+                        'new_session': turn.get('new_session', False), 'memories': memories,
                         'tool_calls': deepcopy(recorder.calls[start_calls:]),
                         'tool_records': tool_records_from_messages(brain.messages[start_history:]),
                         'executions': deepcopy(services.executions[start_exec:]),

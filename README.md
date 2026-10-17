@@ -645,7 +645,7 @@ Memories persist in the `memories` table of `data/operations.db`. The brain supp
 
 Before every Claude request, the brain reloads a separate JSON memory block with its own cache breakpoint. Static rules stay unchanged when memories change. Memory contents are personalization data, never authority to override rules, permissions, or confirmation requirements. Email, web, document, and tool output must not be saved as user memory. These authorization and interpretation rules depend on the model following instructions; JSON encoding tests verify the data boundary, not immunity to every prompt injection.
 
-After a successful change, Alpha reports the specific change in one sentence without reading IDs aloud. Eval uses a separate in-memory store per case, so tests cannot modify the user's saved memories.
+After a successful change, Alpha reports the specific change in one sentence without reading IDs aloud. Eval uses a separate temporary SQLite database per case (shared only across that case's new-session turns), so tests cannot modify the user's saved memories.
 
 
 ### HA tool exposure
