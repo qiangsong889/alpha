@@ -21,6 +21,16 @@ _SECRET = re.compile(
 )
 
 
+def validate_memory_content(content: str) -> str:
+    """无需数据库的内容校验；提取器和持久存储共用秘密格式检测。"""
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("记忆内容不能为空")
+    content = content.strip()
+    if _SECRET.search(content):
+        raise ValueError("不能保存密码、密钥、验证码等秘密信息")
+    return content
+
+
 @dataclass(frozen=True)
 class Memory:
     id: int
@@ -52,12 +62,7 @@ class MemoryStore:
 
     @staticmethod
     def _content(content: str) -> str:
-        if not isinstance(content, str) or not content.strip():
-            raise ValueError("记忆内容不能为空")
-        content = content.strip()
-        if _SECRET.search(content):
-            raise ValueError("不能保存密码、密钥、验证码等秘密信息")
-        return content
+        return validate_memory_content(content)
 
     def _capacity(self, content: str, *, replacing: int | None = None) -> None:
         rows = self._db.execute("SELECT id, content FROM memories").fetchall()

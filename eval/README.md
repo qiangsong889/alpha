@@ -235,3 +235,8 @@ mem-07 故意使用没有分隔符的密码，真实格式检测不会拒绝它�
 生产提示规则要求：用户说具体设备名时用 name；明确指区域时才用 area；无目标限定的泛指关灯仍按 domain 操作全部灯。light-02 和 mem-03 的 name 断言保持严格。
 
 假 HA 的响应和状态更新共用 matching_devices，name、area、floor、domain 同时给出时取交集。没有任何匹配设备就返回错误，不退回全部设备。单元测试覆盖同一区域多盏灯、按名称只动一盏、按区域只动本区域、按楼层、泛指所有灯及冲突目标无匹配。
+
+
+## 独立记忆提取实验 J6.3b
+
+37 条 `extraction_cases.jsonl` 使用独立的 `python -m eval.run_extraction --repeat 3`，不属于上面的 34 条 AlphaBrain 业务用例，也不接入自动保存。字段、配对、误存及运行错误口径见 [EXTRACTION.md](EXTRACTION.md)。
