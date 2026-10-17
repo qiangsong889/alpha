@@ -297,9 +297,13 @@ During playback, VAD only lowers the volume; it does not cancel the report.
 The final transcript is evaluated before it reaches LiveKit's conversation or
 AlphaBrain. An explicit leading `Alpha` / `阿尔法` is accepted locally. Otherwise,
 Jev receives the new text, the current generated reply (at most 2,000 characters),
-and whether a question-answer window is open. Only an `addressed` decision with
-confidence at least `max(0.9, JEV_MIN_CONFIDENCE)` interrupts. Side conversation,
-backchanneling, uncertainty, HTTP failures and timeouts leave the report running.
+and whether a question-answer window is open. High-confidence side conversation
+or backchanneling is discarded, with its transcript logged as `[打断忽略]`.
+Uncertainty, low confidence, HTTP failures and timeouts fall back to accepting
+meaningful final text, logged as `[打断回退]`, rather than silently losing it.
+Accepted text interrupts the old reply and enters the normal user-turn pipeline,
+even if the old report finished while classification was running. This fallback
+can admit ambiguous side conversations; explicitly saying `Alpha` bypasses Jev.
 Noise markers are still rejected locally without any model call.
 
 After an uninterrupted reply ending in a question finishes playback, a 10-second

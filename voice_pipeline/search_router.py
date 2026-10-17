@@ -57,7 +57,7 @@ class JevSearchRouter:
         )
 
     async def interruption(self, text: str, *, assistant: str, question_open: bool) -> bool | None:
-        """仅高置信度的对 Alpha 输入返回 True；超时或不确定由调用方保留播报。"""
+        """高置信分类返回 bool；超时或不确定返回 None，由调用方回退接收有效转写。"""
         return await self._choose(
             state={"request": text[:4000], "assistant_reply": assistant[-2000:],
                    "answer_window_open": question_open},

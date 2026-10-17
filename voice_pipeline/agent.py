@@ -184,12 +184,17 @@ class AlphaVoiceAgent(Agent):
         overlapping = self.interruptions.overlapped or self.session.agent_state == "speaking"
         if not overlapping:
             return True  # 目前尚未接入待机时的 wake word 门控。
-        # 在 STT 的 yield 之前决定；丢弃的文字不会进入 LiveKit 历史或 AlphaBrain。
+        # 在 STT 的 yield 之前决定；只有明确的旁聊才丢弃，不能把不确定当成拒绝。
         decision = await self.search_router.interruption(
             text, assistant=self._reply_text, question_open=in_answer_window)
-        logger.info("[打断判断] %s", "对 Alpha 说话，接收" if decision is True
-                    else "旁聊、附和或无法确定，继续汇报")
-        return decision is True
+        if decision is False:
+            logger.info("[打断忽略] 明确旁聊或附和：%r，继续汇报", text)
+            return False
+        if decision is None:
+            logger.info("[打断回退] 判断不确定或服务不可用，接收有效转写：%r", text)
+        else:
+            logger.info("[打断判断] 对 Alpha 说话，接收")
+        return True
 
     def _collection_user_state(self, event: UserStateChangedEvent) -> None:
         if event.new_state == "speaking":

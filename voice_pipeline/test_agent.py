@@ -56,8 +56,8 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                     with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session), \
                             patch.object(Agent.default, "stt_node", return_value=events()):
                         output = [event async for event in agent.stt_node(None, None)]
-                    self.assertEqual(len(output), int(decision is True))
-                    self.assertEqual(session.interrupt.await_count, int(decision is True))
+                    self.assertEqual(len(output), int(decision is not False))
+                    self.assertEqual(session.interrupt.await_count, int(decision is not False))
                     self.assertEqual(agent.interruptions.gain, 1.0)
                     agent.search_router.interruption.assert_awaited_once_with(
                         "小王晚上吃什么", assistant="购物清单里有牛奶。", question_open=False)
@@ -81,6 +81,30 @@ class AgentTests(unittest.IsolatedAsyncioTestCase):
                 with patch("agent.time.monotonic", return_value=111):
                     self.assertFalse(await agent._accept_transcript("对"))
                 agent.search_router.interruption.assert_awaited_once()
+
+    async def test_uncertain_overlap_is_kept_when_report_finishes_before_classification(self):
+        async def events():
+            yield stt.SpeechEvent(type=stt.SpeechEventType.FINAL_TRANSCRIPT,
+                                  alternatives=[stt.SpeechData(language="zh", text="不对，生日是二十一号")])
+        async with httpx.AsyncClient() as client:
+            agent = AlphaVoiceAgent(client)
+            agent.jev_interruptions = True
+            agent.interruptions.speech_started()
+            session = SimpleNamespace(agent_state="speaking", interrupt=AsyncMock())
+            async def classify(*args, **kwargs):
+                # STT/Jev 返回前旧汇报已播完，但用户的新话仍然必须交给框架。
+                session.agent_state = "listening"
+                await asyncio.sleep(0)
+                return None
+            agent.search_router.interruption = AsyncMock(side_effect=classify)
+            with patch.object(AlphaVoiceAgent, "session", new_callable=PropertyMock, return_value=session), \
+                    patch.object(Agent.default, "stt_node", return_value=events()), \
+                    self.assertLogs("alpha.voice_pipeline", level="INFO") as logs:
+                output = [event async for event in agent.stt_node(None, None)]
+            self.assertEqual(output[0].alternatives[0].text, "不对，生日是二十一号")
+            session.interrupt.assert_awaited_once()
+            self.assertEqual(agent.interruptions.gain, 1.0)
+            self.assertIn("打断回退", " ".join(logs.output))
 
     async def test_interrupted_question_does_not_open_answer_window(self):
         async with httpx.AsyncClient() as client:
