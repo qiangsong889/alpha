@@ -81,6 +81,28 @@ def plain(value):
     return deepcopy(value)
 
 
+def tool_records_from_messages(messages):
+    """保留本轮模型实际收到的完整结果，包括网关拒绝；不截断、不让模型撰写摘要。"""
+    records = []
+    for message in messages:
+        content = message.get('content', [])
+        if not isinstance(content, list):
+            continue
+        for raw in content:
+            block = plain(raw)
+            if block.get('type') == 'tool_use' and message['role'] == 'assistant':
+                records.append({'sequence': len(records) + 1, 'call_id': block['id'],
+                                'name': block['name'], 'arguments': deepcopy(block['input']),
+                                'result_received': False, 'is_error': True, 'result': None})
+            elif block.get('type') == 'tool_result' and message['role'] == 'user':
+                for record in reversed(records):
+                    if record['call_id'] == block['tool_use_id'] and not record['result_received']:
+                        record.update(result_received=True, is_error=block.get('is_error', False),
+                                      result=deepcopy(block.get('content', '')))
+                        break
+    return records
+
+
 class RecordingMessages:
     """包装 SDK，不改大脑；记录每次完整响应的工具调用、用量与 stop_reason。"""
 
@@ -110,7 +132,10 @@ class RecordingMessages:
 
     def record(self, response):
         request_index = len(self.responses) + 1
-        self.responses.append({'stop_reason': response.stop_reason, 'usage': plain(response.usage)})
+        self.responses.append({'stop_reason': response.stop_reason, 'usage': plain(response.usage),
+                               'content_types': [block.type for block in response.content],
+                               'visible_text_chars': sum(len(block.text.strip()) for block in response.content
+                                                         if block.type == 'text')})
         for block in response.content:
             if block.type in {'tool_use', 'server_tool_use'}:
                 self.calls.append({'name': block.name, 'arguments': deepcopy(block.input),
@@ -394,6 +419,9 @@ def load_cases(path: Path) -> list[dict]:
             required, allowed, forbidden = (set(turn.get(k, [])) for k in ('expect_tools', 'allow_tools', 'must_not'))
             if 'expect_tools' not in turn or (required | allowed) & forbidden or required & allowed:
                 raise ValueError(f"{row['id']}: 工具规则缺失或冲突")
+            if 'reply_rubric' in turn and (not isinstance(turn['reply_rubric'], str)
+                                          or not turn['reply_rubric'].strip()):
+                raise ValueError(f"{row['id']}: reply_rubric 必须是非空字符串")
             supported = {'expect_tools', 'expect_args', 'expect_args_by_tool',
                          'expect_reply_contains', 'expect_reply_contains_any',
                          'expect_reply_not_contains', 'expect_effects'}
@@ -460,16 +488,22 @@ def score_turn(expected, observed, schemas, context):
             errors.append(f"{call['name']} 参数不匹配：{json.dumps(call['arguments'], ensure_ascii=False)}")
         if call['type'] == 'server_tool_use':
             errors.append('eval 意外调用了真正的服务端工具')
-    answer = observed['answer']
-    for word in expected.get('expect_reply_contains', []):
-        if word not in answer:
-            errors.append(f'回答缺少：{word}')
-    any_words = expected.get('expect_reply_contains_any')
-    if any_words and not any(word in answer for word in any_words):
-        errors.append('回答未命中任一可接受表述：' + ' / '.join(any_words))
-    for word in expected.get('expect_reply_not_contains', []):
-        if word in answer:
-            errors.append(f'回答包含禁止表述：{word}')
+    if expected.get('reply_rubric') and observed.get('reply_scoring') == 'judge':
+        if observed.get('judge_error'):
+            errors.append('评判器运行错误：' + observed['judge_error'])
+        elif not observed['reply_judge']['pass']:
+            errors.append('回答语义不符合标准：' + observed['reply_judge']['reason'])
+    else:
+        answer = observed['answer']
+        for word in expected.get('expect_reply_contains', []):
+            if word not in answer:
+                errors.append(f'回答缺少：{word}')
+        any_words = expected.get('expect_reply_contains_any')
+        if any_words and not any(word in answer for word in any_words):
+            errors.append('回答未命中任一可接受表述：' + ' / '.join(any_words))
+        for word in expected.get('expect_reply_not_contains', []):
+            if word in answer:
+                errors.append(f'回答包含禁止表述：{word}')
     for key, value in expected.get('expect_effects', {}).items():
         actual = observed['effects'].get(key, 0)
         if actual != value:
@@ -504,7 +538,7 @@ def seed_operations(store, context):
         store._db.commit()
 
 
-async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90) -> dict:
+async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge=None) -> dict:
     context = deepcopy(case.get('context', {}))
     clock = FrozenClock(context.get('now', DEFAULT_NOW))
     services = FakeServices(context, clock)
@@ -540,6 +574,7 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90) -> di
             services.results = {**case.get('tool_results', {}), **turn.get('tool_results', {})}
             start_calls, start_responses = len(recorder.calls), len(recorder.responses)
             start_exec, start_errors = len(services.executions), len(services.errors)
+            start_history = len(brain.messages)
             start_locations = len(recorder.request_locations)
             before = services.effects.copy()
             started = time.perf_counter()
@@ -553,15 +588,29 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90) -> di
             draft = confirmation.draft
             waiting = bool(draft and not draft.used)
             effects['confirmation_required'] = waiting
-            if waiting and not any(s in answer for s in ('确认', '发送吗', '要发吗', '发出吗')):
+            if brain.last_response_fallback:
+                services.errors.append('模型没有生成可见回答，最终使用了程序兜底提示')
+            semantic_judge = judge is not None and bool(turn.get('reply_rubric'))
+            if waiting and not semantic_judge and not any(s in answer for s in ('确认', '发送吗', '要发吗', '发出吗')):
                 services.errors.append('存在待确认草稿，但回答没有询问用户确认')
             observed = {'index': index, 'input': turn['input'], 'answer': answer,
                         'tool_calls': deepcopy(recorder.calls[start_calls:]),
+                        'tool_records': tool_records_from_messages(brain.messages[start_history:]),
                         'executions': deepcopy(services.executions[start_exec:]),
                         'effects': effects, 'responses': deepcopy(recorder.responses[start_responses:]),
                         'search_locations': deepcopy(recorder.request_locations[start_locations:]),
                         'harness_errors': services.errors[start_errors:], 'error': exception,
+                        'response_fallback': brain.last_response_fallback,
                         'elapsed_s': round(time.perf_counter() - started, 3)}
+            observed['reply_scoring'] = 'judge' if semantic_judge else 'literal'
+            if semantic_judge and exception is None:
+                try:
+                    observed['reply_judge'] = await judge.evaluate(
+                        answer, turn['reply_rubric'], tool_records=observed['tool_records'])
+                    observed['judge_model'] = judge.model
+                    observed['judge_usage'] = judge.last_usage
+                except Exception as exc:
+                    observed['judge_error'] = f'{type(exc).__name__}: {exc}'
             observed['failures'] = score_turn(turn, observed, recorder.schemas, context)
             observed['passed'] = not observed['failures']
             output['turns'].append(observed)
@@ -576,7 +625,7 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90) -> di
     elif case.get('notes') and not output['manual_checks']:
         output['manual_checks'].append(case['notes'])
     output['passed'] = len(output['turns']) == len(case.get('turns', [case])) and all(t['passed'] for t in output['turns'])
-    output['status'] = ('error' if any(t['error'] for t in output['turns'])
+    output['status'] = ('error' if any(t['error'] or t.get('judge_error') for t in output['turns'])
                         else 'pass' if output['passed'] else 'fail')
     return output
 
@@ -607,6 +656,8 @@ async def main(argv=None):
     parser.add_argument('--output', type=Path, help='报告 JSONL 路径，默认 eval/results/时间戳.jsonl')
     parser.add_argument('--timeout', type=float, default=90, help='每轮最长秒数')
     parser.add_argument('--repeat', type=int, default=1, help='每条用例独立重复次数，默认 1')
+    parser.add_argument('--judge', action='store_true', help='先校准评判模型，再对 reply_rubric 用例做语义评分')
+    parser.add_argument('--judge-model', default='claude-haiku-5-5')
     parser.add_argument('--list', action='store_true', help='只检查数据并列出 ID，不调用模型')
     args = parser.parse_args(argv)
     cases = load_cases(args.cases)
@@ -630,18 +681,30 @@ async def main(argv=None):
     output = args.output or ROOT / 'eval/results' / (datetime.now().strftime('%Y%m%d-%H%M%S') + '-' + uuid4().hex[:6] + '.jsonl')
     output.parent.mkdir(parents=True, exist_ok=True)
     summary_path = output.with_suffix('.summary.json')
-    if output.exists() or summary_path.exists():
+    calibration_path = output.with_suffix('.calibration.json')
+    if output.exists() or summary_path.exists() or (args.judge and calibration_path.exists()):
         parser.error('报告或汇总文件已存在，请换一个 --output 路径')
     logging.basicConfig(level=logging.WARNING)
     results = []
     # 使用官方 SDK；禁用自动重试以便成本和失败可见，不使用 .env 自定义代理端点。
     async with AsyncAnthropic(base_url='https://api.anthropic.com', max_retries=0) as client:
+        judge = None
+        if args.judge:
+            from eval.judge import ReplyJudge
+            from eval.calibrate_judge import calibrate, save_report
+            judge = ReplyJudge(client, model=args.judge_model)
+            calibration = await calibrate(judge)
+            save_report(calibration, calibration_path)
+            print(f"评判器校准：{calibration['correct']}/{calibration['total']}；报告：{calibration_path}", flush=True)
+            if not calibration['passed']:
+                print('校准未通过，停止运行，不使用该评判器评分。')
+                return 2
         with output.open('x', encoding='utf-8') as report:
             for case in cases:
                 for attempt in range(1, args.repeat + 1):
                     # 每次都完整新建大脑、数据库、工具状态和历史，不只重放一次 ask。
                     try:
-                        result = await run_case(case, client, model=model, timeout_s=args.timeout)
+                        result = await run_case(case, client, model=model, timeout_s=args.timeout, judge=judge)
                     except Exception as exc:
                         result = {'id': case['id'], 'passed': False, 'status': 'error',
                                   'error': f'{type(exc).__name__}: {exc}', 'turns': []}
@@ -656,7 +719,9 @@ async def main(argv=None):
                         for reason in turn['failures']:
                             print(f"  第{turn['index']}轮：{reason}", flush=True)
     summary = summarize_results(results)
-    summary.update(model=model, repeat=args.repeat, report=str(output))
+    summary.update(model=model, repeat=args.repeat, report=str(output),
+                   reply_scoring='judge' if args.judge else 'literal',
+                   judge_model=args.judge_model if args.judge else None)
     with summary_path.open('x', encoding='utf-8') as saved:
         json.dump(summary, saved, ensure_ascii=False, indent=2)
         saved.write('\n')

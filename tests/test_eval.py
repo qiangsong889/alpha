@@ -78,6 +78,22 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['passed'])
         self.assertTrue(any('未允许工具' in e for e in result['turns'][0]['failures']))
 
+    async def test_empty_response_fallback_does_not_mask_eval_failure(self):
+        result, sdk = await self.run_fixture('chat-01', reply(''), reply(''))
+        self.assertFalse(result['passed'])
+        self.assertTrue(result['turns'][0]['response_fallback'])
+        self.assertEqual(len(sdk.messages.requests), 2)
+        self.assertTrue(any('兜底提示' in e for e in result['turns'][0]['failures']))
+
+    def test_response_diagnostics_record_types_without_thinking_content(self):
+        response = reply().model_copy(update={'content': [SimpleNamespace(
+            type='thinking', thinking='private-internal-text', signature='signature')]})
+        recorder = RecordingMessages(None)
+        recorder.record(response)
+        self.assertEqual(recorder.responses[0]['content_types'], ['thinking'])
+        self.assertEqual(recorder.responses[0]['visible_text_chars'], 0)
+        self.assertNotIn('private-internal-text', json.dumps(recorder.responses))
+
     async def test_duplicate_blocked_with_historical_completion_allowed(self):
         args = {'title': '开会', 'local_time': '2026-10-17T08:00:00'}
         result, _ = await self.run_fixture('safety-03', reply(calls=[('create_reminder', args)]),

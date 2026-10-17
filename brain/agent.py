@@ -188,6 +188,7 @@ class AlphaBrain:
         self.tool_owners: dict[str, str] = {}
         self.system: list[TextBlockParam] = []
         self.last_timings: list[tuple[str, float]] = []
+        self.last_response_fallback = False
         self._stack: AsyncExitStack | None = None
         self._started = False
         # 同一大脑一次处理一个 ask，避免两个请求交错修改同一份历史。
@@ -343,6 +344,7 @@ class AlphaBrain:
                 raise RuntimeError("请先调用 AlphaBrain.start()")
             started = time.perf_counter()
             self.last_timings = []
+            self.last_response_fallback = False
             # 发现失败的服务在下一次 ask 时重试；成功的目录继续缓存。
             if self.personal_tools is None or self.ha_catalog is None:
                 if self.personal_tools is None:
@@ -436,6 +438,13 @@ class AlphaBrain:
         turn_action_replies: list[str | None] = []
         searched = False
         search_found = False
+        empty_retry_used = False
+
+        def empty_reply() -> str:
+            self.last_response_fallback = True
+            # 工具被调用过就不能让用户把这句话当成“操作失败，可以直接重试”。
+            return ("这次未能生成回答，请先查询确认操作结果。"
+                    if turn_action_replies or searched else "这次未能生成回答，请再说一次。")
 
         async def announce_search() -> None:
             nonlocal search_announced
@@ -446,7 +455,8 @@ class AlphaBrain:
             if on_text is not None:
                 await on_text("我查一下。")
 
-        for request_index in range(1, 21 if on_text is not None else 11):
+        max_requests = 20 if on_text is not None else 10
+        for request_index in range(1, max_requests + 1):
             # 设置轮数上限，避免模型一直调用工具而不结束；每次请求保留历史和本轮中间消息。
             started = time.perf_counter()
             mute_ha_summary = on_signal is not None and not searched and bool(turn_ha_successes) and all(turn_ha_successes)
@@ -512,7 +522,11 @@ class AlphaBrain:
                         or any(block.type == "tool_use" and block.name != VOICE_REPLY
                                for block in response.content)):
                     raise RuntimeError("流式最终回答格式无效")
-                answer = search_answer(answer, search_found)
+                if not answer.strip() and not mute_ha_summary:
+                    logger.warning("[空回复] 最终语音回答为空，返回明确提示")
+                    answer = empty_reply()
+                else:
+                    answer = search_answer(answer, search_found)
                 if mute_ha_summary:
                     assert on_signal is not None
                     await on_signal("ha_done")
@@ -534,6 +548,7 @@ class AlphaBrain:
                 answer = "".join(
                     block.text for block in response.content if block.type == "text"
                 )
+                has_visible_answer = bool(answer.strip())
                 if on_text is not None:
                     answer = search_answer(answer, search_found)
                 if self.style == "text":
@@ -547,6 +562,19 @@ class AlphaBrain:
                         answer += "\n\n" + "、".join(f"[{title}]({url})" for title, url in sources)
                 if not searched and on_text is None and turn_action_replies and all(r is not None for r in turn_action_replies):
                     answer = "，".join(r for r in turn_action_replies if r is not None) + "。"
+                    current[-1] = {"role": "assistant", "content": answer}
+                    has_visible_answer = True
+                if not has_visible_answer and not mute_ha_summary:
+                    if (not empty_retry_used and not turn_action_replies and not searched
+                            and not business_calls and request_index < max_requests):
+                        empty_retry_used = True
+                        # 没有调用任何工具，可以安全重试原请求一次。不把空 assistant
+                        # 消息写进历史，也不把 thinking-only 响应当作已回答用户。
+                        current.pop()
+                        logger.warning("[空回复] end_turn 没有可见回答且未调用工具，重试一次")
+                        continue
+                    logger.warning("[空回复] 不再自动重试，返回明确提示")
+                    answer = empty_reply()
                     current[-1] = {"role": "assistant", "content": answer}
                 messages.extend(current)
                 if mute_ha_summary:

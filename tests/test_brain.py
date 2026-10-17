@@ -37,6 +37,67 @@ class FakeWorker:
 
 
 class BrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_thinking_only_end_turn_retries_once_then_calls_weather(self):
+        self.add_catalog_tools("get_weather")
+        await self.brain.start()
+        self.client.messages.create.side_effect = [
+            reply([NS(type="thinking")]),
+            reply([NS(type="tool_use", name="get_weather", input={}, id="weather")], "tool_use"),
+            reply([NS(type="text", text="今天多云。")]),
+        ]
+        answer = await self.brain.ask("今天天气怎么样？")
+        self.assertEqual(answer, "今天多云。")
+        self.assertEqual(self.client.messages.create.await_count, 3)
+        self.executor.assert_awaited_once_with("get_weather", {})
+        first = self.client.messages.create.call_args_list[0].kwargs["messages"]
+        retried = self.client.messages.create.call_args_list[1].kwargs["messages"]
+        self.assertEqual(first, retried)
+        self.assertFalse(any(block.type == "thinking" for message in self.brain.messages
+                             if isinstance(message["content"], list) for block in message["content"]
+                             if hasattr(block, "type")))
+
+    async def test_repeated_empty_end_turn_has_bounded_retry_and_visible_fallback(self):
+        await self.brain.start()
+        self.client.messages.create.side_effect = [reply([]), reply([NS(type="text", text=" \n ")])]
+        answer = await self.brain.ask("你好")
+        self.assertIn("未能生成回答", answer)
+        self.assertEqual(self.client.messages.create.await_count, 2)
+        self.executor.assert_not_awaited()
+        self.assertEqual(self.brain.messages[-1]["content"], answer)
+
+    async def test_empty_after_write_does_not_repeat_tool_or_retry_model(self):
+        self.add_catalog_tools("add_items")
+        await self.brain.start()
+        self.client.messages.create.side_effect = [
+            reply([NS(type="tool_use", name="add_items", id="add",
+                      input={"list_name": "购物清单", "items": ["牛奶"]})], "tool_use"), reply([]),
+        ]
+        answer = await self.brain.ask("加牛奶")
+        self.assertIn("查询确认操作结果", answer)
+        self.assertEqual(self.client.messages.create.await_count, 2)
+        self.executor.assert_awaited_once()
+        result = self.brain.messages[-2]["content"][0]
+        self.assertEqual(result["tool_use_id"], "add")
+        row = self.brain.store._db.execute("SELECT status FROM operations").fetchone()
+        self.assertEqual(row["status"], "succeeded")
+
+    async def test_blank_voice_answer_is_reported_but_intentional_ha_silence_is_preserved(self):
+        await self.brain.start()
+        self.client.messages.stream = Mock(return_value=self.final_stream(""))
+        emit = AsyncMock()
+        answer = await self.brain.ask("你好", on_text=emit)
+        self.assertIn("未能生成回答", answer)
+        emit.assert_awaited_once_with(answer)
+        self.client.messages.stream = Mock(side_effect=[
+            self.fake_stream(reply([NS(type="tool_use", name="intent__HassTurnOn",
+                                      id="light", input={"name": "客厅灯"})], "tool_use")),
+            self.final_stream(""),
+        ])
+        emit, signal = AsyncMock(), AsyncMock()
+        self.assertEqual(await self.brain.ask("开灯", on_text=emit, on_signal=signal), "")
+        emit.assert_not_called()
+        signal.assert_awaited_once_with("ha_done")
+
     async def test_created_document_id_reaches_next_claude_request(self):
         self.add_catalog_tools("create_document", "append_document")
         self.executor.side_effect = [
