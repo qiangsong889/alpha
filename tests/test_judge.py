@@ -43,14 +43,14 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(response=response), self.assertRaises(JudgeError):
                 await ReplyJudge(client(response)).evaluate('回答', '标准')
 
-    async def test_calibration_hides_labels_and_all_eighteen_are_required(self):
+    async def test_calibration_hides_labels_and_all_twenty_two_are_required(self):
         cases = load_calibration()
         fake = SimpleNamespace(model=DEFAULT_MODEL, last_usage=None, evaluate=AsyncMock(side_effect=[
             {'pass': row['expected_pass'], 'reason': '语义匹配人工标注'} for row in cases]))
         result = await calibrate(fake)
         self.assertTrue(result['passed'])
-        self.assertEqual(result['correct'], 18)
-        self.assertEqual(fake.evaluate.await_count, 18)
+        self.assertEqual(result['correct'], 22)
+        self.assertEqual(fake.evaluate.await_count, 22)
         for args, case in zip(fake.evaluate.await_args_list, cases):
             self.assertEqual(args.args, (case['answer'], case['rubric']))
             self.assertEqual(args.kwargs, {'tool_records': case.get('tool_records', [])})
@@ -58,7 +58,7 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
                                                 'reason': '测试'} for i, row in enumerate(cases)])
         result = await calibrate(fake)
         self.assertFalse(result['passed'])
-        self.assertEqual(result['correct'], 17)
+        self.assertEqual(result['correct'], 21)
 
     async def test_calibration_api_error_cannot_pass(self):
         fake = SimpleNamespace(model=DEFAULT_MODEL, last_usage=None,
@@ -66,7 +66,7 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
         result = await calibrate(fake)
         self.assertFalse(result['passed'])
         self.assertEqual(result['correct'], 0)
-        self.assertEqual(len(result['results']), 18)
+        self.assertEqual(len(result['results']), 22)
         self.assertTrue(all('error' in r for r in result['results']))
 
     async def test_calibration_failure_blocks_evaluation(self):
@@ -75,7 +75,7 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
                 patch.dict('os.environ', {'ANTHROPIC_API_KEY': 'fake'}), \
                 patch('eval.run_eval.AsyncAnthropic'), \
                 patch('eval.calibrate_judge.calibrate', AsyncMock(return_value={
-                    'correct': 13, 'total': 14, 'passed': False})) as calibration, \
+                    'correct': 21, 'total': 22, 'passed': False})) as calibration, \
                 patch('eval.run_eval.run_case', AsyncMock()) as run:
             output = Path(directory) / 'run.jsonl'
             code = await main(['--case', 'fail-01', '--judge', '--output', str(output)])
@@ -174,8 +174,8 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_judge_instructions_do_not_copy_calibration_answers(self):
         rows = load_calibration()
-        self.assertEqual(len(rows), 18)
-        self.assertEqual(sum(r['expected_pass'] for r in rows), 8)
+        self.assertEqual(len(rows), 22)
+        self.assertEqual(sum(r['expected_pass'] for r in rows), 10)
         for row in rows:
             self.assertNotIn(row['answer'], row['rubric'])
             self.assertNotIn(row['answer'], SYSTEM)
@@ -183,6 +183,14 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(phrase, SYSTEM)
             for row in rows:
                 self.assertNotIn(phrase, row['rubric'])
+
+    def test_memory_calibration_has_four_balanced_examples_with_shared_rubrics(self):
+        rows = [r for r in load_calibration() if r.get('source', {}).get('kind') == 'memory_calibration']
+        self.assertEqual(len(rows), 4)
+        self.assertEqual(sum(r['expected_pass'] for r in rows), 2)
+        cases = {c['id']: c for c in load_cases(ROOT / 'eval/cases.jsonl')}
+        for row in rows:
+            self.assertEqual(row['rubric'], cases[row['source']['case_id']]['reply_rubric'])
 
     def test_six_unseen_examples_and_old_eight_item_set_is_rejected(self):
         rows = load_calibration()

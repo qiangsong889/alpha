@@ -49,3 +49,14 @@
 提示词及 schema SHA-256：`5a38fe040a2fcd3ec0ffa51d4964abce98bc823f55def247332e483971000259`。
 
 校准结果只支持这批判定标准；真实执行次数、副作用、工具白名单仍由代码验证。
+
+
+## 加入记忆 rubric 后的 22 条校准
+
+增加 mem-01、mem-07 各一正一反的四条题（10 条正例、12 条反例）。它们复用用例里的语义标准，不把具体答案写进 rubric 或 SYSTEM；具体记忆确认题带模拟 remember 返回记录。首次与修正开关工具规则后的两次运行均为 **22/22**。
+
+校准报告：`eval/results/20261016-224304-c3e817.calibration.json`、`eval/results/20261016-224440-f1c995.calibration.json`。
+
+校准集 SHA-256：`3acab6338f8f0a5552ab1e9e12e64519e445c028cfad6faa4ea930fc6ca16a05`。
+
+详细过程和受影响用例复测见 STABILITY.md 最新节。旧校准与失败运行保留。

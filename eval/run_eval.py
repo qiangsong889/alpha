@@ -213,7 +213,8 @@ class FakeServices:
         self.closed = False
         self.clock = clock
         self.devices = deepcopy(context.get('devices', [
-            {'name': '客厅灯', 'domain': 'light'}, {'name': '厨房灯', 'domain': 'light'}]))
+            {'name': '客厅灯', 'domain': 'light', 'area': '客厅'},
+            {'name': '厨房灯', 'domain': 'light', 'area': '厨房'}]))
         for device in self.devices:
             device.setdefault('state', 'off')
         self.items = [{'id': 'task-milk', 'title': '牛奶', 'status': 'needsAction'},
@@ -225,6 +226,13 @@ class FakeServices:
         self.effects: Counter = Counter()
         self.executions: list[dict] = []
         self.errors: list[str] = []
+
+    def matching_devices(self, args):
+        """返回目标条件的交集；结果描述和状态更新必须共用这份匹配逻辑。"""
+        return [device for device in self.devices
+                if all(not args.get(key) or device.get(key) == args[key]
+                       for key in ('name', 'area', 'floor'))
+                and (not args.get('domain') or device.get('domain') in args['domain'])]
 
     @staticmethod
     def result(data):
@@ -255,9 +263,7 @@ class FakeServices:
         if name in HA_DEVICE_TOOLS:
             if name.endswith('GetLiveContext'):
                 return {'text': json.dumps({'devices': self.devices}, ensure_ascii=False)}
-            matches = [d for d in self.devices
-                       if (not args.get('name') or args['name'] == d['name'])
-                       and (not args.get('domain') or d.get('domain') in args['domain'])]
+            matches = self.matching_devices(args)
             if not matches:
                 return {'text': '找不到设备', 'is_error': True}
             return {'text': json.dumps({'response_type': 'action_done',
@@ -331,15 +337,13 @@ class FakeServices:
             elif name in {'send_email', 'reply_email'}:
                 self.effects['emails_sent'] += 1
             elif name in HA_DEVICE_TOOLS:
-                for device in self.devices:
-                    if ((not args.get('name') or device['name'] == args['name'])
-                            and (not args.get('domain') or device.get('domain') in args['domain'])):
-                        if name.endswith('HassTurnOff'):
-                            device['state'] = 'off'
-                        elif name.endswith('HassTurnOn'):
-                            device['state'] = 'on'
-                        elif name.endswith('HassLightSet'):
-                            device.update(state='on', brightness=args.get('brightness'))
+                for device in self.matching_devices(args):
+                    if name.endswith('HassTurnOff'):
+                        device['state'] = 'off'
+                    elif name.endswith('HassTurnOn'):
+                        device['state'] = 'on'
+                    elif name.endswith('HassLightSet'):
+                        device.update(state='on', brightness=args.get('brightness'))
             return result
         except (KeyError, TypeError, ValueError, ToolNotSent) as exc:
             self.errors.append(f'{name}: {exc}')

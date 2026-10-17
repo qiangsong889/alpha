@@ -1,4 +1,4 @@
-"""评判器校准：python -m eval.calibrate_judge，18 条全正确才返回 0。"""
+"""评判器校准：python -m eval.calibrate_judge，22 条全正确才返回 0。"""
 
 import argparse
 import asyncio
@@ -16,15 +16,15 @@ from eval.judge import DEFAULT_MODEL, ReplyJudge, SYSTEM, VERDICT_TOOL
 
 ROOT = Path(__file__).resolve().parents[1]
 CALIBRATION_FILE = Path(__file__).with_name('judge_calibration.jsonl')
-CALIBRATION_SIZE = 18
+CALIBRATION_SIZE = 22
 
 
 def load_calibration(path=CALIBRATION_FILE):
     rows = [json.loads(s) for s in Path(path).read_text().splitlines() if s.strip()]
     if len(rows) != CALIBRATION_SIZE or len({r.get('id') for r in rows}) != CALIBRATION_SIZE:
-        raise ValueError('校准必须有 18 条、且 ID 唯一')
-    if sum(r.get('expected_pass') is True for r in rows) != 8:
-        raise ValueError('校准必须有 8 条正确回答和 10 条错误回答')
+        raise ValueError('校准必须有 22 条、且 ID 唯一')
+    if sum(r.get('expected_pass') is True for r in rows) != 10:
+        raise ValueError('校准必须有 10 条正确回答和 12 条错误回答')
     for row in rows:
         if (type(row.get('expected_pass')) is not bool
                 or not isinstance(row.get('answer'), str)

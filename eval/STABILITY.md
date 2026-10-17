@@ -315,3 +315,45 @@ AlphaBrain 新增本地记忆工具和独立 system 记忆块。eval 每条用�
 校准题集 SHA-256：`e13efd4b428cd94a5debee701b6a06bb6a889bb37964a5672db0b6fda5809398`；judge 提示词/schema SHA-256：`5a38fe040a2fcd3ec0ffa51d4964abce98bc823f55def247332e483971000259`。
 
 新增三条记忆 rubric 没有另建专门的 judge 校准题；现有 18 条校准不能证明所有记忆语义判断都可靠。工具、记忆条数及内容、邮件发送次数仍由代码核验。mem-01/07/10 的三次语义评分均通过。本节追加，旧评测结果保持原样。
+
+
+## 设备名与区域目标修正：受影响用例三次复测
+
+### 改动
+
+生产规则明确：用户说具体设备名时用 name，不能改用 area 扩大范围；只有明确区域请求才用 area。无目标限定的泛指关灯仍按 domain 操作所有已暴露灯，不缩成一盏或追问设备。light-02 和 mem-03 的 expect_args 保持原样，严格要求 name=客厅灯。
+
+假 HA 补齐设备区域。响应与状态更新共用 matching_devices，对 name、area、floor、domain 取交集；没有匹配时返回错误，不回退全部设备。新增单元测试包含同一区域两盏灯及另一地区的第三盏灯，验证按名称、区域、楼层、全部灯和冲突条件时，返回目标与实际变化一致。
+
+judge 校准集新增四条记忆题：具体偏好确认通过、只说“好的”失败；拒绝保存密码通过、声称记住密码失败。正例 10 条、反例 12 条，加载器和相关测试同步更新，22 条全对才开始评分；人工标签不发送给 judge。
+
+### 首次运行与追加修正
+
+命令：`.venv/bin/python -m eval.run_eval --case light-02 --case mem-03 --case light-01 --case light-04 --repeat 3 --judge`。
+
+首次启动校准 **22/22**，用例 **11/12**：light-02、mem-03、light-04 均 3/3，light-01 为 2/3。失败尝试先调用 `light__HassLightSet({"name":"客厅灯"})`，没有任何调整参数，再调用 HassTurnOn；额外调用违反严格工具集合，被代码正确判失败。
+
+因此补充规则：单纯开/关只调用对应开关工具；明确调整亮度、颜色或色温才用 HassLightSet，不得只传目标而不传调整参数。之后按同一命令复测。首次记录保留在 `eval/results/20261016-224304-c3e817.jsonl`，没有删掉或改分。
+
+### 最终结果
+
+启动校准再次 **22/22**。四条用例各 **3/3**，合计 **12/12**；行为失败和运行错误均为 0。
+
+| 用例 | 最终通过次数 |
+| --- | --- |
+| light-01 | 3/3 |
+| light-02 | 3/3 |
+| light-04 | 3/3 |
+| mem-03 | 3/3 |
+
+mem-03 保留了原先 30% 的偏好；light-04 仍关闭并报告全部目标灯。此次仅复测这四条，没有重新运行全部 34 条；J6.2 原始 100/102 结果继续保留。
+
+最终报告：`eval/results/20261016-224440-f1c995.jsonl`；汇总及校准为同名 `.summary.json` / `.calibration.json`。
+
+校准集 SHA-256：`3acab6338f8f0a5552ab1e9e12e64519e445c028cfad6faa4ea930fc6ca16a05`。
+
+judge 提示词/schema SHA-256：`5a38fe040a2fcd3ec0ffa51d4964abce98bc823f55def247332e483971000259`。
+
+当前用例文件 SHA-256：`dfdb15df5053d9837bea6fcf0159679f33098b182bbd98fef838a9bd6a17b50d`。
+
+547 个单元测试通过；brain/agent.py、eval/run_eval.py、eval/calibrate_judge.py 的 mypy 和 git diff --check 通过。3/3 是本次样本内通过，目标选择仍依赖模型遵守提示，不是代码强制保证。

@@ -70,6 +70,32 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         json.dumps(result, ensure_ascii=False)
         return result, sdk
 
+    async def test_fake_ha_name_area_and_no_target_match_returned_and_changed_devices(self):
+        devices = [
+            {'name': '客厅灯', 'domain': 'light', 'area': '客厅', 'floor': '一楼'},
+            {'name': '客厅落地灯', 'domain': 'light', 'area': '客厅', 'floor': '一楼'},
+            {'name': '厨房灯', 'domain': 'light', 'area': '厨房', 'floor': '二楼'}]
+        for args, targets in [
+            ({'name': '客厅灯', 'brightness': 80}, {'客厅灯'}),
+            ({'area': '客厅', 'brightness': 80}, {'客厅灯', '客厅落地灯'}),
+            ({'floor': '一楼', 'brightness': 80}, {'客厅灯', '客厅落地灯'}),
+            ({'domain': ['light'], 'brightness': 80}, {'客厅灯', '客厅落地灯', '厨房灯'})]:
+            with self.subTest(args=args):
+                services = eval_module.FakeServices({'devices': devices}, FrozenClock(eval_module.DEFAULT_NOW))
+                result = await services.call('light__HassLightSet', args)
+                self.assertFalse(result.is_error)
+                returned = json.loads(result.content[0].text)['data']['success']
+                self.assertEqual({d['name'] for d in returned}, targets)
+                self.assertEqual({d['name'] for d in services.devices if d.get('brightness') == 80}, targets)
+
+    async def test_fake_ha_targets_are_intersection_and_no_match_never_means_all(self):
+        for args in ({'area': '不存在'}, {'name': '客厅灯', 'area': '厨房'},
+                     {'area': '客厅', 'domain': ['switch']}):
+            services = eval_module.FakeServices({}, FrozenClock(eval_module.DEFAULT_NOW))
+            result = await services.call('intent__HassTurnOn', args)
+            self.assertTrue(result.is_error)
+            self.assertTrue(all(d['state'] == 'off' for d in services.devices))
+
     async def test_new_session_reopens_same_db_with_empty_history(self):
         result, sdk = await self.run_fixture('mem-02',
             reply(calls=[('remember', {'kind': 'preference', 'content': '客厅灯亮度喜欢30%'})]),
