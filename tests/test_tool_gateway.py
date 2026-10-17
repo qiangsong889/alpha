@@ -7,9 +7,35 @@ from unittest.mock import AsyncMock, patch
 from integrations.operations import OperationStore
 from integrations.tool_gateway import ExecutorResult, ToolGateway, ToolNotSent
 from integrations.tool_policy import ToolPolicy
+from core.tool_timing import TOOL_TIMING_SINK
 
 
 class ToolGatewayTests(unittest.IsolatedAsyncioTestCase):
+    async def test_timing_wraps_real_execution_once_and_does_not_leak_arguments(self):
+        events = []
+        token = TOOL_TIMING_SINK.set(events.append)
+        try:
+            op = await self.gateway.submit('turn', 'create_reminder', {'title': 'private'})
+            self.gateway.approve(op.id)
+            await self.gateway.execute(op.id)
+            await self.gateway.execute(op.id)
+        finally:
+            TOOL_TIMING_SINK.reset(token)
+        self.assertEqual([e['phase'] for e in events], ['started', 'finished'])
+        self.assertEqual([e['operation_id'] for e in events], [op.id, op.id])
+        self.assertGreaterEqual(events[1]['duration_s'], 0)
+        self.assertNotIn('private', str(events))
+
+    async def test_timing_callback_failure_cannot_change_tool_outcome(self):
+        def broken(event):
+            raise RuntimeError('metrics unavailable')
+        token = TOOL_TIMING_SINK.set(broken)
+        try:
+            op = await self.gateway.submit('turn', 'list_items', {})
+        finally:
+            TOOL_TIMING_SINK.reset(token)
+        self.assertEqual(op.status, 'succeeded')
+
     def setUp(self):
         self.store = OperationStore(":memory:")
         self.addCleanup(self.store.close)

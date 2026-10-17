@@ -7,9 +7,29 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from brain import server
+from core.tool_timing import TOOL_TIMING_SINK, emit_tool_timing
 
 
 class BrainStreamTests(unittest.IsolatedAsyncioTestCase):
+    async def test_tool_timing_is_correlated_per_request_and_sink_is_reset(self):
+        async def ask(text, *, on_text, on_signal, search_announced=False):
+            emit_tool_timing('list_items', 'op-' + text, 'started')
+            await asyncio.sleep(0)
+            emit_tool_timing('list_items', 'op-' + text, 'finished', duration_s=.02)
+            await on_text('好了')
+        async def collect(text):
+            response = await server.ask_stream(server.AskRequest(text=text, request_id='batch-' + text))
+            return [json.loads(line) async for line in response.body_iterator]
+        with patch.object(server, 'brain', SimpleNamespace(ask=ask, last_timings=[])):
+            batches = await asyncio.gather(collect('one'), collect('two'))
+        for name, events in zip(('one', 'two'), batches):
+            tools = [e for e in events if e['type'] == 'tool_timing']
+            self.assertEqual([e['phase'] for e in tools], ['started', 'finished'])
+            self.assertTrue(all(e['request_id'] == 'batch-' + name for e in tools))
+            self.assertTrue(all(e['operation_id'] == 'op-' + name for e in tools))
+            self.assertTrue(all(e['elapsed_s'] >= 0 for e in tools))
+        self.assertIsNone(TOOL_TIMING_SINK.get())
+
     async def test_search_announcement_marker_is_forwarded(self):
         seen = []
         async def ask(text, *, on_text, on_signal, search_announced=False):

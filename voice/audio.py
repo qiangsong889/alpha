@@ -91,6 +91,13 @@ class _PlaybackWaiter:
 
 
 @dataclass
+class _PlaybackStartWaiter:
+    loop: asyncio.AbstractEventLoop
+    future: asyncio.Future[float | None]
+    scheduled: bool = False
+
+
+@dataclass
 class _ItemPlayback:
     pending_frames: int = 0
     received: bool = False
@@ -98,6 +105,9 @@ class _ItemPlayback:
     deadline: float | None = None
     result: bool | None = None
     waiters: list[_PlaybackWaiter] = field(default_factory=list)
+    started_at: float | None = None
+    cleared_at: float | None = None
+    start_waiters: list[_PlaybackStartWaiter] = field(default_factory=list)
 
 
 class StreamingPlayer:
@@ -131,7 +141,7 @@ class StreamingPlayer:
             return
         for item_id in list(self._playbacks)[:-200]:
             playback = self._playbacks[item_id]
-            if playback.waiters or playback.pending_frames:
+            if playback.waiters or playback.start_waiters or playback.pending_frames:
                 continue
             # 没有调用方等待时也能判定已过输出延迟的条目，避免它们永远积累。
             self._mark_played(playback)
@@ -189,12 +199,22 @@ class StreamingPlayer:
                     self.played_frames = 0
                 samples = self.buffers[0]
                 count = min(frames - written, samples.size - self.offset)
+                playback = self._playbacks[item_id]
+                if count and playback.started_at is None:
+                    # PortAudio 的 DAC 时间属于另一个时钟域；只取差值再映射到本地单调时钟。
+                    delay = max(0.0, self.latency)
+                    if time_info is not None:
+                        try:
+                            delay = max(0.0, float(time_info.outputBufferDacTime) - float(time_info.currentTime))
+                        except (AttributeError, TypeError, ValueError):
+                            pass
+                    playback.started_at = time.perf_counter() + delay + written / self.rate
+                    self._notify_started(playback)
                 outdata[written:written + count, 0] = samples[self.offset:self.offset + count]
                 self.offset += count
                 written += count
                 # 记录当前条目的播放量；同一次 callback 跨条目时也不能把前一条的帧数算进来。
                 self.played_frames += count
-                playback = self._playbacks[item_id]
                 playback.pending_frames -= count
                 if playback.pending_frames == 0:
                     # 只是交给声卡；完成通知要等到最后一次提交的输出延迟过去。
@@ -257,6 +277,7 @@ class StreamingPlayer:
 
     def _notify_playback(self, playback: _ItemPlayback) -> None:
         # 调用方持有 lock。这里可能在声卡线程，绝不能直接设置 asyncio.Future。
+        self._notify_started(playback)
         ready = playback.finished and playback.pending_frames == 0 and playback.deadline is not None
         for waiter in playback.waiters:
             if playback.result is not None or (ready and not waiter.scheduled):
@@ -266,6 +287,49 @@ class StreamingPlayer:
                 except RuntimeError:
                     if not waiter.loop.is_closed():
                         raise
+
+    async def wait_started(self, item_id: str) -> float | None:
+        """首帧交给声卡后，等待到预计 DAC 播放时刻；无音频或播放前被清空返回 None。
+
+        在 append 之后调用。返回本进程 perf_counter 时间，不是首个网络音频包的时间；
+        这是根据设备时间/延迟的估计，不能测量扬声器的物理声波。
+        """
+        loop = asyncio.get_running_loop()
+        with self.lock:
+            playback = self._playbacks.get(item_id)
+            if playback is None or not playback.received:
+                return None
+            waiter = _PlaybackStartWaiter(loop, loop.create_future())
+            playback.start_waiters.append(waiter)
+            self._notify_started(playback)
+        try:
+            return await waiter.future
+        finally:
+            with self.lock:
+                playback.start_waiters.remove(waiter)
+                self._trim_playbacks()
+
+    def _notify_started(self, playback: _ItemPlayback) -> None:
+        for waiter in playback.start_waiters:
+            if not waiter.scheduled and (playback.started_at is not None or playback.result is False):
+                waiter.scheduled = True
+                try:
+                    waiter.loop.call_soon_threadsafe(self._deliver_started, playback, waiter)
+                except RuntimeError:
+                    if not waiter.loop.is_closed():
+                        raise
+
+    def _deliver_started(self, playback: _ItemPlayback, waiter: _PlaybackStartWaiter) -> None:
+        with self.lock:
+            if waiter.future.done():
+                return
+            started = playback.started_at
+            if started is None or (playback.cleared_at is not None and playback.cleared_at < started):
+                waiter.future.set_result(None)
+            elif started <= time.perf_counter():
+                waiter.future.set_result(started)
+            else:
+                waiter.loop.call_later(started - time.perf_counter(), self._deliver_started, playback, waiter)
 
     def _deliver_playback(self, playback: _ItemPlayback, waiter: _PlaybackWaiter) -> None:
         # 只在对应的事件循环运行；call_later 等输出延迟，不阻塞声卡回调线程。
@@ -301,6 +365,7 @@ class StreamingPlayer:
             for playback in self._playbacks.values():
                 if playback.result is None:
                     playback.result = False
+                    playback.cleared_at = time.perf_counter()
                 playback.pending_frames = 0
                 self._notify_playback(playback)
             # 扣除估计仍在设备缓冲区的尾部，得到保守的已听时长。

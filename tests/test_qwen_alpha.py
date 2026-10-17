@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import httpx2
 from voice.qwen_alpha import BrainBridge, Receiver, TurnCollector, session_config
 from voice.qwen_realtime import CostTracker
+from voice.qwen_alpha import Report
+from voice.batch_timing import BatchTiming
 
 
 class ConfigTests(TestCase):
@@ -19,6 +21,56 @@ class ConfigTests(TestCase):
 
 
 class CollectionTests(IsolatedAsyncioTestCase):
+    async def test_semantic_check_starts_during_window_and_does_not_shorten_it(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def classify(*args):
+            started.set()
+            await release.wait()
+            return True
+        self.router.turn_complete.side_effect = classify
+        self.gate.window_s = .15
+        self.gate.transcript('1', '关客厅灯')
+        await asyncio.wait_for(started.wait(), .08)
+        release.set()
+        await asyncio.sleep(.03)
+        self.submit.assert_not_called()
+        await asyncio.sleep(.16)
+        self.submit.assert_called_once_with('关客厅灯')
+
+    async def test_speech_cancels_inflight_jev_request(self):
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        async def classify(*args):
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        self.router.turn_complete.side_effect = classify
+        self.gate.transcript('1', '加牛奶')
+        await started.wait()
+        self.gate.started('2')
+        await asyncio.wait_for(cancelled.wait(), 1)
+        self.submit.assert_not_called()
+
+    async def test_submission_snapshots_stop_time_and_later_batch_cannot_change_it(self):
+        with patch('voice.qwen_alpha.time.perf_counter', return_value=100):
+            self.gate.started('1')
+            self.gate.stopped('1')
+        self.gate.transcript('1', '关灯，执行吧')
+        await self.settle()
+        first = self.gate.last_submission
+        self.assertEqual(first.stopped_at, 100)
+        with patch('voice.qwen_alpha.time.perf_counter', return_value=200):
+            self.gate.started('2')
+            self.gate.stopped('2')
+        self.assertEqual(first.stopped_at, 100)
+
+    async def test_missing_stop_does_not_borrow_an_unrelated_noise_timestamp(self):
+        self.gate.stopped('noise')
+        self.gate.transcript('noise', '咳嗽')
+        self.gate.transcript('actual', '关灯，执行吧')
+        await self.settle()
+        self.assertIsNone(self.gate.last_submission.stopped_at)
     async def asyncSetUp(self):
         self.submit, self.prompt = Mock(), Mock()
         self.router = NS(turn_complete=AsyncMock(return_value=True))
@@ -107,6 +159,32 @@ class CollectionTests(IsolatedAsyncioTestCase):
 
 
 class BridgeTests(IsolatedAsyncioTestCase):
+    async def test_batch_id_and_timing_follow_http_and_reports_without_cross_talk(self):
+        timing = BatchTiming(stopped_at=100, submitted_at=101, id='batch-one')
+        def handle(request):
+            body = json.loads(request.content)
+            self.assertEqual(body['request_id'], timing.id)
+            events = [
+                {'type': 'tool_timing', 'request_id': 'another-batch', 'name': 'wrong', 'phase': 'started', 'elapsed_s': 0},
+                {'type': 'tool_timing', 'request_id': timing.id, 'name': 'list_items', 'phase': 'started', 'elapsed_s': .2},
+                {'type': 'tool_timing', 'request_id': timing.id, 'name': 'list_items', 'phase': 'finished', 'elapsed_s': .3, 'duration_s': .1},
+                {'type': 'delta', 'text': '牛奶'}, {'type': 'done'}]
+            return httpx2.Response(200, text='\n'.join(json.dumps(e) for e in events))
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handle)) as client:
+            bridge = BrainBridge(client, 'http://brain')
+            worker = asyncio.create_task(bridge.run())
+            try:
+                bridge.submit('查清单', timing)
+                await asyncio.wait_for(bridge.requests.join(), 1)
+                self.assertEqual([e['name'] for e in timing.tool_events], ['list_items', 'list_items'])
+                self.assertIs(bridge.reports[0].timing, timing)
+                self.assertEqual(timing.stopped_at, 100)
+                self.assertIsNotNone(timing.http_started_at)
+                self.assertIsNotNone(timing.brain_done_at)
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+
     async def test_late_old_answer_is_not_queued_after_new_input(self):
         started, release = asyncio.Event(), asyncio.Event()
         calls = []
@@ -155,7 +233,9 @@ class BridgeTests(IsolatedAsyncioTestCase):
             await asyncio.wait_for(bridge.requests.join(), 1)
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-        self.assertEqual(calls, [{'text': '任务'}])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]['text'], '任务')
+        self.assertRegex(calls[0]['request_id'], r'^[a-f0-9]{12}$')
         return [report.text for report in bridge.reports]
 
     async def test_web_progress_is_sent_before_final_result(self):
@@ -176,11 +256,26 @@ class ReceiverTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.ws = NS(send=AsyncMock())
         self.player = NS(clear=Mock(), append=Mock(), finish=Mock(), gain=1, resume=Mock(), pause=Mock(),
-                         wait_played=AsyncMock(return_value=True))
+                         wait_played=AsyncMock(return_value=True), wait_started=AsyncMock(return_value=115))
         self.gate = TurnCollector(Mock(), Mock(), NS(turn_complete=AsyncMock(return_value=True)), window_s=10)
         self.addAsyncCleanup(self.gate.close)
         self.bridge = BrainBridge(None, 'http://brain')
         self.receiver = Receiver(self.ws, self.player, self.gate, self.bridge, CostTracker('singapore'), 'test')
+        self.addAsyncCleanup(self.receiver.close)
+
+    async def test_first_playback_uses_original_report_batch_not_latest_speech(self):
+        self.receiver.active = True
+        self.receiver.current_report = Report('旧汇报', 0, BatchTiming(stopped_at=100, id='first'))
+        with self.assertLogs('alpha.qwen_alpha', 'INFO') as logs:
+            await self.receiver.handle({'type': 'response.audio.delta', 'response_id': 'r',
+                                        'item_id': 'audio', 'delta': 'AAA='})
+            self.receiver.current_report = Report('新回答', 1, BatchTiming(stopped_at=200, id='second'))
+            await asyncio.gather(*list(self.receiver.playback_tasks))
+        playback = [line for line in logs.output if '声卡估计' in line]
+        self.assertEqual(len(playback), 1)
+        self.assertIn('first', playback[0])
+        self.assertIn('15.00s', playback[0])
+        self.assertNotIn('second', playback[0])
 
     async def test_user_input_alone_never_creates_response_or_calls_brain(self):
         await self.receiver.handle({'type': 'input_audio_buffer.speech_started', 'item_id': '1'})

@@ -15,6 +15,7 @@
 import logging
 import asyncio
 import json
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -24,6 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from brain.agent import AlphaBrain
+from core.tool_timing import TOOL_TIMING_SINK
 
 logger = logging.getLogger("alpha.brain_server")
 brain = AlphaBrain(style="voice")
@@ -33,6 +35,7 @@ stream_tasks: set[asyncio.Task[None]] = set()
 class AskRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     search_announced: bool = False
+    request_id: str | None = Field(default=None, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
 
 
 class AskResponse(BaseModel):
@@ -96,6 +99,11 @@ async def ask_stream(body: AskRequest) -> StreamingResponse:
         events.put_nowait({"type": "signal", "name": name})
 
     async def produce() -> None:
+        started = time.perf_counter()
+        def tool_timing(event):
+            events.put_nowait({'type': 'tool_timing', 'request_id': body.request_id,
+                              **event, 'elapsed_s': time.perf_counter() - started})
+        token = TOOL_TIMING_SINK.set(tool_timing if body.request_id is not None else None)
         try:
             await brain.ask(body.text, on_text=emit, on_signal=signal,
                             search_announced=body.search_announced)
@@ -103,6 +111,8 @@ async def ask_stream(body: AskRequest) -> StreamingResponse:
         except Exception:
             logger.exception("brain.ask 流式处理失败")
             events.put_nowait({"type": "error", "text": "未能拿到完整结果，操作可能已生效，请先查询确认。"})
+        finally:
+            TOOL_TIMING_SINK.reset(token)
 
     # 与 HTTP 消费者分开，断线不取消正在发出的工具操作，也不会自动重发。
     task = asyncio.create_task(produce(), name="brain-stream")

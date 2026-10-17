@@ -669,3 +669,5 @@ See [extraction evaluation](eval/EXTRACTION.md) for the synthetic test set, metr
 ## Qwen + AlphaBrain experiment
 
 On the `qwen-alpha` branch, run `python -m brain.server` and then `python -m voice.qwen_alpha`, both with Alpha's `.venv`. Qwen handles microphone transcription and streamed voice; all business tools remain in AlphaBrain. Collection and Jev completeness checking prevent execution before submission; say “执行吧” to finish a long request. See [trial instructions and limitations](voice/QWEN_ALPHA.md).
+
+On `dev`, Jev completeness checks overlap the collection timer. Batch IDs now connect collection, gateway execution, brain completion, audio arrival and estimated playback-start logs. Restart both processes to use the updated timing protocol; details are in [the Qwen trial notes](voice/QWEN_ALPHA.md#dev-parallel-completeness-checks-and-batch-latency).

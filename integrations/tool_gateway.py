@@ -4,6 +4,8 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 from contextvars import ContextVar
+import time
+from core.tool_timing import emit_tool_timing
 
 from integrations.operations import Operation, OperationStatus, OperationStore
 from integrations.tool_policy import catalog_policy, get_policy, ToolPolicy
@@ -90,6 +92,8 @@ class ToolGateway:
             return self._get(op_id)
 
         token = CURRENT_OPERATION_ID.set(op_id)
+        started = time.perf_counter()
+        emit_tool_timing(operation.name, op_id, 'started')
         try:
             response = await self.executor(operation.name, operation.arguments)
             if not isinstance(response, ExecutorResult) or type(response.ok) is not bool:
@@ -108,6 +112,7 @@ class ToolGateway:
             self.store.transition(op_id, "executing", "unknown", self._error(exc))
             raise
         finally:
+            emit_tool_timing(operation.name, op_id, 'finished', duration_s=time.perf_counter() - started)
             CURRENT_OPERATION_ID.reset(token)
         return self._get(op_id)
 

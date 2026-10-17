@@ -25,6 +25,7 @@ from voice.qwen_realtime import (CostTracker, SessionEnded, QwenProtocolError, M
     verify_session, websocket_url, raise_api_error, reconnectable, rotate_session)
 from voice_pipeline.collection import EXECUTE, unfinished
 from voice_pipeline.search_router import JevSearchRouter
+from voice.batch_timing import BatchTiming
 
 logger = logging.getLogger('alpha.qwen_alpha')
 SPEAKER_RULES = ('你是 Alpha 的中文语音播报器，没有执行任何操作的权限。'
@@ -57,6 +58,11 @@ class TurnCollector:
         self.tasks = set()
         self.immediate = False
         self.history = []
+        self.stops = {}
+        self.last_stopped_at = None
+        self.last_stopped_item = None
+        self.last_transcribed_at = None
+        self.last_submission = None
 
     def _change(self):
         self.revision += 1
@@ -70,13 +76,21 @@ class TurnCollector:
 
     def started(self, item_id):
         self.speaking = True
+        if not self.segments:
+            self.last_stopped_at = None
+            self.last_stopped_item = None
+            self.last_transcribed_at = None
         if item_id not in self.resolved:
             self.segments.setdefault(item_id, '')
             self.pending.add(item_id)
         self._change()
 
-    def stopped(self):
+    def stopped(self, item_id=None):
         self.speaking = False
+        self.last_stopped_at = time.perf_counter()
+        self.last_stopped_item = item_id
+        if item_id is not None:
+            self.stops[item_id] = self.last_stopped_at
         self._change()
 
     def committed(self, item_id):
@@ -97,6 +111,7 @@ class TurnCollector:
             self._change()
             return False
         self.paused = False
+        self.last_transcribed_at = time.perf_counter()
         text = text.strip()
         # 只识别独立口令/明确分隔的句尾口令，不截断“提醒我执行”。
         last = re.split(r'[，。！？、,;；!?\s]+', text.rstrip('。！!？? '))[-1]
@@ -117,17 +132,33 @@ class TurnCollector:
             text = '；'.join(self.parts)
             incomplete = unfinished(text)
             delay = 0 if self.immediate else (self.continuation_s if incomplete else self.window_s)
-            await asyncio.sleep(delay)
-            decision = None if self.immediate else await self.router.turn_complete(text, self.history)
+            if self.immediate:
+                await asyncio.sleep(delay)
+                decision = None
+            else:
+                # 判断与原有静音窗口同时开始；继续说话会取消整个组，旧判断不能提交。
+                async with asyncio.TaskGroup() as checks:
+                    checks.create_task(asyncio.sleep(delay))
+                    semantic = checks.create_task(self.router.turn_complete(text, list(self.history)))
+                decision = semantic.result()
             if revision != self.revision or self.pending or self.speaking or self.paused:
                 return
             if incomplete or decision is False:
                 # 不完整时只追问一次，保留整批，直到收到新文字；绝不超时强制执行。
                 self.prompt('还有吗？你可以接着说，说完后说“执行吧”。')
                 return
+            last_item = next(reversed(self.segments), None)
+            self.last_submission = BatchTiming(
+                stopped_at=self.stops.get(last_item,
+                    self.last_stopped_at if self.last_stopped_item is None else None),
+                transcribed_at=self.last_transcribed_at)
+            self.last_submission.log_submission()
+            self.last_stopped_at = None
+            self.last_stopped_item = None
             self.parts.clear()
             self.segments.clear()
             self.end_commands.clear()
+            self.stops.clear()
             self.immediate = False
             self.history = (self.history + [{'role': 'user', 'content': text}])[-6:]
             logger.info('[提交] %s', text)
@@ -158,6 +189,8 @@ class TurnCollector:
 class Report:
     text: str | None
     epoch: int
+    timing: BatchTiming | None = None
+    kind: str = 'reply'
 
 
 class BrainBridge:
@@ -174,26 +207,28 @@ class BrainBridge:
         self.epoch += 1
         self.reports.clear()
 
-    def submit(self, text):
-        self.requests.put_nowait((text, self.epoch))
+    def submit(self, text, timing=None):
+        self.requests.put_nowait((text, self.epoch, timing or BatchTiming()))
 
-    def say(self, text, *, epoch=None):
+    def say(self, text, *, epoch=None, timing=None, kind='reply'):
         epoch = self.epoch if epoch is None else epoch
         if epoch != self.epoch:
             logger.info('[播报跳过] 旧轮次结果已被新输入替代；操作结果仍保存在大脑')
             return
-        self.reports.append(Report(text, epoch))
+        self.reports.append(Report(text, epoch, timing, kind))
         self.changed.set()
 
     async def run(self):
         while True:
-            text, epoch = await self.requests.get()
+            text, epoch, timing = await self.requests.get()
             started = time.perf_counter()
+            timing.http_started_at = started
+            logger.info('[批次 %s] 请求大脑 ｜ 排队 %.3fs', timing.id, started - timing.submitted_at)
             answer = ''
             device_done = False
             try:
                 async with self.client.stream('POST', self.base_url + '/ask/stream',
-                                               json={'text': text}, timeout=180) as response:
+                                               json={'text': text, 'request_id': timing.id}, timeout=180) as response:
                     response.raise_for_status()
                     done = False
                     async for line in response.aiter_lines():
@@ -202,29 +237,34 @@ class BrainBridge:
                         event = json.loads(line)
                         if event['type'] == 'delta':
                             if event['text'] == '我查一下。':
-                                self.say(event['text'], epoch=epoch)  # 搜索进行时就播，不等最终结果。
+                                self.say(event['text'], epoch=epoch, timing=timing, kind='search_progress')
                             else:
                                 answer += event['text']
                         elif event['type'] == 'signal' and event.get('name') == 'ha_done':
                             device_done = True
+                        elif event['type'] == 'tool_timing' and event.get('request_id') == timing.id:
+                            timing.tool(event)
                         elif event['type'] == 'error':
                             raise RuntimeError('brain error')
                         elif event['type'] == 'done':
                             done = True
                     if not done:
                         raise RuntimeError('brain disconnected')
+                timing.brain_done_at = time.perf_counter()
+                logger.info('[批次 %s] 大脑完成 %.3fs ｜ 停说→大脑完成 %s', timing.id,
+                            timing.brain_done_at - started, timing.elapsed(timing.brain_done_at))
                 if answer.strip():
                     logger.info('[大脑] %.2fs ｜ %s', time.perf_counter() - started, answer)
-                    self.say(answer, epoch=epoch)
+                    self.say(answer, epoch=epoch, timing=timing)
                 elif device_done:
-                    self.say(None, epoch=epoch)  # 本地提示音；不让 Qwen 编造操作报告。
+                    self.say(None, epoch=epoch, timing=timing, kind='tone')
                 else:
-                    self.say('没有收到有效回答，请先查询确认操作结果。', epoch=epoch)
+                    self.say('没有收到有效回答，请先查询确认操作结果。', epoch=epoch, timing=timing, kind='error')
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 logger.warning('[大脑] %s；不会自动重发', type(exc).__name__)
-                self.say('没有拿到完整结果，操作可能已经生效，请先查询确认。', epoch=epoch)
+                self.say('没有拿到完整结果，操作可能已经生效，请先查询确认。', epoch=epoch, timing=timing, kind='error')
             finally:
                 self.requests.task_done()
 
@@ -240,11 +280,12 @@ class Receiver:
         self.response_done = asyncio.Event()
         self.response_done.set()
         self.first_audio = True
-        self.stopped_at = None
         self.sent_at = 0.0
         self.cancelled = False
         self.activity = activity
         self.paused = False
+        self.current_report = None
+        self.playback_tasks = set()
 
     async def interrupt(self):
         self.player.clear()
@@ -267,8 +308,7 @@ class Receiver:
             if self.activity:
                 self.activity.reset()
         elif kind == 'input_audio_buffer.speech_stopped':
-            self.stopped_at = time.perf_counter()
-            self.collector.stopped()
+            self.collector.stopped(event.get('item_id'))
         elif kind == 'input_audio_buffer.committed':
             self.collector.committed(event['item_id'])
         elif kind in {'conversation.item.input_audio_transcription.completed',
@@ -295,8 +335,12 @@ class Receiver:
                 if self.first_audio:
                     self.first_audio = False
                     now = time.perf_counter()
-                    logger.info('[延迟] Qwen 播报首包 %.2fs%s', now - self.sent_at,
-                                f' ｜ 停说→首包 {now - self.stopped_at:.2f}s' if self.stopped_at else '')
+                    report = self.current_report
+                    timing = report.timing if report is not None else None
+                    logger.info('[批次 %s][%s] Qwen 首包 %.2fs ｜ 停说事件→首包 %s',
+                                timing.id if timing else '未提交', report.kind if report else 'unknown',
+                                now - self.sent_at, timing.elapsed(now) if timing else '未知')
+                    self.watch_playback(event['item_id'], report, now, self.sent_at)
                 self.audio_items.add(event['item_id'])
                 self.player.append(base64.b64decode(event['delta']), event['item_id'], event.get('content_index', 0))
         elif kind == 'response.audio.done':
@@ -326,6 +370,31 @@ class Receiver:
                 logger.info('[暂停] 本地人声持续 400ms，保留缓冲区，等待文字确认')
             await asyncio.sleep(.02)
 
+    def watch_playback(self, item_id, report, first_packet, sent_at):
+        # append 在当前事件处理函数返回前完成；后台任务运行时条目已进入播放器。
+        task = asyncio.create_task(self._playback_started(item_id, report, first_packet, sent_at))
+        self.playback_tasks.add(task)
+        task.add_done_callback(self.playback_tasks.discard)
+
+    async def _playback_started(self, item_id, report, first_packet, sent_at):
+        started = await self.player.wait_started(item_id)
+        timing = report.timing if report else None
+        ident = timing.id if timing else '未提交'
+        kind = report.kind if report else 'unknown'
+        if started is None:
+            logger.info('[批次 %s][%s] 首帧未播放（已清空或设备不可用）', ident, kind)
+            return
+        logger.info('[批次 %s][%s] 停说事件→首帧播放（声卡估计）%s ｜ %s→播放 %.3fs',
+                    ident, kind, timing.elapsed(started) if timing else '未知',
+                    '首包' if first_packet is not None else '提示音入队',
+                    started - (first_packet if first_packet is not None else sent_at))
+
+    async def close(self):
+        tasks = list(self.playback_tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def speak(self):
         while True:
             await self.bridge.changed.wait()
@@ -340,6 +409,7 @@ class Receiver:
             if report.epoch != self.bridge.epoch:
                 continue
             logger.info('[播报开始] 输入轮次=%d', report.epoch)
+            self.current_report = report
             try:
                 await self._play_report(report.text)
             except BaseException:
@@ -348,6 +418,8 @@ class Receiver:
                     self.bridge.reports.appendleft(report)
                     self.bridge.changed.set()
                 raise
+            finally:
+                self.current_report = None
 
     async def _play_report(self, text):
         self.cancelled = False
@@ -356,6 +428,7 @@ class Receiver:
             audio = array('h', (int(4500 * math.sin(2 * math.pi * 880 * i / 24000)
                 * min(1, i / 240, (2879 - i) / 240)) for i in range(2880)))
             self.player.append(audio.tobytes(), ident, 0)
+            self.watch_playback(ident, self.current_report, None, time.perf_counter())
             self.player.finish(ident)
             await self.player.wait_played(ident)
             return
@@ -396,12 +469,15 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     logger.info('[就绪] Qwen 中文收音/播报；等待完整任务后提交 AlphaBrain；说“执行吧”可立即提交')
     if collector.parts:
         bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
-    async with asyncio.TaskGroup() as tasks:
-        tasks.create_task(send_microphone(ws, activity))
-        tasks.create_task(receiver.run())
-        tasks.create_task(receiver.confirm_speech())
-        tasks.create_task(receiver.speak())
-        tasks.create_task(rotate_session(float(os.getenv('QWEN_SESSION_SECONDS', '1800'))))
+    try:
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(send_microphone(ws, activity))
+            tasks.create_task(receiver.run())
+            tasks.create_task(receiver.confirm_speech())
+            tasks.create_task(receiver.speak())
+            tasks.create_task(rotate_session(float(os.getenv('QWEN_SESSION_SECONDS', '1800'))))
+    finally:
+        await receiver.close()
 
 
 async def main():
@@ -419,7 +495,7 @@ async def main():
         except httpx.HTTPError as exc:
             raise SystemExit('请先启动 .venv/bin/python -m brain.server') from exc
         bridge = BrainBridge(client, base_url)
-        collector = TurnCollector(bridge.submit, bridge.say, make_router(client),
+        collector = TurnCollector(lambda text: bridge.submit(text, collector.last_submission), bridge.say, make_router(client),
             window_s=float(os.getenv('QWEN_ALPHA_COLLECTION_SECONDS', '2')),
             continuation_s=float(os.getenv('QWEN_ALPHA_CONTINUATION_SECONDS', '5')))
         async def reconnect():
