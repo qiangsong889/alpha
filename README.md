@@ -665,3 +665,7 @@ Ordinary preferences may be saved automatically with `source="auto"`. The next a
 Existing databases migrate automatically: old rows default to `source="explicit"`. Pending questions and unsent notices are process-local and are discarded on restart. Background tasks are cancelled before the database and API client close. Source content never becomes authority to override system rules. The store's existing 50-entry/2,000-character limits and secret checks apply to automatic writes too.
 
 See [extraction evaluation](eval/EXTRACTION.md) for the synthetic test set, metrics, and numeric normalization rules. Jev is not part of this extraction path.
+
+## Qwen + AlphaBrain experiment
+
+On the `qwen-alpha` branch, run `python -m brain.server` and then `python -m voice.qwen_alpha`, both with Alpha's `.venv`. Qwen handles microphone transcription and streamed voice; all business tools remain in AlphaBrain. Collection and Jev completeness checking prevent execution before submission; say “执行吧” to finish a long request. See [trial instructions and limitations](voice/QWEN_ALPHA.md).

@@ -5,7 +5,11 @@ import logging
 import math
 import time
 
-import httpx
+try:
+    import httpx  # type: ignore[import-not-found]
+except ModuleNotFoundError:
+    # Alpha 主环境使用 httpx2，LiveKit 环境使用 httpx；分类协议相同。
+    import httpx2 as httpx  # type: ignore[no-redef]
 
 logger = logging.getLogger("alpha.voice_pipeline")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
