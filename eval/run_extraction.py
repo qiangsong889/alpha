@@ -25,6 +25,9 @@ from dotenv import load_dotenv
 
 from brain.memory_extractor import Candidate, DEFAULT_MODEL, EXTRACTION_TOOL, MemoryExtractor, SYSTEM
 from core.memory import Memory
+from eval.text_numbers import contains_equivalent
+
+SCORING_VERSION = "cn-numbers-v2"
 
 CASES = Path(__file__).with_name('extraction_cases.jsonl')
 LABELS = ('save', 'ask', 'none')
@@ -76,8 +79,8 @@ def load_cases(path=CASES):
 
 
 def content_ok(expected, actual):
-    return (all(word in actual['content'] for word in expected['content_contains'])
-            and not any(word in actual['content'] for word in expected.get('content_not_contains', [])))
+    return (all(contains_equivalent(actual['content'], word) for word in expected['content_contains'])
+            and not any(contains_equivalent(actual['content'], word) for word in expected.get('content_not_contains', [])))
 
 
 def pair_candidates(expected, actual):
@@ -89,10 +92,10 @@ def pair_candidates(expected, actual):
     def weight(e, a):
         words = e['content_contains']
         full_targets = [other for other in expected
-                        if all(word in a['content'] for word in other['content_contains'])]
-        if full_targets and not all(word in a['content'] for word in words):
+                        if all(contains_equivalent(a['content'], word) for word in other['content_contains'])]
+        if full_targets and not all(contains_equivalent(a['content'], word) for word in words):
             return Fraction(0)
-        hits = sum(3 * (word in a['content']) + (word in a['evidence']) for word in words)
+        hits = sum(3 * (contains_equivalent(a['content'], word)) + (contains_equivalent(a['evidence'], word)) for word in words)
         return Fraction(hits, len(words))
 
     @lru_cache(None)
@@ -280,7 +283,7 @@ async def main(argv=None):
                     print(f"{'PASS' if row['passed'] else 'FAIL'} {case['id']} [{attempt}/{args.repeat}]"
                           + (f" error={row['error']['type']}" if row['error'] else ''), flush=True)
     summary = summarize(results)
-    summary.update(model=args.model, repeat=args.repeat,
+    summary.update(model=args.model, repeat=args.repeat, scoring_version=SCORING_VERSION,
                    cases_sha256=hashlib.sha256(args.cases.read_bytes()).hexdigest(),
                    prompt_sha256=hashlib.sha256(json.dumps({'system': SYSTEM, 'tool': EXTRACTION_TOOL},
                                               ensure_ascii=False, sort_keys=True).encode()).hexdigest())

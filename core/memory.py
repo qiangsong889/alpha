@@ -1,4 +1,4 @@
-"""用户明确要求保存的长期记忆；与操作记录共用文件，使用独立表。"""
+"""长期记忆和来源记录；与操作记录共用文件，使用独立表。"""
 
 from dataclasses import dataclass
 from pathlib import Path
@@ -39,6 +39,7 @@ class Memory:
     created_at: float
     updated_at: float
     source_turn: str
+    source: Literal["explicit", "auto"] = "explicit"
 
 
 class MemoryStore:
@@ -59,6 +60,24 @@ class MemoryStore:
                     UNIQUE(kind, content)
                 )
             """)
+            columns = {row['name'] for row in self._db.execute("PRAGMA table_info(memories)")}
+            if 'source' not in columns:
+                self._db.execute("ALTER TABLE memories ADD COLUMN source TEXT NOT NULL DEFAULT 'explicit' CHECK(source IN ('explicit','auto'))")
+            self._db.execute("CREATE TABLE IF NOT EXISTS memory_revision (id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL)")
+            self._db.execute("INSERT OR IGNORE INTO memory_revision VALUES(1, 0)")
+            for event in ('INSERT', 'UPDATE', 'DELETE'):
+                self._db.execute(f"""CREATE TRIGGER IF NOT EXISTS memory_revision_{event.lower()}
+                    AFTER {event} ON memories BEGIN
+                    UPDATE memory_revision SET version=version+1 WHERE id=1;
+                    END""")
+
+    def version(self) -> int:
+        return self._db.execute("SELECT version FROM memory_revision WHERE id=1").fetchone()[0]
+
+    def snapshot(self) -> tuple[int, list[Memory]]:
+        with self._db:
+            self._db.execute("BEGIN")
+            return self.version(), self.list()
 
     @staticmethod
     def _content(content: str) -> str:
@@ -70,35 +89,69 @@ class MemoryStore:
         if len(kept) >= MAX_MEMORIES or sum(len(row['content']) for row in kept) + len(content) > MAX_CONTENT_CHARS:
             raise ValueError("记忆已满，请先删掉一些")
 
-    def add(self, content: str, kind: MemoryKind, source_turn: str) -> int:
+    def _add(self, content, kind, source_turn, source):
         content = self._content(content)
-        if not isinstance(kind, str) or kind not in {"preference", "fact"}:
-            raise ValueError("kind 必须是 preference 或 fact")
-        with self._db:
-            self._db.execute("BEGIN IMMEDIATE")
-            existing = self._db.execute(
-                "SELECT id FROM memories WHERE kind=? AND content=?", (kind, content)).fetchone()
-            if existing is not None:
-                return existing['id']
-            self._capacity(content)
-            now = time.time()
-            cursor = self._db.execute(
-                "INSERT INTO memories(kind, content, created_at, updated_at, source_turn) VALUES(?,?,?,?,?)",
-                (kind, content, now, now, source_turn))
-            assert cursor.lastrowid is not None
-            return cursor.lastrowid
+        if kind not in ('preference', 'fact') or source not in ('explicit', 'auto'):
+            raise ValueError("kind 或 source 无效")
+        existing = self._db.execute(
+            "SELECT id FROM memories WHERE kind=? AND content=?", (kind, content)).fetchone()
+        if existing is not None:
+            return existing['id']
+        self._capacity(content)
+        now = time.time()
+        cursor = self._db.execute(
+            "INSERT INTO memories(kind, content, created_at, updated_at, source_turn, source) VALUES(?,?,?,?,?,?)",
+            (kind, content, now, now, source_turn, source))
+        assert cursor.lastrowid is not None
+        return cursor.lastrowid
 
-    def update(self, id: int, content: str) -> None:
-        content = self._content(content)
+    def add(self, content: str, kind: MemoryKind, source_turn: str, *,
+            source: Literal["explicit", "auto"] = "explicit") -> int:
         with self._db:
             self._db.execute("BEGIN IMMEDIATE")
-            if self._db.execute("SELECT id FROM memories WHERE id=?", (id,)).fetchone() is None:
-                raise ValueError("记忆不存在")
-            self._capacity(content, replacing=id)
-            try:
-                self._db.execute("UPDATE memories SET content=?, updated_at=? WHERE id=?", (content, time.time(), id))
-            except sqlite3.IntegrityError as exc:
-                raise ValueError("相同记忆已存在，请删除重复项") from exc
+            return self._add(content, kind, source_turn, source)
+
+    def _update(self, id, content, source, source_turn):
+        content = self._content(content)
+        if source not in ('explicit', 'auto'):
+            raise ValueError("source 无效")
+        if self._db.execute("SELECT id FROM memories WHERE id=?", (id,)).fetchone() is None:
+            raise ValueError("记忆不存在")
+        self._capacity(content, replacing=id)
+        try:
+            self._db.execute("UPDATE memories SET content=?, updated_at=?, source=?, source_turn=COALESCE(?,source_turn) WHERE id=?",
+                             (content, time.time(), source, source_turn, id))
+        except sqlite3.IntegrityError as exc:
+            raise ValueError("相同记忆已存在，请删除重复项") from exc
+
+    def update(self, id: int, content: str, *, source: Literal["explicit", "auto"] = "explicit",
+               source_turn: str | None = None) -> None:
+        with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            self._update(id, content, source, source_turn)
+
+    def apply_auto(self, expected_version: int, changes: list[dict], source_turn: str) -> list[Memory] | None:
+        """版本检查与整批写入在同一事务完成；None 表示快照已过时，异常则整批回滚。"""
+        with self._db:
+            self._db.execute("BEGIN IMMEDIATE")
+            if self.version() != expected_version:
+                return None
+            changed = []
+            for item in changes:
+                before = self.version()
+                if item['operation'] == 'add':
+                    ident = self._add(item['content'], item['kind'], source_turn, 'auto')
+                elif item['operation'] == 'update':
+                    ident = item['memory_id']
+                    target = next((row for row in self.list() if row.id == ident), None)
+                    if target is None or target.kind != item['kind']:
+                        raise ValueError("自动记忆更新目标已失效")
+                    self._update(ident, item['content'], 'auto', source_turn)
+                else:
+                    raise ValueError("自动记忆操作无效")
+                if self.version() != before:
+                    changed.append(next(row for row in self.list() if row.id == ident))
+            return changed
 
     def delete(self, id: int) -> None:
         with self._db:
@@ -107,7 +160,7 @@ class MemoryStore:
 
     def list(self) -> list[Memory]:
         return [Memory(row['id'], cast(MemoryKind, row['kind']), row['content'], row['created_at'],
-                       row['updated_at'], row['source_turn'])
+                       row['updated_at'], row['source_turn'], row['source'])
                 for row in self._db.execute("SELECT * FROM memories ORDER BY id")]
 
     def close(self) -> None:

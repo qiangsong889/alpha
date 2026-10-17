@@ -653,3 +653,15 @@ After a successful change, Alpha reports the specific change in one sentence wit
 All tools advertised by the connected Home Assistant MCP server are exposed to AlphaBrain and the realtime agents, with their original schemas and descriptions. No fixed list of HA tool names filters discovery or routing. HA still controls which services/entities it exposes.
 
 The gateway keeps operation records and resolves HA routes from that instance's discovered catalog. New HA tools run immediately; unless already classified, they are treated as potentially mutating and not safe to retry automatically. Personal-service policies, including email confirmation, remain in force. Names absent from both the loaded catalog and local policies are rejected.
+
+## Optional automatic memory (J6.3c)
+
+Automatic extraction is **off by default**. To try it, set `ALPHA_AUTO_MEMORY=1` in `alpha/.env` and restart the brain. Remove it or set it to `0` to disable extraction; existing memories remain available.
+
+After an answer, a background Haiku request sees only the original user text and current memories. Turns that invoked `remember`, `update_memory`, or `forget` skip extraction entirely. The background task does not delay the answer; it does add an API request when enabled. New user turns invalidate late results. A database revision, maintained by insert/update/delete triggers, also prevents stale results from overwriting newer changes. Revision checking and a batch of writes share one SQLite transaction.
+
+Ordinary preferences may be saved automatically with `source="auto"`. The next answer begins with a code-generated notice describing the saved content, once. Sensitive candidates are not saved automatically: they appear in a separate JSON system block and a code-generated question at the end of the next answer. They expire after ten minutes or any memory change. The main model handles explicit consent with the existing local memory tools; it must not treat questions, refusals, or ambiguous replies as consent. This interpretation still depends on the model. Turning a candidate into explicit memory marks its source as `explicit`.
+
+Existing databases migrate automatically: old rows default to `source="explicit"`. Pending questions and unsent notices are process-local and are discarded on restart. Background tasks are cancelled before the database and API client close. Source content never becomes authority to override system rules. The store's existing 50-entry/2,000-character limits and secret checks apply to automatic writes too.
+
+See [extraction evaluation](eval/EXTRACTION.md) for the synthetic test set, metrics, and numeric normalization rules. Jev is not part of this extraction path.

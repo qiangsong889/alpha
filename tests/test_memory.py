@@ -108,3 +108,39 @@ class MemoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '相同记忆'):
             self.store.update(first, '乙')
         self.assertEqual([r.content for r in self.store.list()], ['甲', '乙'])
+
+    def test_revision_detects_same_timestamp_update_and_atomic_rollback(self):
+        from unittest.mock import patch
+        with patch('core.memory.time.time', return_value=1):
+            ident = self.store.add('二十六度', 'preference', 'old')
+            version, _ = self.store.snapshot()
+            self.store.update(ident, '二十四度')
+        self.assertIsNone(self.store.apply_auto(version, [], 'stale'))
+        version = self.store.version()
+        with self.assertRaises(ValueError):
+            self.store.apply_auto(version, [
+                {'operation': 'add', 'kind': 'preference', 'content': '不吃香菜'},
+                {'operation': 'add', 'kind': 'fact', 'content': '密码是 abc123'}], 'auto')
+        self.assertEqual(self.store.version(), version)
+        self.assertEqual([r.content for r in self.store.list()], ['二十四度'])
+
+    def test_old_schema_migration_and_cross_connection_version(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'memory.db'
+            with sqlite3.connect(path) as db:
+                db.execute('CREATE TABLE memories(id INTEGER PRIMARY KEY, kind TEXT, content TEXT, created_at REAL, updated_at REAL, source_turn TEXT)')
+                db.execute("INSERT INTO memories VALUES(1,'fact','旧记忆',0,0,'old')")
+            first, second = MemoryStore(path), MemoryStore(path)
+            try:
+                self.assertEqual(first.list()[0].source, 'explicit')
+                version = first.version()
+                second.update(1, '新记忆')
+                self.assertIsNone(first.apply_auto(version, [], 'auto'))
+                first.apply_auto(first.version(), [{'operation': 'update', 'memory_id': 1,
+                    'kind': 'fact', 'content': '自动更新'}], 'auto-turn')
+                self.assertEqual(second.list()[0].source, 'auto')
+                first.update(1, '用户修改', source_turn='user-turn')
+                self.assertEqual((second.list()[0].source, second.list()[0].source_turn), ('explicit', 'user-turn'))
+            finally:
+                first.close()
+                second.close()

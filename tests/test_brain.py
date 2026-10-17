@@ -40,6 +40,90 @@ class FakeWorker:
 
 
 class BrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_auto_memory_disabled_by_default(self):
+        with patch.dict(module.os.environ):
+            module.os.environ.pop('ALPHA_AUTO_MEMORY', None)
+            await self.brain.start()
+        self.assertIsNone(self.brain.auto_memory)
+
+    async def test_auto_memory_does_not_delay_answer_and_notice_is_streamed_once(self):
+        from brain.memory_extractor import Candidate
+        started, release = asyncio.Event(), asyncio.Event()
+        async def extract(*args):
+            started.set()
+            await release.wait()
+            return [Candidate('save', 'add', 'preference', '不吃香菜', '我不吃香菜')]
+        fake = NS(extract=AsyncMock(side_effect=extract))
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        auto = self.brain.auto_memory
+        auto.extractor_factory = lambda _: fake
+        self.client.messages.create.return_value = reply([NS(type='text', text='好的。')])
+        self.assertEqual(await asyncio.wait_for(self.brain.ask('我不吃香菜'), 1), '好的。')
+        await asyncio.wait_for(started.wait(), 1)
+        self.assertFalse(release.is_set())
+        release.set()
+        await asyncio.gather(*list(auto.tasks))
+        fake.extract.side_effect = None
+        fake.extract.return_value = []
+        self.brain._agent_turn = AsyncMock(return_value='你好。')
+        sink = AsyncMock()
+        answer = await self.brain.ask('你好', on_text=sink)
+        self.assertEqual(answer, '对了，我记下了：不吃香菜。你好。')
+        sink.assert_awaited_once_with('对了，我记下了：不吃香菜。')
+        self.assertEqual(await self.brain.ask('再见'), '你好。')
+
+    async def test_auto_memory_explicit_tool_turn_never_requests_extractor(self):
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        factory = Mock()
+        self.brain.auto_memory.extractor_factory = factory
+        await self.invoke_tool('remember', {'kind': 'preference', 'content': '不吃香菜'},
+                               request='记住我不吃香菜')
+        self.assertEqual(self.brain.auto_memory.tasks, set())
+        factory.assert_not_called()
+
+    async def test_auto_memory_sensitive_question_in_system_then_explicit_confirmation(self):
+        from brain.memory_extractor import Candidate
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        fake = NS(extract=AsyncMock(return_value=[
+            Candidate('ask', 'add', 'fact', '对花生过敏', '我对花生过敏')]))
+        auto = self.brain.auto_memory
+        auto.extractor_factory = lambda _: fake
+        self.client.messages.create.return_value = reply([NS(type='text', text='好的。')])
+        await self.brain.ask('我对花生过敏')
+        await asyncio.gather(*list(auto.tasks))
+        fake.extract.return_value = []
+        self.client.messages.stream = Mock(return_value=self.final_stream('好的。'))
+        emitted = AsyncMock()
+        answer = await self.brain.ask('你好', on_text=emitted)
+        self.assertTrue(answer.endswith('要我记住“对花生过敏”吗？'))
+        self.assertEqual(self.brain.memory_store.list(), [])
+        self.assertIn('对花生过敏', self.client.messages.stream.call_args.kwargs['system'][-1]['text'])
+        result = await self.invoke_tool('remember', {'kind': 'fact', 'content': '对花生过敏'}, request='对，记住吧')
+        self.assertFalse(result['is_error'])
+        self.assertEqual(self.brain.memory_store.list()[0].source, 'explicit')
+        self.assertEqual(auto.pending, [])
+
+    async def test_auto_memory_expired_question_is_not_appended_to_answer(self):
+        from brain.memory_extractor import Candidate
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        auto = self.brain.auto_memory
+        now = [0]
+        auto.clock = lambda: now[0]
+        fake = NS(extract=AsyncMock(return_value=[
+            Candidate('ask', 'add', 'fact', '对花生过敏', '我对花生过敏')]))
+        auto.extractor_factory = lambda _: fake
+        self.client.messages.create.return_value = reply([NS(type='text', text='好的。')])
+        await self.brain.ask('我对花生过敏')
+        await asyncio.gather(*list(auto.tasks))
+        now[0] = 600
+        fake.extract.return_value = []
+        self.assertEqual(await self.brain.ask('你好'), '好的。')
+        self.assertNotIn('对花生过敏', self.client.messages.create.call_args.kwargs['system'][-1]['text'])
+
     async def test_all_discovered_ha_tools_are_exposed_and_executable(self):
         name = 'climate__HassClimateSetTemperature'
         self.ha[0].extend([
@@ -662,6 +746,7 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
             patch.dict(module.os.environ, {
                 "HA_URL": "http://fake", "HA_TOKEN": "fake",
                 "ANTHROPIC_API_KEY": "fake", "REMINDER_TIMEZONE": "America/Los_Angeles",
+                "ALPHA_AUTO_MEMORY": "0",
             }),
             patch.object(module, "load_dotenv"),
             patch.object(module, "OperationStore", side_effect=lambda path: OperationStore(":memory:")),

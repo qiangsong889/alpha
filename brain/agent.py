@@ -20,6 +20,7 @@ from anthropic.types import MessageParam, TextBlockParam, ToolParam, ToolResultB
 from dotenv import load_dotenv
 
 from core.memory import MemoryStore, MemoryKind
+from brain.auto_memory import AutoMemory
 from brain.memory_tools import MEMORY_NAMES, MEMORY_RULES, MEMORY_TOOLS
 from core.paths import ENV_FILE, OPERATIONS_DB, PROJECT_ROOT, VENV_PYTHON
 from mcp import StdioServerParameters
@@ -182,6 +183,10 @@ class AlphaBrain:
         self.store: OperationStore | None = None
         self.memory_store: MemoryStore | None = None
         self._memory_block_index: int | None = None
+        self._pending_memory_index: int | None = None
+        self.auto_memory: AutoMemory | None = None
+        self._turn_memory_calls: list[str] = []
+        self._raw_request = ""
         self.gateway: ToolGateway | None = None
         self.email_confirmation: EmailConfirmation | None = None
         # 放在实例上的对话历史和目录会跨 ask 保留，而不是每句话都重新建立一份。
@@ -233,6 +238,7 @@ class AlphaBrain:
         self.tools.extend(deepcopy(MEMORY_TOOLS))
         self.system = catalog_system(self.ha_catalog, self.personal_tools)
         self._memory_block_index = None
+        self._pending_memory_index = None
         self.system = deepcopy(self.system)
         self.system[0]["text"] += (
             "\n你可以使用 web_search 联网搜索。用户要求搜索、最新消息、价格等时效信息时使用搜索，"
@@ -311,6 +317,13 @@ class AlphaBrain:
             self.system.append(block)
         else:
             self.system[self._memory_block_index] = block
+        if self.auto_memory is not None:
+            pending_block: TextBlockParam = {"type": "text", "text": self.auto_memory.system_text()}
+            if self._pending_memory_index is None:
+                self._pending_memory_index = len(self.system)
+                self.system.append(pending_block)
+            else:
+                self.system[self._pending_memory_index] = pending_block
 
     def _memory_tool(self, name: str, args: dict, turn_id: str) -> str:
         store = self.memory_store
@@ -319,6 +332,8 @@ class AlphaBrain:
         required = {"content", "kind"} if name == "remember" else {"id", "content"} if name == "update_memory" else {"id"}
         if set(args) != required:
             raise ValueError("记忆工具参数缺失或包含未知字段")
+        if self.auto_memory is not None:
+            self.auto_memory.validate_explicit(name, args, self._raw_request)
         if name == "remember":
             ident = store.add(args['content'], cast(MemoryKind, args['kind']), turn_id)
             row = next(row for row in store.list() if row.id == ident)
@@ -331,7 +346,7 @@ class AlphaBrain:
             if old is None:
                 raise ValueError("记忆不存在")
             if name == "update_memory":
-                store.update(ident, args['content'])
+                store.update(ident, args['content'], source_turn=turn_id)
                 row = next(row for row in store.list() if row.id == ident)
                 result = {"id": ident, "content": row.content, "text": f"已更新：{old.content} → {row.content}"}
             else:
@@ -389,9 +404,15 @@ class AlphaBrain:
                 self._prepare_catalog()
                 logger.info("可用工具：%s", "、".join(tool["name"] for tool in self.tools) or "无")
                 self.client = await stack.enter_async_context(AsyncAnthropic())
+                if os.getenv("ALPHA_AUTO_MEMORY", "0").strip() == "1":
+                    self.auto_memory = AutoMemory(self.memory_store, self.client, self._lock)
+                    self._refresh_memory_system()
                 self._started = True
             except BaseException:
                 try:
+                    if self.auto_memory is not None:
+                        await self.auto_memory.close()
+                        self.auto_memory = None
                     await stack.aclose()
                 finally:
                     self._stack = None
@@ -425,9 +446,51 @@ class AlphaBrain:
             timed_request = (
                 f"[当前本地时间：{current_time}；时区：{self.reminder_tz.key}]\n{request}"
             )
+            turn_id = uuid4().hex
+            self._turn_memory_calls = []
+            self._raw_request = request
+            auto = self.auto_memory
+            sequence = auto.begin_turn() if auto is not None else 0
+            prefix = auto.notice() if auto is not None else ""
+            prefix_sent = False
+
+            async def emit_prefix():
+                nonlocal prefix_sent
+                if prefix and not prefix_sent and on_text is not None:
+                    await on_text(prefix)
+                    prefix_sent = True
+                    assert auto is not None
+                    auto.ack_notice()
+
+            async def emit_text(text):
+                await emit_prefix()
+                assert on_text is not None
+                await on_text(text)
+
+            async def emit_signal(signal):
+                await emit_prefix()
+                assert on_signal is not None
+                await on_signal(signal)
+
             answer = await self._agent_turn(timed_request, self.last_timings,
-                                            turn_id=uuid4().hex, on_text=on_text, on_signal=on_signal,
+                                            turn_id=turn_id, on_text=emit_text if on_text else None,
+                                            on_signal=emit_signal if on_signal else None,
                                             search_announced=search_announced)
+            suffix = auto.question(mark=False) if auto is not None else ""
+            if on_text is not None:
+                await emit_prefix()
+                if suffix:
+                    await on_text(suffix)
+            if prefix or suffix:
+                if auto is not None:
+                    auto.ack_notice()
+                    auto.ack_question(suffix)
+                answer = prefix + answer + ("。" if suffix and answer and answer[-1] not in "。！？!?" else "") + suffix
+                # 保存程序实际发给用户的通知/询问，让下一句“对”能由主模型理解。
+                if self.messages and self.messages[-1]['role'] == 'assistant':
+                    self.messages[-1] = {"role": "assistant", "content": answer}
+            if auto is not None and not self.last_response_fallback:
+                auto.schedule(request, turn_id, sequence, list(self._turn_memory_calls))
             logger.debug("[耗时] %s ｜ brain总计 %.2fs", " ｜ ".join(
                 f"{label} {elapsed:.2f}s" for label, elapsed in self.last_timings
             ), time.perf_counter() - started)
@@ -454,6 +517,9 @@ class AlphaBrain:
                 self.email_confirmation.close()
                 self.email_confirmation = None
             self._started = False
+            if self.auto_memory is not None:
+                await self.auto_memory.close()
+                self.auto_memory = None
             stack, self._stack = self._stack, None
             try:
                 if stack is not None:
@@ -674,6 +740,7 @@ class AlphaBrain:
                 ha_success = False
                 try:
                     if block.name in MEMORY_NAMES:
+                        self._turn_memory_calls.append(block.name)
                         if not isinstance(block.input, dict):
                             raise ValueError("记忆工具参数必须是对象")
                         text = self._memory_tool(block.name, block.input, turn_id)
