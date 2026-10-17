@@ -177,10 +177,10 @@ class SimpleCoordinator:
     async def invoke(self, turn_id, name, arguments):
         if self._closed or turn_id != self.current_turn:
             return {"is_error": True, "text": "旧输入已被取代，本次未执行"}
-        policy = get_policy(name)
+        policy = self.gateway.get_policy(name)
         if policy is None:
             raise ValueError("工具不在白名单")
-        if policy.mutates and name not in HA_ACTION_TOOLS:
+        if policy.mutates and policy.commit != "immediate":
             if policy.commit == "confirm":
                 raise ValueError("此工具暂不支持自动执行")
             op = self.gateway.register(turn_id, name, arguments)

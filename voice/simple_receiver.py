@@ -305,7 +305,7 @@ def receiver_type(audio_receiver: Any, *, claims_completion):
             self._failure_notified.add(turn)
             states = {op.status for key in self.turn_operations.get(turn, [])
                       if (op := self.gateway.store.get(key)) is not None
-                      and (policy := get_policy(op.name)) is not None and policy.mutates}
+                      and (policy := self.gateway.get_policy(op.name)) is not None and policy.mutates}
             if "unknown" in states:
                 text = "操作结果还不确定，请先核实，不要重复执行。"
             elif states & {"pending", "approved", "executing"}:
@@ -363,7 +363,7 @@ def receiver_type(audio_receiver: Any, *, claims_completion):
                     else:
                         output = await self.workflow.delete_item(**args)
                 else:
-                    if name not in self.tool_names or get_policy(name) is None:
+                    if name not in self.tool_names or self.gateway.get_policy(name) is None:
                         raise ValueError("工具未加载或不在白名单")
                     jsonschema.validate(args, self.schemas[name])
                     if "operation_id" in args:
@@ -377,7 +377,7 @@ def receiver_type(audio_receiver: Any, *, claims_completion):
                     if op_id:
                         self.turn_operations.setdefault(turn, []).append(op_id)
                         op = self.gateway.store.get(op_id)
-                        if op is not None and (policy := get_policy(op.name)) is not None and policy.mutates:
+                        if op is not None and (policy := self.gateway.get_policy(op.name)) is not None and policy.mutates:
                             if op.status in {"succeeded", "failed", "unknown"}:
                                 self.turn_attempts.setdefault(turn, set()).add(op_id)
                             if op.status == "succeeded":

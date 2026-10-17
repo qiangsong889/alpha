@@ -185,7 +185,7 @@ async def execute_ha_calls(
         log(f"[工具] {call.name} 参数：{call.arguments}")
         started = time.perf_counter()
         try:
-            if call.name not in HA_DEVICE_TOOLS or call.name not in available_tools:
+            if call.name not in available_tools:
                 raise ValueError(f"工具不在可用白名单中：{call.name}")
             arguments = json.loads(call.arguments)
             if not isinstance(arguments, dict):
@@ -463,15 +463,14 @@ async def main() -> None:
         if ha_catalog is not None:
             names: set[str] = set()
             for tool in ha_catalog[0]:
-                if tool["name"] in HA_DEVICE_TOOLS:
-                    if tool["name"] in names:
-                        raise RuntimeError(f"HA 工具重名：{tool['name']}")
-                    names.add(tool["name"])
-                    ha_tools.append({
-                        "type": "function", "name": tool["name"],
-                        "description": tool.get("description", ""),
-                        "parameters": tool["input_schema"],
-                    })
+                if tool["name"] in names:
+                    raise RuntimeError(f"HA 工具重名：{tool['name']}")
+                names.add(tool["name"])
+                ha_tools.append({
+                    "type": "function", "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": tool["input_schema"],
+                })
             # load_ha_catalog 的提示含 Alpha 规则；仅复用 HA 的 Assist 内容。
             assist_prompt = ha_catalog[1][0]["text"].partition("Home Assistant Assist prompt：\n")[2]
         print("[HA 工具] " + ("、".join(tool["name"] for tool in ha_tools) or "不可用"))

@@ -365,9 +365,10 @@ class EvalBrain(agent.AlphaBrain):
         self.personal_tools = await personal_catalog()
         self.ha_catalog = ha_catalog(self.services.devices)
         self.store = operations.OperationStore(':memory:')
+        self.memory_store = agent.MemoryStore(':memory:')
         self.worker = self.services
         self.ha_url = 'https://ha.invalid/api/mcp'
-        mcp_executor = make_executor(ha_url=self.ha_url, http_client=self.http_client, worker=self.worker)
+        mcp_executor = make_executor(ha_url=self.ha_url, http_client=self.http_client, worker=self.worker, ha_tools=self.ha_tools)
 
         # ExecutorResult 从实际网关模块导入，避免依赖大脑模块的内部导出。
         from integrations.tool_gateway import ExecutorResult
@@ -378,7 +379,7 @@ class EvalBrain(agent.AlphaBrain):
                 return ExecutorResult(not result.is_error, result.content[0].text)
             return await mcp_executor(name, args)
 
-        self.gateway = ToolGateway(self.store, execute)
+        self.gateway = ToolGateway(self.store, execute, ha_tools=self.ha_tools)
         self.email_confirmation = EmailConfirmation(self.gateway, clock=self.clock.monotonic)
         self._prepare_catalog()
         # 保存真正配置构造器的地点用于评分，再换成普通 query 工具。
@@ -394,11 +395,14 @@ class EvalBrain(agent.AlphaBrain):
 
     async def close(self):
         store = self.store
+        memory_store = self.memory_store
         try:
             await super().close()
         finally:
             if store is not None:
                 store.close()
+            if memory_store is not None:
+                memory_store.close()
 
 
 def load_cases(path: Path) -> list[dict]:
@@ -447,8 +451,12 @@ def arguments_match(expected, actual, schema):
             actual[key] = prop['default']
     for key, value in expected.items():
         if key == 'text_contains':
-            if not isinstance(actual.get('text'), str) or not all(s in actual['text'] for s in value):
-                return False
+            # 列表形式兼容文档 text；字典形式可指定邮件 body 等自由文本字段。
+            fields = value if isinstance(value, dict) else {'text': value}
+            for field, snippets in fields.items():
+                if (not isinstance(actual.get(field), str)
+                        or not all(s in actual[field] for s in snippets)):
+                    return False
         elif key not in actual or type(actual[key]) is not type(value) or actual[key] != value:
             # int/float 的 JSON 数字相等；布尔值不能冒充 0/1。
             if not (type(value) in (int, float) and type(actual.get(key)) in (int, float)

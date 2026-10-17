@@ -52,3 +52,10 @@ INTERNAL_TOOLS = frozenset({"delete_task", "delete_reminder", "restore_task", "r
 def get_policy(name: str) -> ToolPolicy | None:
     """未登记的工具不提供默认策略；未来网关看到 None 时必须拒绝。"""
     return TOOL_POLICY.get(name)
+
+
+def catalog_policy(name: str, ha_tools: set[str]) -> ToolPolicy | None:
+    """HA 由当前服务端目录授权，不按硬编码名称筛选；未知副作用默认不可安全重试。"""
+    if name in ha_tools:
+        return get_policy(name) or ToolPolicy(mutates=True, retry_safe=False, commit="immediate")
+    return get_policy(name)

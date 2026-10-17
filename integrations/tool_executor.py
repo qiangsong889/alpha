@@ -13,7 +13,7 @@ from integrations.mcp_client import call_ha_tool, device_action_succeeded
 from integrations.operations import Operation
 from integrations.personal_worker import PersonalWorker
 from integrations.tool_gateway import CURRENT_OPERATION_ID, EMAIL_CONFIRMATION, Executor, ExecutorResult, ToolNotSent, ToolOutcomeUnknown
-from integrations.tool_policy import GOOGLE_TOOLS, INTERNAL_TOOLS, get_policy
+from integrations.tool_policy import GOOGLE_TOOLS, INTERNAL_TOOLS, get_policy, catalog_policy
 
 
 HA_ACTION_TOOLS = {"intent__HassTurnOn", "intent__HassTurnOff", "light__HassLightSet"}
@@ -22,12 +22,14 @@ PERSONAL_TOOLS = {"list_items", "list_reminders", "get_weather", "add_items", "c
 
 
 def make_executor(
-    *, ha_url: str, http_client: httpx2.AsyncClient | None, worker: PersonalWorker | None,
+    *, ha_url: str, http_client: httpx2.AsyncClient | None, worker: PersonalWorker | None, ha_tools: set[str] | None = None,
 ) -> Executor:
+    discovered_ha = ha_tools if ha_tools is not None else HA_DEVICE_TOOLS
+
     async def execute(name: str, arguments: dict) -> ExecutorResult:
-        if get_policy(name) is None:
+        if catalog_policy(name, discovered_ha) is None:
             raise ToolNotSent(f"工具不在策略白名单中：{name}")
-        if name in HA_DEVICE_TOOLS:
+        if name in discovered_ha:
             if not ha_url or http_client is None or http_client.is_closed:
                 raise ToolNotSent("HA 地址或 HTTP 客户端不可用，工具请求尚未发出")
             # 只有连接/握手阶段失败标为 ToolNotSent，工具请求之后的异常原样交给 Gateway。
@@ -56,9 +58,22 @@ def make_executor(
         if not text and result.structured_content is not None:
             text = json.dumps(result.structured_content, ensure_ascii=False)
         ok = device_action_succeeded(name, result) if name in HA_ACTION_TOOLS else not result.is_error
+        if name in discovered_ha and name not in HA_ACTION_TOOLS:
+            payloads = [result.structured_content] if result.structured_content else []
+            try:
+                payloads.append(json.loads(text))
+            except (ValueError, TypeError):
+                pass
+            for payload in payloads:
+                if isinstance(payload, dict):
+                    response = payload.get("response", payload)
+                    if isinstance(response, dict):
+                        data = response.get("data", {})
+                        if response.get("response_type") == "error" or (isinstance(data, dict) and (data.get("failed") or data.get("errors"))):
+                            ok = False
         if result.structured_content is not None:
             payload = {"text": text or "工具未返回文字", "structured_content": result.structured_content}
-            if (policy := get_policy(name)) is not None and policy.mutates and result.structured_content.get("status") == "unknown":
+            if (policy := catalog_policy(name, discovered_ha)) is not None and policy.mutates and result.structured_content.get("status") == "unknown":
                 raise ToolOutcomeUnknown(payload)
             return ExecutorResult(ok=ok, result=payload)
         return ExecutorResult(ok=ok, result=text or "工具未返回文字")

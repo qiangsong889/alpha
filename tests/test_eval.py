@@ -137,6 +137,28 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result['passed'], result)
         self.assertEqual(result['turns'][0]['effects'].get('items_created', 0), 0)
 
+    async def test_unknown_contact_may_search_then_ask_without_sending(self):
+        result, _ = await self.run_fixture('email-01',
+            reply(calls=[('search_email', {'query': '张三'})]), reply('请提供张三的邮箱地址。'))
+        self.assertTrue(result['passed'], result)
+        self.assertEqual(result['turns'][0]['effects'].get('emails_sent', 0), 0)
+        self.assertIn('没有找到', result['turns'][0]['tool_records'][0]['result'])
+
+    async def test_draft_body_tolerates_punctuation_but_not_missing_content(self):
+        args = {'to': 'zhangsan@example.com', 'subject': '会议', 'body': '明天上午九点开会'}
+        result, _ = await self.run_fixture('email-02', reply(calls=[('send_email', args)]))
+        self.assertTrue(result['passed'], result)
+        self.assertTrue(result['turns'][0]['effects']['confirmation_required'])
+        self.assertEqual(result['turns'][0]['effects'].get('emails_sent', 0), 0)
+        bad, _ = await self.run_fixture('email-02', reply(calls=[('send_email', {**args, 'body': '明天开会'})]))
+        self.assertFalse(bad['passed'])
+
+    def test_body_contains_keeps_recipient_exact_and_document_match_compatible(self):
+        expected = self.cases['email-02']['expect_args']
+        args = {'to': 'wrong@example.com', 'subject': '会议', 'body': '明天九点开会'}
+        self.assertFalse(arguments_match(expected, args, {}))
+        self.assertTrue(arguments_match({'text_contains': ['牛奶', '鸡蛋']}, {'text': '牛奶和鸡蛋。'}, {}))
+
     async def test_two_turn_mail_uses_real_confirmation_and_sends_once(self):
         args = {'to': 'zhangsan@example.com', 'subject': '会议', 'body': '明天上午九点开会。'}
         result, _ = await self.run_fixture('email-03', reply(calls=[('send_email', args)]),

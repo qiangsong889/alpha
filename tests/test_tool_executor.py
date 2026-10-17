@@ -33,6 +33,22 @@ class ExecutorTests(unittest.IsolatedAsyncioTestCase):
             if worker is not None:
                 worker.call.assert_not_awaited()
 
+    async def test_discovered_ha_tool_routes_without_static_policy_and_reports_partial_failure(self):
+        name = 'climate__HassClimateSetTemperature'
+        ha_tools = {name}
+        executor = module.make_executor(ha_url='http://ha/api/mcp', http_client=Mock(is_closed=False),
+                                        worker=None, ha_tools=ha_tools)
+        gateway = ToolGateway(self.store, executor, ha_tools=ha_tools)
+        for failed, expected in (([], 'succeeded'), (['climate.room'], 'failed')):
+            response = CallToolResult(content=[], structured_content={
+                'response_type': 'action_done', 'data': {'failed': failed}})
+            with patch.object(module, 'call_ha_tool', AsyncMock(return_value=response)) as call:
+                op = await gateway.submit('turn', name, {'temperature': 26})
+                self.assertEqual(op.status, expected)
+                call.assert_awaited_once()
+        with self.assertRaises(ToolNotSent):
+            await executor('invented__Tool', {})
+
     async def test_missing_ha_configuration_is_definitely_not_sent(self):
         for url, client in (("", Mock(is_closed=False)), ("http://ha/api/mcp", None),
                             ("http://ha/api/mcp", Mock(is_closed=True))):

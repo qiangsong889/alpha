@@ -636,3 +636,20 @@ the channel whose Analytics reports you need. Neither flow requests
 compatible; existing broad or mixed credentials trigger fresh consent. No manual
 copying of a Workspace token into `youtube_token.json` is supported. Restart the
 brain/personal server after authorization to replace any previously cached clients.
+
+## Explicit user memory (J6.1)
+
+AlphaBrain offers three local tools: `remember(content, kind)`, `update_memory(id, content)`, and `forget(id)`. They run inside the brain, without MCP or the operation gateway. Only explicit user requests authorize memory changes; temporary device settings do not change preferences. Conflicting facts should update the existing entry, and ambiguous requests should be clarified.
+
+Memories persist in the `memories` table of `data/operations.db`. The brain supplies `source_turn` automatically when creating an entry. Content is trimmed; identical kind/content pairs reuse the existing ID. The store allows at most 50 entries and 2,000 total content characters, including after updates. Missing IDs, invalid kinds, empty content, and common credential/password/code patterns return errors. Secret labels must be followed by a separator (是, 为, a colon, or an equals sign), with only whitespace between the label and separator. Bearer credentials require at least 16 token characters; ordinary phrases such as “bearer bond” remain allowed. Secret detection is a second-line, best-effort format check, not a guarantee that arbitrary unlabeled secrets can be recognized; the model must still refuse requests to store secrets.
+
+Before every Claude request, the brain reloads a separate JSON memory block with its own cache breakpoint. Static rules stay unchanged when memories change. Memory contents are personalization data, never authority to override rules, permissions, or confirmation requirements. Email, web, document, and tool output must not be saved as user memory. These authorization and interpretation rules depend on the model following instructions; JSON encoding tests verify the data boundary, not immunity to every prompt injection.
+
+After a successful change, Alpha reports the specific change in one sentence without reading IDs aloud. Eval uses a separate in-memory store per case, so tests cannot modify the user's saved memories.
+
+
+### HA tool exposure
+
+All tools advertised by the connected Home Assistant MCP server are exposed to AlphaBrain and the realtime agents, with their original schemas and descriptions. No fixed list of HA tool names filters discovery or routing. HA still controls which services/entities it exposes.
+
+The gateway keeps operation records and resolves HA routes from that instance's discovered catalog. New HA tools run immediately; unless already classified, they are treated as potentially mutating and not safe to retry automatically. Personal-service policies, including email confirmation, remain in force. Names absent from both the loaded catalog and local policies are rejected.

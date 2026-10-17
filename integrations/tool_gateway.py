@@ -6,7 +6,7 @@ from typing import Any
 from contextvars import ContextVar
 
 from integrations.operations import Operation, OperationStatus, OperationStore
-from integrations.tool_policy import get_policy
+from integrations.tool_policy import catalog_policy, get_policy, ToolPolicy
 
 CURRENT_OPERATION_ID: ContextVar[str | None] = ContextVar("alpha_operation_id", default=None)
 EMAIL_CONFIRMATION: ContextVar[str | None] = ContextVar("alpha_email_confirmation", default=None)
@@ -38,20 +38,24 @@ Executor = Callable[[str, dict[str, Any]], Awaitable[ExecutorResult]]
 class ToolGateway:
     """同步方法修改审批状态，异步方法执行工具；实例与 store 在同一事件循环线程使用。"""
 
-    def __init__(self, store: OperationStore, executor: Executor):
+    def __init__(self, store: OperationStore, executor: Executor, *, ha_tools: set[str] | None = None):
         self.store = store
         self.executor = executor
+        self.ha_tools = ha_tools if ha_tools is not None else set()
+
+    def get_policy(self, name: str) -> ToolPolicy | None:
+        return catalog_policy(name, self.ha_tools) if name in self.ha_tools else get_policy(name)
 
     def register(self, turn_id: str, name: str, arguments: dict[str, Any]) -> Operation:
         """新批次入口：任何写操作只登记，不依据 immediate 策略提前执行。"""
-        policy = get_policy(name)
+        policy = self.get_policy(name)
         if policy is None or not policy.mutates:
             raise ValueError("只能登记白名单内的写操作")
         return self.store.create(turn_id, name, arguments)
 
     async def submit(self, turn_id: str, name: str, arguments: dict[str, Any]) -> Operation:
         """创建新操作；immediate 自动批准并执行，deferred/confirm 保留 pending。"""
-        policy = get_policy(name)
+        policy = self.get_policy(name)
         if policy is None:
             raise ValueError(f"工具不在策略白名单中：{name}")
         operation = self.store.create(turn_id, name, arguments)
@@ -64,7 +68,7 @@ class ToolGateway:
     def approve(self, op_id: str) -> bool:
         """只批准 pending 操作；用户确认、计划版本和播放资格由后续协调层核对。"""
         operation = self.store.get(op_id)
-        if operation is None or get_policy(operation.name) is None:
+        if operation is None or self.get_policy(operation.name) is None:
             return False
         return self.store.transition(op_id, "pending", "approved")
 
@@ -78,7 +82,7 @@ class ToolGateway:
     async def execute(self, op_id: str) -> Operation:
         """只执行 approved；重复或状态不符时返回当前记录，不重放工具。"""
         operation = self._get(op_id)
-        if get_policy(operation.name) is None:
+        if self.get_policy(operation.name) is None:
             raise ValueError(f"工具不在策略白名单中：{operation.name}")
         # 从读取到条件登记执行中，没有 await；数据库中的 WHERE status 再保证只认领一次。
         # 同一 ID 的另一个 execute 会看到 executing/终态，不会再次调用 executor。

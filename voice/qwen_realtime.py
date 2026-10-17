@@ -114,21 +114,21 @@ def session_config(voice: str, tools: list[ToolParam] | None = None,
                    assist_prompt: str = "") -> dict:
     # 这里只组装配置字典，不建立连接、不录音，也不调用工具；session.update 才发送它。
     # 工具描述让模型决定“想调用什么”，真正执行仍要经过本地白名单和 MCP 路由。
-    names = {tool["name"] for tool in tools or [] if get_policy(tool["name"]) is not None}
+    names = {tool["name"] for tool in tools or []}
     return {
         "modalities": ["text", "audio"],
         "voice": voice,
         "instructions": (
             RULES
             + ("" if names & PERSONAL_TOOLS else "个人服务暂时不可用，不能声称已完成清单或提醒。")
-            + ("" if names & HA_DEVICE_TOOLS else "家居设备暂时不可用，不能声称已操作设备。")
+            + ("" if names - PERSONAL_TOOLS else "家居设备暂时不可用，不能声称已操作设备。")
             + ("\nHome Assistant Assist prompt：\n" + assist_prompt if assist_prompt else "")
         ),
         "tools": [
             {"type": "function", "function": {
                 "name": tool["name"], "description": tool.get("description", ""),
                 "parameters": tool["input_schema"],
-            }} for tool in tools or [] if get_policy(tool["name"]) is not None
+            }} for tool in tools or []
         ] + [{"type": "function", "function": {"name": name, **tool}}
              for name, tool in CONTROL_TOOLS.items()],
         "audio": {
@@ -344,7 +344,7 @@ class QwenReceiver:
         self.report_response: str | None = None
         self.report_requested = False
         self.report_wakeup = asyncio.Event()
-        self.tool_names = {tool["name"] for tool in tools or [] if get_policy(tool["name"]) is not None}
+        self.tool_names = {tool["name"] for tool in tools or []}
         self.timezone = ZoneInfo(os.environ.get("REMINDER_TIMEZONE", "America/Los_Angeles"))
         # call_id 去重，response_id 按一轮回答分组：一轮可能同时要求多个工具。
         # pending 归零且该轮 response.done 后，才继续请求模型组织回答。
@@ -395,7 +395,7 @@ class QwenReceiver:
                 if any(op.status == "succeeded" for op in self.active_report.operations):
                     continue
             succeeded = bool(self.turn_successes.get(turn)) or any(
-                op.status == "succeeded" and (policy := get_policy(op.name)) is not None
+                op.status == "succeeded" and (policy := self.gateway.get_policy(op.name)) is not None
                 and policy.mutates for op in operations
             )
             if succeeded and not pending:
@@ -642,7 +642,7 @@ class QwenReceiver:
                     if op.status == "succeeded":
                         self.turn_successes.setdefault(turn, set()).add(op.id)
             else:
-                policy = get_policy(name)
+                policy = self.gateway.get_policy(name)
                 if name not in self.tool_names or policy is None:
                     raise ValueError(f"工具不在白名单或未加载：{name}")
                 op = await self.gateway.submit(f"{self.session_id}:{turn}", name, arguments)
@@ -1058,7 +1058,7 @@ def verify_session(session: dict, tools: list[ToolParam] | None = None) -> None:
             + json.dumps(detection, ensure_ascii=False)
         )
     if tools is not None:
-        expected = {tool["name"] for tool in tools if get_policy(tool["name"]) is not None} | set(CONTROL_TOOLS)
+        expected = {tool["name"] for tool in tools} | set(CONTROL_TOOLS)
         actual = {tool.get("function", {}).get("name") for tool in session.get("tools", [])
                   if tool.get("type") == "function"}
         if not expected <= actual:
@@ -1184,14 +1184,15 @@ async def main() -> None:
         personal_catalog = await load_personal_catalog(server)
         ha_catalog = await load_ha_catalog(ha_url, ha_http_client) if ha_root and ha_token else None
         # 先检查全部目录的重名，再按来源和白名单筛选，避免工具被覆盖或路由到错误服务器。
+        ha_names = {tool["name"] for tool in ha_catalog[0]} if ha_catalog is not None else set()
         merged, owners = merge_tools({
             "personal": personal_catalog or [],
             "home_assistant": ha_catalog[0] if ha_catalog is not None else [],
-        })
+        }, allowed_names=set(PERSONAL_TOOLS) | ha_names)
         tools = [tool for tool in merged if (
             owners[tool["name"]] == "personal" and tool["name"] in PERSONAL_TOOLS
         ) or (
-            owners[tool["name"]] == "home_assistant" and tool["name"] in HA_DEVICE_TOOLS
+            owners[tool["name"]] == "home_assistant"
         )]
         # 与 OpenAI 语音版本一致，只取 HA 的 Assist 内容，不重复导入 Claude 的 Alpha 规则。
         assist_prompt = (ha_catalog[1][0]["text"].partition("Home Assistant Assist prompt：\n")[2]
@@ -1201,7 +1202,7 @@ async def main() -> None:
         worker_task = asyncio.create_task(worker.run(), name="qwen-personal-worker")
         # 登记退出清理：即使发生异常，也会取消并等待 worker 退出，关闭它的 MCP 子进程。
         stack.push_async_callback(stop_worker, worker_task)
-        gateway = ToolGateway(store, make_executor(ha_url=ha_url, http_client=ha_http_client, worker=worker))
+        gateway = ToolGateway(store, make_executor(ha_url=ha_url, http_client=ha_http_client, worker=worker, ha_tools=ha_names), ha_tools=ha_names)
         coordinator = SimpleCoordinator(
             gateway, timezone_name=os.environ.get("REMINDER_TIMEZONE", "America/Los_Angeles"),
             window_s=float(os.environ.get("COLLECTION_WINDOW_S", "2")),
@@ -1211,7 +1212,7 @@ async def main() -> None:
         # 先关窗口，再停 worker/HTTP/store；WebSocket 重连不会触发这项程序级清理。
         stack.push_async_callback(commit_window.close)
         print("[个人工具] " + ("、".join(tool["name"] for tool in tools if tool["name"] in PERSONAL_TOOLS) or "暂不可用"))
-        print("[HA 工具] " + ("、".join(tool["name"] for tool in tools if tool["name"] in HA_DEVICE_TOOLS) or "暂不可用"))
+        print("[HA 工具] " + ("、".join(tool["name"] for tool in tools if tool["name"] in ha_names) or "暂不可用"))
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(coordinator.run(), name="alpha-task-coordinator")
             # 打开并维持扬声器输出流；真正取缓冲区音频的是音频库调用的 player.callback。
