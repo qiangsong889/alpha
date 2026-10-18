@@ -326,6 +326,11 @@ class AlphaBrain:
             else:
                 self.system[self._pending_memory_index] = pending_block
 
+    def _request_tools(self):
+        if self.auto_memory is not None and not self.auto_memory.explicit_tools_available(self._raw_request):
+            return [tool for tool in self.tools if tool['name'] not in MEMORY_NAMES]
+        return self.tools
+
     def _memory_tool(self, name: str, args: dict, turn_id: str) -> str:
         store = self.memory_store
         if store is None:
@@ -541,7 +546,7 @@ class AlphaBrain:
         self._refresh_memory_system()
         async with self.client.messages.stream(
             model=self.model, max_tokens=4096, system=self.system,
-            tools=[*self.tools, self.web_search, VOICE_REPLY_TOOL], messages=messages,
+            tools=[*self._request_tools(), self.web_search, VOICE_REPLY_TOOL], messages=messages,
             tool_choice={"type": "any"},
             cache_control={"type": "ephemeral"},
         ) as stream:
@@ -565,7 +570,7 @@ class AlphaBrain:
         if client is None or gateway is None or store is None:
             raise RuntimeError("请先调用 AlphaBrain.start()")
         tool_owners, model = self.tool_owners, self.model
-        tools, messages = self.tools, self.messages
+        tools, messages = self._request_tools(), self.messages
         # 成功完成这一轮后才保存，避免 API 失败留下不完整的工具消息。
         current: list[MessageParam] = [{"role": "user", "content": user_text}]
         if self.email_confirmation is not None:

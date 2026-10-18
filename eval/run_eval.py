@@ -34,6 +34,8 @@ import brain.agent as agent
 import core.memory as memory_module
 import integrations.operations as operations
 from brain.email_confirmation import EmailConfirmation
+from brain.auto_memory import AutoMemory
+from brain.memory_extractor import MemoryExtractor
 from core.rules import ALPHA_RULES
 from integrations.mcp_client import load_tools
 from integrations.tool_executor import HA_DEVICE_TOOLS, make_executor
@@ -168,6 +170,34 @@ class RecordingMessages:
                     return response
 
             yield RecordedStream()
+
+
+class RecordingExtractor(MemoryExtractor):
+    """仅增加可观测记录；提取、校验、保存均使用生产逻辑。"""
+    def __init__(self, client, records):
+        super().__init__(client)
+        self.records = records
+
+    async def extract(self, *args, **kwargs):
+        record = {}
+        try:
+            candidates = await super().extract(*args, **kwargs)
+            record['candidates'] = [candidate.to_dict() for candidate in candidates]
+            return candidates
+        except Exception as exc:
+            record['error'] = type(exc).__name__
+            raise
+        finally:
+            record.update(model_calls=self.model_calls, usage=self.last_usage,
+                          dropped=dict(self.dropped))
+            self.records.append(record)
+
+
+async def drain_auto_memory(brain):
+    # 必须在 ask() 释放业务锁之后等待；放进锁内会与后台写入互相等待。
+    if brain.auto_memory is not None:
+        while brain.auto_memory.tasks:
+            await asyncio.gather(*list(brain.auto_memory.tasks))
 
 
 async def personal_catalog():
@@ -356,13 +386,17 @@ class FakeServices:
 class EvalBrain(agent.AlphaBrain):
     """只替换启动依赖；ask 和完整 agent 循环保持原样。"""
 
-    def __init__(self, context, client, services, clock, model, *, db_path=':memory:'):
+    def __init__(self, context, client, services, clock, model, *, db_path=':memory:', auto_memory=False):
         super().__init__(model=model, style='text')
         self.db_path = db_path
         self.context = context
         self.test_client = client
         self.services = services
         self.clock = clock
+        self.enable_auto_memory = auto_memory
+        # 后台 Haiku 必须与主模型的工具调用记录隔离。
+        self.extraction_recorder = RecordingMessages(client.messages.delegate)
+        self.extraction_records = []
 
     async def start(self):
         self.model = self._model_override
@@ -395,6 +429,12 @@ class EvalBrain(agent.AlphaBrain):
         self.tools.append(deepcopy(SEARCH_TOOL))
         self.tool_owners['web_search'] = 'eval_search'
         self.client = self.test_client
+        if self.enable_auto_memory:
+            extraction_client = SimpleNamespace(messages=self.extraction_recorder)
+            self.auto_memory = AutoMemory(self.memory_store, extraction_client, self._lock,
+                clock=self.clock.monotonic,
+                extractor_factory=lambda client: RecordingExtractor(client, self.extraction_records))
+            self._refresh_memory_system()
         self.messages = deepcopy(self.context.get('history', []))
         if contacts := self.context.get('known_contacts'):
             self.system[0]['text'] += '\n已知联系人：' + json.dumps(contacts, ensure_ascii=False)
@@ -428,6 +468,8 @@ def load_cases(path: Path) -> list[dict]:
             or not isinstance(m.get('content'), str) or not m['content'].strip() for m in memories
         ):
             raise ValueError(f"{row['id']}: context.memories 必须含合法 kind 和非空 content")
+        if 'requires_auto_memory' in row and type(row['requires_auto_memory']) is not bool:
+            raise ValueError(f"{row['id']}: requires_auto_memory 必须是布尔值")
         if 'turns' in row and not row['turns']:
             raise ValueError(f"{row['id']}: turns 不能为空")
         for turn in row.get('turns', [row]):
@@ -438,6 +480,12 @@ def load_cases(path: Path) -> list[dict]:
             memory_effects = turn.get('expect_effects', {})
             if 'memories_count' in memory_effects and (type(memory_effects['memories_count']) is not int or memory_effects['memories_count'] < 0):
                 raise ValueError(f"{row['id']}: memories_count 必须为非负整数")
+            for source_count in ('auto_memories_count', 'explicit_memories_count', 'pending_memories_count', 'auto_extraction_calls'):
+                if source_count in memory_effects and (type(memory_effects[source_count]) is not int or memory_effects[source_count] < 0):
+                    raise ValueError(f"{row['id']}: {source_count} 必须为非负整数")
+            for flag in ('expect_auto_notice', 'expect_auto_question'):
+                if flag in turn and type(turn[flag]) is not bool:
+                    raise ValueError(f"{row['id']}: {flag} 必须是布尔值")
             if 'memory_contains' in memory_effects and (not isinstance(memory_effects['memory_contains'], list) or not all(isinstance(v, str) and v for v in memory_effects['memory_contains'])):
                 raise ValueError(f"{row['id']}: memory_contains 必须为非空字符串的列表")
             required, allowed, forbidden = (set(turn.get(k, [])) for k in ('expect_tools', 'allow_tools', 'must_not'))
@@ -448,12 +496,12 @@ def load_cases(path: Path) -> list[dict]:
                 raise ValueError(f"{row['id']}: reply_rubric 必须是非空字符串")
             supported = {'expect_tools', 'expect_args', 'expect_args_by_tool',
                          'expect_reply_contains', 'expect_reply_contains_any',
-                         'expect_reply_not_contains', 'expect_effects'}
+                         'expect_reply_not_contains', 'expect_effects', 'expect_auto_notice', 'expect_auto_question'}
             unknown = {key for key in turn if key.startswith('expect_')} - supported
             if unknown:
                 raise ValueError(f"{row['id']}: 未实现的评分字段：{sorted(unknown)}")
             for key in turn.get('expect_effects', {}):
-                if key not in {'emails_sent', 'confirmation_required', 'items_created', 'memories_count', 'memory_contains'} and not (
+                if key not in {'emails_sent', 'confirmation_required', 'items_created', 'memories_count', 'memory_contains', 'auto_memories_count', 'explicit_memories_count', 'pending_memories_count', 'auto_extraction_calls'} and not (
                     key.endswith('_executions') and key.removesuffix('_executions') in {*TOOL_POLICY, 'web_search'}
                 ):
                     raise ValueError(f"{row['id']}: 未实现的副作用计数：{key}")
@@ -532,6 +580,10 @@ def score_turn(expected, observed, schemas, context):
         for word in expected.get('expect_reply_not_contains', []):
             if word in answer:
                 errors.append(f'回答包含禁止表述：{word}')
+    for flag, observed_key in (('expect_auto_notice', 'auto_notice_at_start'),
+                               ('expect_auto_question', 'auto_question_at_end')):
+        if flag in expected and observed.get(observed_key, False) is not expected[flag]:
+            errors.append(f'{flag}：预期 {expected[flag]}，实际 {observed.get(observed_key, False)}')
     for key, value in expected.get('expect_effects', {}).items():
         actual = observed['effects'].get(key, [] if key == 'memory_contains' else 0)
         if key == 'memory_contains':
@@ -570,19 +622,20 @@ def seed_operations(store, context):
         store._db.commit()
 
 
-async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge=None) -> dict:
+async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge=None, auto_memory=False) -> dict:
     context = deepcopy(case.get('context', {}))
     clock = FrozenClock(context.get('now', DEFAULT_NOW))
     services = FakeServices(context, clock)
     recorder = RecordingMessages(sdk_client.messages)
     env = {'HOME_CITY': context.get('home_city', ''), 'HOME_REGION': context.get('home_region', ''),
            'HOME_COUNTRY': context.get('home_country', ''),
-           'REMINDER_TIMEZONE': context.get('timezone', 'America/Los_Angeles')}
-    output = {'id': case['id'], 'model': model, 'turns': [], 'manual_checks': []}
+           'REMINDER_TIMEZONE': context.get('timezone', 'America/Los_Angeles'),
+           'ALPHA_AUTO_MEMORY': '1' if auto_memory else '0'}
+    output = {'id': case['id'], 'model': model, 'turns': [], 'manual_checks': [], 'auto_memory': auto_memory}
     async with AsyncExitStack() as stack:
         directory = stack.enter_context(TemporaryDirectory(prefix='alpha-eval-'))
         db_path = Path(directory) / 'operations.db'
-        brain = EvalBrain(context, SimpleNamespace(messages=recorder), services, clock, model, db_path=db_path)
+        brain = EvalBrain(context, SimpleNamespace(messages=recorder), services, clock, model, db_path=db_path, auto_memory=auto_memory)
         stack.enter_context(patch.dict(os.environ, env))
         stack.enter_context(patch.dict(TOOL_POLICY, {'web_search': ToolPolicy(False, True, 'immediate')}))
         stack.enter_context(patch.object(agent, 'datetime', clock.datetime_type()))
@@ -613,7 +666,7 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
                 await brain.close()
                 fresh_context = {**context, 'history': []}
                 brain = EvalBrain(fresh_context, SimpleNamespace(messages=recorder), services,
-                                  clock, model, db_path=db_path)
+                                  clock, model, db_path=db_path, auto_memory=auto_memory)
                 stack.push_async_callback(brain.close)
                 await brain.start()
                 assert brain.email_confirmation is not None
@@ -624,11 +677,30 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
             start_history = len(brain.messages)
             start_locations = len(recorder.request_locations)
             before = services.effects.copy()
+            start_extraction = len(brain.extraction_records)
+            start_extraction_requests = len(brain.extraction_recorder.responses)
+            notice = brain.auto_memory.notice() if brain.auto_memory is not None else ''
+            question = brain.auto_memory.question(mark=False) if brain.auto_memory is not None else ''
             started = time.perf_counter()
             answer, exception = '', None
+            main_answer_s = 0.0
             try:
                 async with asyncio.timeout(timeout_s):
                     answer = await brain.ask(turn['input'])
+                    main_answer_s = time.perf_counter() - started
+                    assert brain.memory_store is not None
+                    memory_after_answer = brain.memory_store.list()
+                    await drain_auto_memory(brain)
+                    if any(record.get('error') for record in brain.extraction_records[start_extraction:]):
+                        raise RuntimeError('后台记忆提取失败，不能以没有候选作为通过依据')
+                    if auto_memory and not case.get('requires_auto_memory'):
+                        assert brain.auto_memory is not None
+                        if brain.memory_store.list() != memory_after_answer:
+                            services.errors.append('原有业务用例产生了非预期的自动记忆变更')
+                        if brain.auto_memory.pending:
+                            services.errors.append('原有业务用例产生了非预期的敏感记忆候选')
+                        if notice or question or '对了，我记下了' in answer:
+                            services.errors.append('原有业务用例多出了自动记忆通知或提问')
             except Exception as exc:
                 exception = f'{type(exc).__name__}: {exc}'
             effects: dict[str, object] = {k: services.effects[k] - before[k] for k in services.effects.keys() | before.keys()}
@@ -639,6 +711,10 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
             memories = [vars(memory) for memory in brain.memory_store.list()]
             effects['memories_count'] = len(memories)
             effects['memory_contains'] = [memory['content'] for memory in memories]
+            effects['auto_memories_count'] = sum(m['source'] == 'auto' for m in memories)
+            effects['explicit_memories_count'] = sum(m['source'] == 'explicit' for m in memories)
+            effects['pending_memories_count'] = len(brain.auto_memory.pending) if brain.auto_memory is not None else 0
+            effects['auto_extraction_calls'] = sum(r['model_calls'] for r in brain.extraction_records[start_extraction:])
             if brain.last_response_fallback:
                 services.errors.append('模型没有生成可见回答，最终使用了程序兜底提示')
             semantic_judge = judge is not None and bool(turn.get('reply_rubric'))
@@ -646,6 +722,14 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
                 services.errors.append('存在待确认草稿，但回答没有询问用户确认')
             observed = {'index': index, 'input': turn['input'], 'answer': answer,
                         'new_session': turn.get('new_session', False), 'memories': memories,
+                        'auto_notice_at_start': bool(notice and answer.startswith(notice)),
+                        'auto_question_at_end': bool(question and answer.endswith(question)),
+                        'auto_memory': {'extractions': deepcopy(brain.extraction_records[start_extraction:]),
+                            'responses': deepcopy(brain.extraction_recorder.responses[start_extraction_requests:]),
+                            'pending': ([p.candidate.to_dict() for p in brain.auto_memory.pending]
+                                        if brain.auto_memory is not None else []),
+                            'main_answer_s': main_answer_s,
+                            'drain_s': round(time.perf_counter() - started - main_answer_s, 3)},
                         'tool_calls': deepcopy(recorder.calls[start_calls:]),
                         'tool_records': tool_records_from_messages(brain.messages[start_history:]),
                         'executions': deepcopy(services.executions[start_exec:]),
@@ -708,6 +792,7 @@ async def main(argv=None):
     parser.add_argument('--output', type=Path, help='报告 JSONL 路径，默认 eval/results/时间戳.jsonl')
     parser.add_argument('--timeout', type=float, default=90, help='每轮最长秒数')
     parser.add_argument('--repeat', type=int, default=1, help='每条用例独立重复次数，默认 1')
+    parser.add_argument('--auto-memory', action='store_true', help='启用真实后台提取，逐轮等待完成并检查持久化效果')
     parser.add_argument('--judge', action='store_true', help='先校准评判模型，再对 reply_rubric 用例做语义评分')
     parser.add_argument('--judge-model', default='claude-haiku-5-5')
     parser.add_argument('--list', action='store_true', help='只检查数据并列出 ID，不调用模型')
@@ -726,6 +811,11 @@ async def main(argv=None):
         for case in cases:
             print(case['id'])
         return 0
+    if not args.auto_memory:
+        unavailable = [c['id'] for c in cases if c.get('requires_auto_memory')]
+        if unavailable and args.case_ids:
+            parser.error('这些用例需要 --auto-memory：' + ', '.join(unavailable))
+        cases = [c for c in cases if not c.get('requires_auto_memory')]
     load_dotenv(ROOT / '.env')
     if not os.getenv('ANTHROPIC_API_KEY', '').strip():
         parser.error('请在 alpha/.env 设置 ANTHROPIC_API_KEY')
@@ -756,7 +846,7 @@ async def main(argv=None):
                 for attempt in range(1, args.repeat + 1):
                     # 每次都完整新建大脑、数据库、工具状态和历史，不只重放一次 ask。
                     try:
-                        result = await run_case(case, client, model=model, timeout_s=args.timeout, judge=judge)
+                        result = await run_case(case, client, model=model, timeout_s=args.timeout, judge=judge, auto_memory=args.auto_memory)
                     except Exception as exc:
                         result = {'id': case['id'], 'passed': False, 'status': 'error',
                                   'error': f'{type(exc).__name__}: {exc}', 'turns': []}
@@ -771,7 +861,7 @@ async def main(argv=None):
                         for reason in turn['failures']:
                             print(f"  第{turn['index']}轮：{reason}", flush=True)
     summary = summarize_results(results)
-    summary.update(model=model, repeat=args.repeat, report=str(output),
+    summary.update(model=model, repeat=args.repeat, report=str(output), auto_memory=args.auto_memory,
                    reply_scoring='judge' if args.judge else 'literal',
                    judge_model=args.judge_model if args.judge else None)
     with summary_path.open('x', encoding='utf-8') as saved:

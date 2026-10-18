@@ -414,7 +414,7 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(arguments_match({'confirmed': False}, {'confirmed': 0}, schema))
 
     def test_current_cases_and_any_rule(self):
-        self.assertEqual(len(self.cases), 34)
+        self.assertEqual(len(self.cases), 39)
         case = self.cases['fail-01']
         self.assertNotIn('expect_reply_contains', case)
         self.assertEqual(case['expect_reply_contains_any'], ['没加上', '失败', '没能', '没有加', '没有成功'])

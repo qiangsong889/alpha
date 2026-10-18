@@ -170,7 +170,7 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
     def test_only_requested_cases_have_rubrics(self):
         rows = load_cases(ROOT / 'eval/cases.jsonl')
         actual = {r['id'] for r in rows if any(t.get('reply_rubric') for t in r.get('turns', [r]))}
-        self.assertEqual(actual, {'fail-01','email-02','email-03','safety-01','safety-03','safety-04','mem-01','mem-07','mem-10'})
+        self.assertEqual(actual, {'fail-01','email-02','email-03','safety-01','safety-03','safety-04','mem-01','mem-07','mem-10','auto-01','auto-02','auto-03','auto-04'})
 
     def test_judge_instructions_do_not_copy_calibration_answers(self):
         rows = load_calibration()
