@@ -43,15 +43,16 @@ class AutoEvalTests(IsolatedAsyncioTestCase):
         result = await run_case(self.cases[ident], NS(messages=dispatch), model='fake-model', auto_memory=True)
         return result, dispatch
 
-    async def test_notice_waits_for_background_and_appears_once_at_next_answer_start(self):
+    async def test_notice_is_checked_and_emitted_once_in_same_answer(self):
         result, sdk = await self.run_fixture('auto-02',
             [reply('好的。'), reply('你好。'), reply('不错。')],
             [extraction(SAVE), extraction(), extraction()])
         self.assertTrue(result['passed'], result)
         first, second, third = result['turns']
         self.assertEqual(first['memories'][0]['source'], 'auto')
-        self.assertTrue(second['answer'].startswith('对了，我记下了：不吃香菜。'))
-        self.assertFalse(third['auto_notice_at_start'])
+        self.assertTrue(first['answer'].endswith('记下了：不吃香菜。'))
+        self.assertNotIn('记下了', second['answer'])
+        self.assertFalse(third['auto_notice_in_answer'])
         self.assertNotIn('记下了', third['answer'])
         self.assertEqual(first['tool_calls'], [])
         self.assertFalse({'remember', 'update_memory', 'forget'} & {t['name'] for t in sdk.main.requests[0]['tools']})
@@ -76,7 +77,8 @@ class AutoEvalTests(IsolatedAsyncioTestCase):
         self.assertTrue(result['passed'], result)
         self.assertEqual(result['turns'][0]['memories'], [])
         self.assertEqual(result['turns'][1]['memories'], [])
-        self.assertTrue(result['turns'][1]['auto_question_at_end'])
+        self.assertTrue(result['turns'][0]['auto_question_at_end'])
+        self.assertFalse(result['turns'][1]['auto_question_at_end'])
         last = result['turns'][2]
         self.assertEqual(last['memories'][0]['source'], 'explicit')
         self.assertEqual(last['auto_memory']['responses'], [])
@@ -101,7 +103,7 @@ class AutoEvalTests(IsolatedAsyncioTestCase):
         self.assertEqual(result['status'], 'error')
         self.assertIn('后台记忆提取失败', result['turns'][0]['error'])
 
-    async def test_wait_is_after_answer_and_before_next_turn(self):
+    async def test_parallel_extraction_finishes_before_answer_and_next_turn(self):
         entered, release = asyncio.Event(), asyncio.Event()
         dispatch = Dispatch([reply('好的。'), reply('你好。'), reply('不错。')],
                             [extraction(SAVE), extraction(), extraction()])
@@ -160,7 +162,7 @@ class AutoEvalTests(IsolatedAsyncioTestCase):
     async def test_unrequested_main_memory_call_cannot_write_even_if_model_forges_hidden_tool(self):
         dispatch = Dispatch([
             reply(calls=[('remember', {'kind': 'preference', 'content': '不吃香菜'})]),
-            reply('好的。')], [])
+            reply('好的。')], [extraction()])
         case = {'id': 'implicit-forged', 'input': '我不吃香菜', 'expect_tools': [], 'requires_auto_memory': True}
         result = await run_case(case, NS(messages=dispatch), model='fake-model', auto_memory=True)
         self.assertFalse(result['passed'])

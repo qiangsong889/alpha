@@ -46,32 +46,191 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
             await self.brain.start()
         self.assertIsNone(self.brain.auto_memory)
 
-    async def test_auto_memory_does_not_delay_answer_and_notice_is_streamed_once(self):
+    async def test_auto_memory_waits_before_emitting_and_notifies_in_same_answer(self):
         from brain.memory_extractor import Candidate
         started, release = asyncio.Event(), asyncio.Event()
         async def extract(*args):
             started.set()
             await release.wait()
             return [Candidate('save', 'add', 'preference', '不吃香菜', '我不吃香菜')]
-        fake = NS(extract=AsyncMock(side_effect=extract))
         with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
             await self.brain.start()
         auto = self.brain.auto_memory
-        auto.extractor_factory = lambda _: fake
-        self.client.messages.create.return_value = reply([NS(type='text', text='好的。')])
-        self.assertEqual(await asyncio.wait_for(self.brain.ask('我不吃香菜'), 1), '好的。')
-        await asyncio.wait_for(started.wait(), 1)
-        self.assertFalse(release.is_set())
-        release.set()
-        await asyncio.gather(*list(auto.tasks))
-        fake.extract.side_effect = None
-        fake.extract.return_value = []
-        self.brain._agent_turn = AsyncMock(return_value='你好。')
+        auto.extractor_factory = lambda _: NS(extract=extract)
+        async def main(*args, **kwargs):
+            if kwargs.get('on_text') is not None:
+                await kwargs['on_text']('好的。')
+            return '好的。'
+        self.brain._agent_turn = AsyncMock(side_effect=main)
         sink = AsyncMock()
-        answer = await self.brain.ask('你好', on_text=sink)
-        self.assertEqual(answer, '对了，我记下了：不吃香菜。你好。')
-        sink.assert_awaited_once_with('对了，我记下了：不吃香菜。')
-        self.assertEqual(await self.brain.ask('再见'), '你好。')
+        task = asyncio.create_task(self.brain.ask('我不吃香菜', on_text=sink))
+        try:
+            await asyncio.wait_for(started.wait(), 1)
+            await asyncio.sleep(0)
+            self.brain._agent_turn.assert_awaited_once()
+            sink.assert_not_awaited()
+            self.assertFalse(task.done())
+            release.set()
+            answer = await asyncio.wait_for(task, 1)
+            self.assertEqual(answer, '好的。记下了：不吃香菜。')
+            sink.assert_awaited_once_with(answer)
+            auto.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[]))
+            self.assertEqual(await self.brain.ask('你好'), '好的。')
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_auto_memory_saved_and_claimed_needs_no_second_notice(self):
+        from brain.memory_extractor import Candidate
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        auto = self.brain.auto_memory
+        auto.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[
+            Candidate('save', 'add', 'preference', '不吃香菜', '我不吃香菜')]))
+        self.brain._agent_turn = AsyncMock(return_value='记住你不吃香菜了。')
+        self.assertEqual(await self.brain.ask('我不吃香菜'), '记住你不吃香菜了。')
+        self.client.messages.create.assert_not_awaited()
+        self.assertEqual(auto.receipts, [])
+        self.assertEqual(self.brain.memory_store.list()[0].source, 'auto')
+
+    async def test_auto_memory_unsaved_claim_corrected_before_output(self):
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[]))
+        self.brain._agent_turn = AsyncMock(return_value='好的，记住了。')
+        self.client.messages.create.return_value = reply([NS(type='text', text='好的。')])
+        sink = AsyncMock()
+        self.assertEqual(await self.brain.ask('今天不吃香菜', on_text=sink), '好的。')
+        sink.assert_awaited_once_with('好的。')
+        self.client.messages.create.assert_awaited_once()
+        self.assertNotIn('tools', self.client.messages.create.call_args.kwargs)
+        self.assertIn('没有保存任何记忆', str(self.client.messages.create.call_args.kwargs['system']))
+
+    async def test_auto_memory_correction_repeated_claim_falls_back_once(self):
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[]))
+        self.brain._agent_turn = AsyncMock(return_value='记住了。')
+        self.client.messages.create.return_value = reply([NS(type='text', text='我已经记住了。')])
+        answer = await self.brain.ask('今天不吃香菜')
+        self.assertIn('没有保存记忆', answer)
+        self.assertFalse(module.claims_memory_saved(answer))
+        self.client.messages.create.assert_awaited_once()
+
+    async def test_auto_memory_no_save_and_no_claim_needs_no_correction(self):
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[]))
+        self.brain._agent_turn = AsyncMock(return_value='你好。')
+        self.assertEqual(await self.brain.ask('你好'), '你好。')
+        self.client.messages.create.assert_not_awaited()
+
+    async def test_auto_memory_fast_extractor_does_not_write_before_main_finishes(self):
+        from brain.memory_extractor import Candidate
+        extracted, release = asyncio.Event(), asyncio.Event()
+        async def extract(*args):
+            extracted.set()
+            return [Candidate('save', 'add', 'preference', '不吃香菜', '我不吃香菜')]
+        async def main(*args, **kwargs):
+            await release.wait()
+            return '好的。'
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=extract)
+        self.brain._agent_turn = main
+        task = asyncio.create_task(self.brain.ask('我不吃香菜'))
+        try:
+            await asyncio.wait_for(extracted.wait(), 1)
+            self.assertEqual(self.brain.memory_store.list(), [])
+            self.assertFalse(task.done())
+            release.set()
+            self.assertIn('记下了：不吃香菜', await asyncio.wait_for(task, 1))
+        finally:
+            release.set()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_auto_memory_sensitive_claim_corrected_without_saving(self):
+        from brain.memory_extractor import Candidate
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[
+            Candidate('ask', 'add', 'fact', '对花生过敏', '我对花生过敏')]))
+        self.brain._agent_turn = AsyncMock(return_value='记住你对花生过敏了。')
+        self.client.messages.create.return_value = reply([NS(type='text', text='选餐厅时需要核实过敏安全。')])
+        answer = await self.brain.ask('我对花生过敏')
+        self.assertTrue(answer.endswith('要我记住“对花生过敏”吗？'))
+        self.assertEqual(self.brain.memory_store.list(), [])
+        self.assertNotIn('记住你', answer)
+        self.client.messages.create.assert_awaited_once()
+
+    async def test_auto_memory_storage_failure_is_not_reported_as_saved(self):
+        from brain.memory_extractor import Candidate
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[
+            Candidate('save', 'add', 'preference', '不吃香菜', '我不吃香菜')]))
+        self.brain._agent_turn = AsyncMock(return_value='记住了。')
+        self.client.messages.create.return_value = reply([NS(type='text', text='这次没有保存记忆。')])
+        with patch.object(self.brain.memory_store, 'apply_auto', side_effect=ValueError('full')):
+            self.assertEqual(await self.brain.ask('我不吃香菜'), '这次没有保存记忆。')
+        self.assertEqual(self.brain.memory_store.list(), [])
+
+    async def test_auto_memory_cancellation_cleans_up_without_saving(self):
+        entered, cancelled = asyncio.Event(), asyncio.Event()
+        async def extract(*args):
+            entered.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=extract)
+        self.brain._agent_turn = AsyncMock(return_value='好的。')
+        task = asyncio.create_task(self.brain.ask('我不吃香菜'))
+        await asyncio.wait_for(entered.wait(), 1)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(cancelled.is_set())
+        self.assertEqual(self.brain.memory_store.list(), [])
+
+    def test_memory_claim_detector(self):
+        for text in ('记住了。', '好的，记住你不吃香菜了。', '已保存你的偏好。', '记下了：不吃香菜。'):
+            with self.subTest(text=text):
+                self.assertTrue(module.claims_memory_saved(text))
+        for text in ('这次没有保存记忆。', '还没能记住。', '要我记住吗？', '我会记住的。', '你好。'):
+            with self.subTest(text=text):
+                self.assertFalse(module.claims_memory_saved(text))
+
+    async def test_auto_memory_streamed_claim_is_never_emitted_or_kept_in_history(self):
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[]))
+        self.client.messages.stream = Mock(return_value=self.final_stream('好的，记住了。'))
+        self.client.messages.create.return_value = reply([NS(type='text', text='好的。')])
+        sink = AsyncMock()
+        self.assertEqual(await self.brain.ask('今天不吃香菜', on_text=sink), '好的。')
+        sink.assert_awaited_once_with('好的。')
+        self.assertEqual(self.brain.messages[-1]['content'], '好的。')
+        self.client.messages.stream.assert_called_once()
+        self.client.messages.create.assert_awaited_once()
+        self.assertNotIn('tools', self.client.messages.create.call_args.kwargs)
+
+    async def test_auto_memory_rejected_memory_tool_does_not_validate_a_saved_claim(self):
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[]))
+        self.client.messages.create.side_effect = [
+            reply([NS(type='tool_use', name='remember', id='forged',
+                      input={'kind': 'preference', 'content': '不吃香菜'})], 'tool_use'),
+            reply([NS(type='text', text='好的，记住了。')]),
+            reply([NS(type='text', text='这次没有保存记忆。')]),
+        ]
+        self.assertEqual(await self.brain.ask('我不吃香菜'), '这次没有保存记忆。')
+        self.assertEqual(self.brain.memory_store.list(), [])
+        self.assertEqual(self.client.messages.create.await_count, 3)
+        self.assertNotIn('tools', self.client.messages.create.call_args.kwargs)
 
     async def test_auto_memory_explicit_tool_turn_never_requests_extractor(self):
         with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
@@ -92,13 +251,14 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         auto = self.brain.auto_memory
         auto.extractor_factory = lambda _: fake
         self.client.messages.create.return_value = reply([NS(type='text', text='好的。')])
-        await self.brain.ask('我对花生过敏')
+        first = await self.brain.ask('我对花生过敏')
         await asyncio.gather(*list(auto.tasks))
         fake.extract.return_value = []
         self.client.messages.stream = Mock(return_value=self.final_stream('好的。'))
         emitted = AsyncMock()
         answer = await self.brain.ask('你好', on_text=emitted)
-        self.assertTrue(answer.endswith('要我记住“对花生过敏”吗？'))
+        self.assertTrue(first.endswith('要我记住“对花生过敏”吗？'))
+        self.assertNotIn('要我记住', answer)
         self.assertEqual(self.brain.memory_store.list(), [])
         self.assertIn('对花生过敏', self.client.messages.stream.call_args.kwargs['system'][-1]['text'])
         result = await self.invoke_tool('remember', {'kind': 'fact', 'content': '对花生过敏'}, request='对，记住吧')

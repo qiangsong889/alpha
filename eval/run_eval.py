@@ -194,7 +194,7 @@ class RecordingExtractor(MemoryExtractor):
 
 
 async def drain_auto_memory(brain):
-    # 必须在 ask() 释放业务锁之后等待；放进锁内会与后台写入互相等待。
+    # ask 已等待并行提取和核对；兼容尚有清理任务的实现。
     if brain.auto_memory is not None:
         while brain.auto_memory.tasks:
             await asyncio.gather(*list(brain.auto_memory.tasks))
@@ -580,7 +580,7 @@ def score_turn(expected, observed, schemas, context):
         for word in expected.get('expect_reply_not_contains', []):
             if word in answer:
                 errors.append(f'回答包含禁止表述：{word}')
-    for flag, observed_key in (('expect_auto_notice', 'auto_notice_at_start'),
+    for flag, observed_key in (('expect_auto_notice', 'auto_notice_in_answer'),
                                ('expect_auto_question', 'auto_question_at_end')):
         if flag in expected and observed.get(observed_key, False) is not expected[flag]:
             errors.append(f'{flag}：预期 {expected[flag]}，实际 {observed.get(observed_key, False)}')
@@ -679,7 +679,9 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
             before = services.effects.copy()
             start_extraction = len(brain.extraction_records)
             start_extraction_requests = len(brain.extraction_recorder.responses)
-            notice = brain.auto_memory.notice() if brain.auto_memory is not None else ''
+            assert brain.memory_store is not None
+            memory_before_answer = brain.memory_store.list()
+            notice = False
             question = brain.auto_memory.question(mark=False) if brain.auto_memory is not None else ''
             started = time.perf_counter()
             answer, exception = '', None
@@ -690,12 +692,18 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
                     main_answer_s = time.perf_counter() - started
                     assert brain.memory_store is not None
                     memory_after_answer = brain.memory_store.list()
+                    newly_auto = [m for m in memory_after_answer if m.source == 'auto' and m not in memory_before_answer]
+                    notice = bool(newly_auto and agent.claims_memory_saved(answer)
+                                  and all(m.content in answer for m in newly_auto))
+                    if brain.auto_memory is not None:
+                        question = next((f'要我记住“{p.candidate.content}”吗？' for p in brain.auto_memory.pending
+                                         if p.asked and p.asked_turn == brain.auto_memory.turn), '')
                     await drain_auto_memory(brain)
                     if any(record.get('error') for record in brain.extraction_records[start_extraction:]):
                         raise RuntimeError('后台记忆提取失败，不能以没有候选作为通过依据')
                     if auto_memory and not case.get('requires_auto_memory'):
                         assert brain.auto_memory is not None
-                        if brain.memory_store.list() != memory_after_answer:
+                        if newly_auto:
                             services.errors.append('原有业务用例产生了非预期的自动记忆变更')
                         if brain.auto_memory.pending:
                             services.errors.append('原有业务用例产生了非预期的敏感记忆候选')
@@ -722,7 +730,7 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
                 services.errors.append('存在待确认草稿，但回答没有询问用户确认')
             observed = {'index': index, 'input': turn['input'], 'answer': answer,
                         'new_session': turn.get('new_session', False), 'memories': memories,
-                        'auto_notice_at_start': bool(notice and answer.startswith(notice)),
+                        'auto_notice_in_answer': bool(notice),
                         'auto_question_at_end': bool(question and answer.endswith(question)),
                         'auto_memory': {'extractions': deepcopy(brain.extraction_records[start_extraction:]),
                             'responses': deepcopy(brain.extraction_recorder.responses[start_extraction_requests:]),
