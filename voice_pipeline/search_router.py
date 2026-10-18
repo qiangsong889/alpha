@@ -1,5 +1,11 @@
 """Jev 判断搜索提示和播报期间的对话对象；不执行任何业务工具。"""
 
+# Direct `python agent.py` uses voice_pipeline as sys.path[0].
+if not __package__:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from core.costs import record_cost, log_summary
 import asyncio
 import logging
 import math
@@ -44,6 +50,25 @@ class JevSearchRouter:
         self.model = model or ("typesafe-ai/jev" if provider == "vercel" else "jev-latest")
         self.timeout_s = timeout_s
         self.min_confidence = min_confidence
+
+    async def _post(self, *args, **kwargs):
+        ident = record_cost('Jev', self.model, reason='request_started_no_final_usage')
+        try:
+            response = await self.client.post(*args, **kwargs)
+            try:
+                payload = response.json()
+                usage = payload.get('usage')
+                usage = dict(usage) if isinstance(usage, dict) else {}
+                metadata = payload.get('provider_metadata', {})
+                gateway = metadata.get('gateway', {}) if isinstance(metadata, dict) else {}
+                if self.url == VERCEL_JEV_URL and isinstance(gateway, dict) and gateway.get('cost') is not None:
+                    usage['gateway_usd'] = gateway['cost']
+                record_cost('Jev', payload.get('model') or self.model, usage, event_id=ident)
+            except (ValueError, TypeError, AttributeError):
+                pass
+            return response
+        finally:
+            log_summary()
 
     async def classify(self, text: str, history: list[dict[str, str]]) -> bool | None:
         """True 提前提示，False 不提示，None 表示无法判断；调用方始终继续 Claude。"""
@@ -128,7 +153,7 @@ class JevSearchRouter:
         result: list[bool | None] = [None, None]
         try:
             async with asyncio.timeout(self.timeout_s):
-                response = await self.client.post(self.url, headers={'Authorization': f'Bearer {self.api_key}'},
+                response = await self._post(self.url, headers={'Authorization': f'Bearer {self.api_key}'},
                     timeout=self.timeout_s, json={'model': self.model, 'questions': questions,
                     'state': {'request': text[:4000], 'collected_request': combined_text[:4000],
                               'assistant_reply': assistant[-2000:], 'answer_window_open': question_open,
@@ -177,7 +202,7 @@ class JevSearchRouter:
         try:
             # 给整个请求设置总预算，而不是让连接、读取分别各等待一遍。
             async with asyncio.timeout(self.timeout_s):
-                response = await self.client.post(
+                response = await self._post(
                     self.url, headers={"Authorization": f"Bearer {self.api_key}"},
                     timeout=self.timeout_s,
                     json={

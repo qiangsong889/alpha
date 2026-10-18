@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from brain.agent import AlphaBrain
 from core.tool_timing import TOOL_TIMING_SINK
+from core.costs import configure_costs, cost_summary, log_summary
 
 logger = logging.getLogger("alpha.brain_server")
 brain = AlphaBrain(style="voice")
@@ -51,6 +52,7 @@ class InterruptedRequest(BaseModel):
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # async context manager：yield 前是服务启动；yield 期间 FastAPI 接请求；finally 是关闭。
     # 大脑跨 HTTP 请求复用，因此多轮历史和 MCP 连接不会每次重新初始化。
+    configure_costs()
     await brain.start()
     try:
         yield
@@ -59,6 +61,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if stream_tasks:
             await asyncio.gather(*stream_tasks, return_exceptions=True)
         await brain.close()
+        log_summary()
 
 
 app = FastAPI(lifespan=lifespan)
@@ -67,6 +70,11 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True, "ha_available": brain.ha_available}
+
+
+@app.get("/costs")
+async def costs() -> dict:
+    return {"currency": "USD", "basis": "standard_price_estimate", "components": cost_summary()}
 
 
 @app.post("/ask", response_model=AskResponse)

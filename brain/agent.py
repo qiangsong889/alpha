@@ -19,6 +19,7 @@ from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, TextBlockParam, ToolParam, ToolResultBlockParam, ToolUnionParam
 from dotenv import load_dotenv
 
+from core.costs import costed_call
 from core.memory import MemoryStore, MemoryKind
 from brain.auto_memory import AutoMemory
 from brain.memory_tools import MEMORY_NAMES, MEMORY_RULES, MEMORY_TOOLS
@@ -597,10 +598,11 @@ class AlphaBrain:
             started = time.perf_counter()
             mute_ha_summary = on_signal is not None and not searched and bool(turn_ha_successes) and all(turn_ha_successes)
             if on_text is not None:
-                response = await self._stream_response(messages + current, on_search=announce_search)
+                response = await costed_call(self._stream_response(messages + current, on_search=announce_search),
+                                             component='Claude', model=model)
             else:
                 self._refresh_memory_system()
-                response = await client.messages.create(
+                response = await costed_call(client.messages.create(
                     # await 等这次 Claude 返回，但不阻止 MCP worker 等其他任务继续执行。
                     model=model,
                     max_tokens=4096,
@@ -608,7 +610,7 @@ class AlphaBrain:
                     tools=[*tools, self.web_search],
                     messages=messages + current,
                     cache_control={"type": "ephemeral"},
-                )
+                ), component="Claude", model=model)
             if timings is not None:
                 timings.append((f"Claude 第{request_index}次", time.perf_counter() - started))
             logger.info(

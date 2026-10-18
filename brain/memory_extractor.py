@@ -1,5 +1,6 @@
 """独立的 Haiku 记忆候选提取器；不保存记忆，不连接大脑或任何业务工具。"""
 
+from core.costs import costed_call
 import asyncio
 from dataclasses import dataclass
 import json
@@ -115,12 +116,12 @@ class MemoryExtractor:
             {'id': row.id, 'kind': row.kind, 'content': row.content} for row in memories]}
         async with asyncio.timeout(self.timeout_s):
             self.model_calls += 1
-            response = await self.client.messages.create(
+            response = await costed_call(self.client.messages.create(
                 model=self.model, max_tokens=2048, system=SYSTEM,
                 messages=[{'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}],
                 tools=[EXTRACTION_TOOL],
                 tool_choice={'type': 'tool', 'name': 'submit_candidates', 'disable_parallel_tool_use': True},
-            )
+            ), component='Memory', model=self.model)
         usage = getattr(response, 'usage', None)
         if usage is not None and hasattr(usage, 'model_dump'):
             self.last_usage = usage.model_dump(mode='json')

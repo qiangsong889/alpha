@@ -26,6 +26,8 @@ from voice.qwen_realtime import (CostTracker, SessionEnded, QwenProtocolError, M
 from voice_pipeline.collection import EXECUTE, unfinished
 from voice_pipeline.search_router import JevSearchRouter
 from voice.batch_timing import BatchTiming
+from voice.qwen_tts import QwenTTS
+from core.costs import configure_costs, record_cost, log_summary, AudioCostMeter
 
 logger = logging.getLogger('alpha.qwen_alpha')
 SPEAKER_RULES = ('你是 Alpha 的中文语音播报器，没有执行任何操作的权限。'
@@ -314,11 +316,15 @@ class BrainBridge:
 
 class Receiver:
     def __init__(self, ws, player, collector, bridge, costs, session_id, activity=None,
-                 *, interruption_filter=True, uncertain_interruption='hold'):
+                 *, interruption_filter=True, uncertain_interruption='hold', tts=None):
         self.ws, self.player, self.collector, self.bridge = ws, player, collector, bridge
         self.costs, self.session_id = costs, session_id
+        self.tts = tts
+        self.tts_task = None
         self.active = False
         self.response_id = None
+        self.omni_attempt = None
+        self.omni_cost_ids = OrderedDict()
         self.ignored = set()
         self.audio_items = set()
         self.response_done = asyncio.Event()
@@ -414,7 +420,10 @@ class Receiver:
         self.cancelled = self.active
         if self.response_id:
             self.ignored.add(self.response_id)
-        if self.active:
+        if self.tts is not None:
+            if self.tts_task is not None:
+                self.tts_task.cancel()
+        elif self.active:
             await send_event(self.ws, 'response.cancel')
         # 等 response.done 后再播下一条，避免服务端出现重叠 response。
 
@@ -459,6 +468,11 @@ class Receiver:
                 await self.resolve_transcript(item_id, text, speech)
         elif kind == 'response.created':
             self.response_id = event['response']['id']
+            if self.omni_attempt is not None:
+                self.omni_cost_ids[self.response_id] = self.omni_attempt
+                self.omni_attempt = None
+                while len(self.omni_cost_ids) > 200:
+                    self.omni_cost_ids.popitem(last=False)
             if not self.active or self.cancelled:
                 # 客户端没请求却生成回答：拒绝播放，不能越过提交门控。
                 self.ignored.add(self.response_id)
@@ -484,8 +498,15 @@ class Receiver:
             result = event['response']
             for item in self.audio_items:
                 self.player.finish(item)
+            record_cost('Omni', MODEL, result.get('usage'),
+                        event_id=self.omni_cost_ids.get(result['id']) or 'omni:' + self.session_id + ':' + result['id'],
+                        region=os.getenv('QWEN_REGION', 'singapore'))
+            log_summary()
             price = self.costs.record(self.session_id, result)
-            logger.info('[Qwen费用] 本轮 %s ｜ 累计 $%s（不含 Claude/Jev）', price, self.costs.total)
+            if price is not None:
+                logger.info('[Omni费用] 本轮 $%s ｜ Omni单项累计 $%s；完整统计见费用账本', price, self.costs.total)
+            else:
+                logger.info('[Omni费用] 本轮用量不全，已标为待核对')
             self.active = False
             self.response_done.set()
 
@@ -525,9 +546,13 @@ class Receiver:
 
     async def close(self):
         tasks = list(self.playback_tasks | self.input_tasks)
+        if self.tts_task is not None:
+            tasks.append(self.tts_task)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        if self.tts is not None:
+            await self.tts.close()
 
     async def speak(self):
         while True:
@@ -568,6 +593,9 @@ class Receiver:
             self.player.finish(ident)
             await self.player.wait_played(ident)
             return
+        if self.tts is not None:
+            await self._play_tts(text)
+            return
         self.active = True
         self.response_id = None
         self.audio_items = set()
@@ -579,6 +607,8 @@ class Receiver:
         await send_event(self.ws, 'conversation.item.create', item={
             'type': 'message', 'role': 'user', 'content': [
                 {'type': 'input_text', 'text': '请仅朗读这段文本：' + json.dumps(text, ensure_ascii=False)}]})
+        self.omni_attempt = record_cost('Omni', MODEL,
+            region=os.getenv('QWEN_REGION', 'singapore'), reason='response_requested_no_final_usage')
         await send_event(self.ws, 'response.create')
         await asyncio.wait_for(self.response_done.wait(), timeout=90)
         played = bool(self.audio_items) and all([await self.player.wait_played(item) for item in self.audio_items])
@@ -588,6 +618,50 @@ class Receiver:
             self.question_deadline = self.question_finished_at + 10
         # 被打断的报告不重播；大脑已保存实际执行结果，下一批照常处理。
         logger.info('[播报结束] played=%s', played)
+
+
+    async def _play_tts(self, text):
+        self.active = True
+        self.response_done.clear()
+        ident = 'tts_' + str(time.monotonic_ns())
+        sent_at = time.perf_counter()
+        async def generate():
+            first = True
+            stream = self.tts.stream(text)
+            try:
+                async for chunk in stream:
+                    if self.cancelled:
+                        break
+                    if first:
+                        now = time.perf_counter()
+                        logger.info('[TTS首包] %s %.2fs（含首次连接）', self.tts.voice, now - sent_at)
+                        self.watch_playback(ident, self.current_report, now, sent_at)
+                        first = False
+                    self.player.append(chunk, ident, 0)
+            finally:
+                await stream.aclose()
+        self.tts_task = asyncio.create_task(generate(), name='qwen-tts')
+        try:
+            try:
+                await self.tts_task
+            except asyncio.CancelledError:
+                if not self.cancelled or asyncio.current_task().cancelling():
+                    raise
+            except Exception as exc:
+                self.player.clear()
+                logger.error('[TTS失败] %s；未自动改用 Omni，避免重复或改写播报', exc)
+                return
+            self.player.finish(ident)
+            played = await self.player.wait_played(ident)
+            self.question_deadline = 0.0
+            if played and not self.cancelled and re.search(r'[？?]$|(?:吗|嗎|呢)[。！!]*$', text.strip()):
+                self.question_finished_at = time.perf_counter()
+                self.question_deadline = self.question_finished_at + 10
+            logger.info('[播报结束] played=%s ｜ TTS %s', played, self.tts.voice)
+        finally:
+            self.tts_task = None
+            self.active = False
+            self.response_done.set()
 
 
 def make_router(client):
@@ -605,29 +679,50 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     verify_session(updated)  # 只检查 VAD 和手动回答；不加载旧入口的业务/控制工具。
     if updated.get('tools'):
         raise QwenProtocolError('语音入口不允许配置业务工具')
+    speaker = os.getenv('QWEN_ALPHA_SPEAKER', 'omni').strip().lower()
+    if speaker not in {'omni', 'tts'}:
+        raise ValueError('QWEN_ALPHA_SPEAKER 必须是 omni 或 tts')
+    tts = (QwenTTS(os.getenv('DASHSCOPE_API_KEY', ''), os.getenv('QWEN_WORKSPACE_ID', ''),
+                   os.getenv('QWEN_REGION', 'singapore'), os.getenv('QWEN_TTS_VOICE', 'Ethan'))
+           if speaker == 'tts' else None)
+    logger.info('[播报引擎] %s', 'Qwen TTS / ' + tts.voice if tts else 'Omni / ' + voice)
+    if tts is not None:
+        try:
+            await tts.ready()
+        except asyncio.CancelledError:
+            await tts.close()
+            raise
+        except Exception as exc:
+            await tts.close()
+            logger.warning('[TTS预连接失败] %s；播报时再连接', exc)
+
     activity = SpeechActivity(sample_rate=16000)
     receiver = Receiver(ws, player, collector, bridge, costs, created['session']['id'], activity,
                         interruption_filter=os.getenv('QWEN_ALPHA_JEV_INTERRUPTIONS', '1') == '1',
-                        uncertain_interruption=os.getenv('QWEN_ALPHA_UNCERTAIN_INTERRUPTION', 'hold').strip().lower())
+                        uncertain_interruption=os.getenv('QWEN_ALPHA_UNCERTAIN_INTERRUPTION', 'hold').strip().lower(), tts=tts)
     logger.info('[打断过滤] %s ｜ 不确定时%s',
                 'Jev 已开启' if receiver.interruption_filter else '已关闭，接收所有有效转写',
                 '继续汇报，可叫 Alpha 打断' if receiver.uncertain_interruption == 'hold' else '接收输入')
     logger.info('[就绪] Qwen 中文收音/播报；等待完整任务后提交 AlphaBrain；说“执行吧”可立即提交')
     if collector.parts:
         bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
+    audio_costs = AudioCostMeter(created['session']['id'], os.getenv('QWEN_REGION', 'singapore'))
     try:
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(send_microphone(ws, activity))
+            tasks.create_task(send_microphone(ws, activity, on_sent=audio_costs.sent))
             tasks.create_task(receiver.run())
             tasks.create_task(receiver.confirm_speech())
             tasks.create_task(receiver.speak())
             tasks.create_task(rotate_session(float(os.getenv('QWEN_SESSION_SECONDS', '1800'))))
     finally:
+        audio_costs.flush()
+        log_summary()
         await receiver.close()
 
 
 async def main():
     load_dotenv(ENV_FILE)
+    configure_costs()
     key = os.getenv('DASHSCOPE_API_KEY', '').strip()
     if not key:
         raise SystemExit('请在 .env 设置 DASHSCOPE_API_KEY 和 QWEN_WORKSPACE_ID')
@@ -668,6 +763,7 @@ async def main():
                 tasks.create_task(reconnect())
         finally:
             await collector.close()
+            log_summary()
 
 
 if __name__ == '__main__':

@@ -163,7 +163,7 @@ async def wait_for_event(ws, expected: str) -> dict:
                 return event
 
 
-async def send_microphone(ws, activity: SpeechActivity) -> None:
+async def send_microphone(ws, activity: SpeechActivity, *, on_sent=None) -> None:
     loop = asyncio.get_running_loop()
     while True:
         # 音频线程产生数据，异步任务取数据并发送；队列把两者的速度差暂时缓冲起来。
@@ -225,6 +225,8 @@ async def send_microphone(ws, activity: SpeechActivity) -> None:
                             await send_event(ws, "input_audio_buffer.append",
                                              audio=base64.b64encode(chunk).decode("ascii"))
                         sent += 1
+                        if on_sent is not None:
+                            on_sent(chunk)
                     except TimeoutError as exc:
                         raise SessionEnded(
                             f"音频发送超时（上限 {AUDIO_SEND_TIMEOUT_S:.1f}s，队列 {queue.qsize()}/100），"

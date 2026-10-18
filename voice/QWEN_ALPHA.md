@@ -118,3 +118,45 @@ Only differences measured in the same process clock are compared. Absolute `perf
 Restart **both** `brain.server` and `voice.qwen_alpha` after switching to `dev`, so the new tool timing events are available. No additional model request is added by latency instrumentation.
 
 Earlier parallel classification is speculative: continuing to speak cancels that check, but the remote Jev request may already have been processed. This can increase classification request counts compared with waiting until silence ends. The timing instrumentation itself makes no model requests. The quiet-window length and unfinished-request safety rules remain unchanged.
+
+
+## Dedicated TTS trial (Ethan)
+
+The local `.env` now selects `QWEN_ALPHA_SPEAKER=tts` and `QWEN_TTS_VOICE=Ethan`.
+This uses `qwen3-tts-flash-realtime` on an independent, persistent WebSocket, with
+PCM16 mono 24 kHz output fed into the existing player. Omni still provides input
+transcription; Jev and AlphaBrain are unchanged. TTS receives the exact brain text
+through `input_text_buffer.append` and `commit`, without conversation instructions.
+Startup preconnects TTS; interrupted synthesis closes its connection so late audio
+cannot enter the next report. Errors do not automatically replay reports with Omni.
+TTS usage is logged separately from Omni costs (no estimated TTS price is added).
+
+Start the trial: `./start-qwen`.
+Restore the previous Omni speaker for one run:
+
+```bash
+QWEN_ALPHA_SPEAKER=omni ./start-qwen
+```
+
+For persistent rollback set `QWEN_ALPHA_SPEAKER=omni` in `.env`.
+The original `QWEN_VOICE` is untouched (Zane in the local pre-trial configuration).
+A non-secret snapshot of the pre-trial settings is saved locally in
+`data/qwen-speaker-before-tts.json` (ignored by git).
+Official voice list: https://www.alibabacloud.com/help/en/model-studio/qwen-tts-voice-list
+
+Two synthetic API samples from the development machine measured approximately
+1.50 s to first packet including initial connection, then 0.33 s on the reused
+connection. These are individual measurements, not latency guarantees or an audio
+quality evaluation. Startup preconnection avoids the initial handshake on the first
+normal reply. Example files are saved in `data/tts-preview/` for local listening.
+
+## Unified cost ledger
+
+Restart both brain and voice after upgrading. `[费用账本累计]` now covers Claude
+(including caches and web search), memory extraction, Jev, TTS, Omni and an explicit
+ASR duration reference estimate. Usage gaps and interrupted paid requests remain
+marked as unpriced instead of appearing free. Data persists in `data/costs.db`.
+Read it with `.venv/bin/python -m core.costs` or brain's `GET /costs` endpoint.
+See [cost accounting details](../docs/COSTS.md) for verified prices and the embedded
+ASR billing limitation. The earlier note that TTS is absent from the cost total is
+superseded by this unified ledger; the old Omni-only counter remains separate.
