@@ -27,6 +27,7 @@ from voice_pipeline.collection import EXECUTE, unfinished
 from voice_pipeline.search_router import JevSearchRouter
 from voice.batch_timing import BatchTiming
 from voice.qwen_tts import QwenTTS
+from voice.upload_gate import make_upload_gate
 from core.costs import configure_costs, record_cost, log_summary, AudioCostMeter
 
 logger = logging.getLogger('alpha.qwen_alpha')
@@ -673,6 +674,7 @@ def make_router(client):
 
 
 async def run_connection(ws, player, collector, bridge, costs, voice):
+    upload_gate = make_upload_gate()
     created = await wait_for_event(ws, 'session.created')
     await send_event(ws, 'session.update', session=session_config(voice))
     updated = (await wait_for_event(ws, 'session.updated'))['session']
@@ -709,7 +711,7 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     audio_costs = AudioCostMeter(created['session']['id'], os.getenv('QWEN_REGION', 'singapore'))
     try:
         async with asyncio.TaskGroup() as tasks:
-            tasks.create_task(send_microphone(ws, activity, on_sent=audio_costs.sent))
+            tasks.create_task(send_microphone(ws, activity, on_sent=audio_costs.sent, upload_gate=upload_gate))
             tasks.create_task(receiver.run())
             tasks.create_task(receiver.confirm_speech())
             tasks.create_task(receiver.speak())

@@ -163,11 +163,13 @@ async def wait_for_event(ws, expected: str) -> dict:
                 return event
 
 
-async def send_microphone(ws, activity: SpeechActivity, *, on_sent=None) -> None:
+async def send_microphone(ws, activity: SpeechActivity, *, on_sent=None, upload_gate=None) -> None:
     loop = asyncio.get_running_loop()
     while True:
         # 音频线程产生数据，异步任务取数据并发送；队列把两者的速度差暂时缓冲起来。
         # 每块 20ms，最多存 100 块，即 2 秒；不是无限积压、越说延迟越大。
+        if upload_gate is not None:
+            upload_gate.reset()
         queue: asyncio.Queue[bytes | Exception] = asyncio.Queue(maxsize=100)
         accepting = True
         received = sent = 0
@@ -212,13 +214,19 @@ async def send_microphone(ws, activity: SpeechActivity, *, on_sent=None) -> None
                 while True:
                     try:
                         # 没有音频时只挂起当前发送任务，接收模型消息和播放仍能继续。
-                        chunk = await asyncio.wait_for(queue.get(), timeout=1)
+                        async with asyncio.timeout(1):
+                            chunk = await queue.get()
                     except TimeoutError as exc:
                         raise sd.PortAudioError("麦克风 1 秒未返回音频") from exc
                     if not stream.active:
                         raise sd.PortAudioError("麦克风流已停止")
                     if isinstance(chunk, Exception):
                         raise chunk
+                    if upload_gate is not None:
+                        outgoing = upload_gate.feed(chunk)
+                        if outgoing is None:
+                            continue  # 持续消费本地录音；不让静音积压进网络队列。
+                        chunk = outgoing
                     # PCM 是二进制，base64 将它变成能放进 JSON 的文本；没有先转成文字。
                     try:
                         async with asyncio.timeout(AUDIO_SEND_TIMEOUT_S):
@@ -237,6 +245,8 @@ async def send_microphone(ws, activity: SpeechActivity, *, on_sent=None) -> None
             activity.reset()
         finally:
             accepting = False
+            if upload_gate is not None:
+                upload_gate.report()
         await asyncio.sleep(1)
 
 

@@ -160,3 +160,74 @@ Read it with `.venv/bin/python -m core.costs` or brain's `GET /costs` endpoint.
 See [cost accounting details](../docs/COSTS.md) for verified prices and the embedded
 ASR billing limitation. The earlier note that TTS is absent from the cost total is
 superseded by this unified ledger; the old Omni-only counter remains separate.
+
+## Local VAD upload trial
+
+Local `.env` selects `QWEN_ALPHA_LOCAL_VAD=1`. The microphone still listens locally
+at 16 kHz PCM16 mono. WebRTC VAD mode 3 requires 80 ms of consecutive voiced audio above a minimum
+normalized RMS of 0.003. It retains 400 ms of pre-roll plus the confirmation
+audio, then sends captured
+frames continuously through short pauses. After 1,000 ms of non-speech it stops
+uploading. Quiet capture continues locally; no audio silence keepalives are sent.
+The WebSocket library's normal control-frame ping/pong remains enabled.
+
+Qwen **server_vad** still detects utterance boundaries, Jev still decides whether
+text is complete/addressed to Alpha, and AlphaBrain still handles all business
+operations. The gate does not decide when to execute tasks. Original local VAD
+playback pause/resume continues to observe **all** captured audio. A short answer
+such as “对” now needs at least 80 ms of qualifying audio. Very soft/far-field
+speech or a quieter recording device can fail this threshold; tune it using the
+diagnostics rather than assuming the gate identifies human speech perfectly. TV voices and coughs can trigger upload;
+Jev filtering still occurs after transcription. Use headphones for the trial.
+
+Settings (milliseconds must be multiples of 20):
+
+```dotenv
+QWEN_ALPHA_LOCAL_VAD=1
+QWEN_ALPHA_VAD_MODE=3
+QWEN_ALPHA_VAD_PRE_MS=400
+QWEN_ALPHA_VAD_ONSET_MS=80
+QWEN_ALPHA_VAD_MIN_RMS=0.003
+QWEN_ALPHA_VAD_DEBUG=1
+# Default tail=max(1000, QWEN_SILENCE_MS+200), rounded up to 20ms.
+# QWEN_ALPHA_VAD_TAIL_MS=1000
+```
+
+The tail must cover the server silence threshold plus at least 200 ms; invalid
+settings fail before opening the microphone. Semantic VAD is not supported by
+this trial because a fixed silence tail cannot guarantee semantic completion.
+The local pre-trial upload settings were saved in
+`data/qwen-before-upload-vad.json` (ignored by git). The speaker configuration,
+including the Ethan TTS trial and Omni rollback, is unaffected.
+
+Restore continuous upload for one run:
+
+```bash
+QWEN_ALPHA_LOCAL_VAD=0 ./start-qwen
+```
+
+Or set `QWEN_ALPHA_LOCAL_VAD=0` in `.env` for persistent rollback. Restart the voice
+process after switching. Test silence, a single “对”, soft speech, and a long
+instruction with pauses. `[本地VAD]` logs upload start/stop; microphone shutdown or
+device restart logs captured/forwarded durations. ASR cost metering receives only
+successfully uploaded bytes. This reduces uploaded silence; actual bill savings
+still depend on the provider's treatment of embedded transcription.
+
+
+### Quiet-room false triggers
+
+The first trial opened on one positive WebRTC frame, which repeatedly uploaded
+quiet-room noise. The revised gate uses mode 3 plus an 80 ms onset and a minimum
+RMS floor. Frames below that floor also count toward the closing tail, even if
+WebRTC's raw result remains speech. These are configurable starting settings,
+not a guarantee for every microphone. Confirmation audio is preserved alongside
+pre-roll, so the stricter onset does not intentionally discard the first syllable.
+Local pre-fix settings were saved to `data/qwen-vad-before-noise-fix.json`.
+
+With `QWEN_ALPHA_VAD_DEBUG=1`, `[VAD诊断]` prints once every ten seconds: mean/max
+normalized RMS, raw VAD-positive fraction and fraction also passing the volume
+threshold. No audio is stored or uploaded for diagnostics. After restarting,
+remain quiet for ten seconds, then say “对” and a normal command. If it still
+triggers in silence or misses words, use these measurements to adjust
+`QWEN_ALPHA_VAD_MIN_RMS` and `QWEN_ALPHA_VAD_ONSET_MS`. Raise the floor cautiously:
+a high floor can suppress the user too. Set `QWEN_ALPHA_VAD_DEBUG=0` after tuning.

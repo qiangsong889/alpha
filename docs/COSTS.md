@@ -93,3 +93,8 @@ integration makes extra provider requests or changes tools, prompts, playback,
 confirmation rules, or the saved Omni/TTS switch. The ledger stores only model,
 component, numeric usage, amount, timestamp and missing-usage reason; never keys,
 user messages, transcripts, tool arguments or results.
+
+With `QWEN_ALPHA_LOCAL_VAD=1`, the microphone gate suppresses idle audio before
+sending. ASR duration includes only successfully sent speech, pre-roll and tail,
+not all locally captured audio. Consequently idle listening no longer grows the
+local duration estimate. The same embedded-ASR billing uncertainty still applies.
