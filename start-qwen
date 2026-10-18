@@ -1,0 +1,5 @@
+#!/bin/sh
+# 从任意目录调用此脚本都使用 Alpha 自己的环境。
+ALPHA_LAUNCH_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd) || exit 1
+cd "$ALPHA_LAUNCH_ROOT" || exit 1
+exec "$ALPHA_LAUNCH_ROOT/.venv/bin/python" -m apps.run_qwen "$@"

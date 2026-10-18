@@ -1,8 +1,18 @@
 # Qwen voice + AlphaBrain trial
 
+**Current dev default: Jev-driven submission.** Final transcripts are classified immediately; a complete result submits without the fixed two-second window. See the mode switch below to restore the previous behavior.
+
 This entry point is separate from `voice.qwen_realtime` and LiveKit. It uses the existing AlphaBrain HTTP server, so HA tools, Google services, weather, web search, persistent memory, email confirmation, operation records and unknown-result handling stay in the brain. No business tools are published to Qwen.
 
 ## Start
+
+One command from `alpha/`:
+
+```bash
+./start-qwen
+```
+
+This uses Alpha's `.venv` automatically, starts the brain, waits for `/health`, then starts Qwen. Press Ctrl+C once to stop both processes it started. A healthy existing brain is reused and is not closed by this launcher. Stop an old standalone Qwen process before using this command. Startup logs from both services share the terminal. Optional: `./start-qwen --startup-timeout 90`.
 
 From `alpha/`, in two terminals, using **Alpha's** environment in both:
 
@@ -23,13 +33,24 @@ QWEN_VAD=server_vad
 QWEN_SILENCE_MS=800
 QWEN_ALPHA_COLLECTION_SECONDS=2
 QWEN_ALPHA_CONTINUATION_SECONDS=5
+QWEN_ALPHA_SUBMIT_MODE=jev
 ```
 
 Jev uses the existing `JEV_PROVIDER`, `TYPESAFE_API_KEY`/`AI_GATEWAY_API_KEY`, `JEV_MODEL`, and `JEV_TIMEOUT_MS`. Without credentials, completeness falls back to local unfinished-sentence rules. It is not equivalent to a semantic detector in that configuration.
 
 ## Submission and execution
 
-Qwen receives microphone audio continuously but automatic replies and automatic interruptions are disabled and verified against the server's returned configuration. A pause produces transcription, not permission to execute. The client waits for final transcripts for all known segments, then for the collection window. Jev checks the combined text. An unfinished sentence or an `incomplete` decision triggers one follow-up question and retains the request; it does not execute automatically after five seconds. Uncertainty falls back to local sentence rules.
+`QWEN_ALPHA_SUBMIT_MODE=jev` is the default trial mode. Jev decides as soon as the known final transcripts are ready. A complete classification submits immediately. An incomplete classification, or a clearly unfinished trailing phrase, holds the batch; after the five-second continuation period it asks once and keeps waiting for new text. Uncertainty, missing credentials and request failures fall back to the original two-second window (five for an unfinished phrase). New speech cancels either path. `执行吧` still bypasses Jev and the extra window when the request is complete.
+
+To restore the previous mode for one run, without changing `.env`:
+
+```bash
+QWEN_ALPHA_SUBMIT_MODE=window ./start-qwen
+```
+
+Set `QWEN_ALPHA_SUBMIT_MODE=window` in `.env` for a persistent rollback. Use `QWEN_ALPHA_SUBMIT_MODE=jev ./start-qwen` to explicitly select the trial again. A complete sentence does not prove the user has finished a whole task chain: “加牛奶” may be submitted before a later “还有鸡蛋”. The `window` mode remains available for that tradeoff.
+
+Qwen receives microphone audio continuously but automatic replies and automatic interruptions are disabled and verified against the server's returned configuration. A pause produces transcription, not permission to execute. The client waits for final transcripts for all known segments, then follows the selected submission mode. In `window` mode, the collection timer and Jev check run together and both must finish. An unfinished sentence or an `incomplete` decision retains the request; it does not execute automatically after five seconds. Uncertainty falls back to local sentence rules and the window.
 
 Say `执行吧` or `就这些` as a separate command or a punctuation-separated ending to submit without the additional quiet window. A clearly unfinished phrase still needs completion. Example:
 
@@ -37,13 +58,27 @@ Say `执行吧` or `就这些` as a separate command or a punctuation-separated 
 
 All segments, including the correction, reach AlphaBrain as one request. Every accepted batch uses one HTTP submission, and batches execute serially. New speech during execution collects into the next batch. Interrupting playback does not cancel or undo already-started business operations.
 
-No detector can predict a correction made after a complete request and a long silence. For an explicit boundary, finish a long chain with `执行吧`; for pauses longer than the configured two seconds, increase the collection window. Lowering it can reduce delay but admits earlier submission. **This trial does not promise lower end-to-end latency:** it still waits for collection and Claude, then asks Qwen to read the returned answer. It compares Qwen's audio path with OpenAI STT/TTS, rather than bypassing Claude for casual conversation.
+No detector can predict a correction made after a complete request and a long silence. In `window` mode, increase the collection window if you pause between complete tasks. In `jev` mode, a complete classification is enough to submit, so a later correction may become a new batch. **This trial does not promise lower end-to-end latency:** it still waits for transcription, classification and Claude, then asks Qwen to read the returned answer. It compares Qwen's audio path with OpenAI STT/TTS, rather than bypassing Claude for casual conversation.
 
 ## Playback and reconnection
 
 Search progress is forwarded when the brain emits `我查一下。`, before the final result. Device-only `ha_done` plays a local confirmation tone. Other replies are read by Qwen from the brain's text. Actual Qwen output transcription is logged; instruction-based reading is not a guarantee of literal TTS fidelity.
 
-VAD first ducks audio. Sustained local speech pauses it; meaningful final text clears playback and cancels generation. Recognized noise resumes buffered audio. This trial accepts meaningful interruptions without the LiveKit-side Jev addressee filter, so side conversations may be accepted. Use headphones to avoid speaker echo.
+VAD first ducks audio. Sustained local speech pauses it while final transcription is pending; recognized noise resumes buffered audio. With `QWEN_ALPHA_JEV_INTERRUPTIONS=1` (the default), speech that started during a report is classified before it can enter the collector or cancel playback. An explicit call to Alpha bypasses addressee classification. For other overlapping speech, one Jev request answers both addressee and completeness questions. Clear side conversation resumes the original report without clearing it. Addressed speech clears and cancels that report. The default `QWEN_ALPHA_UNCERTAIN_INTERRUPTION=hold` also resumes on uncertainty, missing credentials or service failure; it logs the unaccepted text but does not pass it to the collector or brain. Ambiguous commands may need to be repeated with “Alpha”. Idle speech skips addressee classification. Use headphones to avoid speaker echo.
+
+The filter remembers overlap at speech start, even if the original report finishes before STT/Jev returns. Classification runs in background tasks so WebSocket audio/events continue to be received. Its completeness decision is reused only while the exact combined text still matches; stale hints are not used for modified task chains. An `addressed` choice is retained even with a low valid confidence score, so genuine corrections are not collapsed into uncertainty. `other` requires at least `max(0.85, JEV_MIN_CONFIDENCE)`; lower scores become uncertainty and follow the configured hold/accept policy. Raw choices and scores are logged before policy mapping. Scores are not a guarantee of the true addressee. Side conversation can still cause temporary ducking or pausing while deciding, then playback resumes.
+
+The earlier policy accepted all uncertain overlapping speech, which caused unrelated statements such as “我吃过了” to cancel a report. It remains available for comparison, but is no longer the default:
+
+```bash
+QWEN_ALPHA_UNCERTAIN_INTERRUPTION=accept ./start-qwen
+```
+
+After a question has actually finished playback, a ten-second window accepts short answers such as “对”“不是”“不用了” without another addressee/completeness request. An interrupted question does not open this window. Late classification cannot cancel a different, newer report. To disable this trial filter for one run:
+
+```bash
+QWEN_ALPHA_JEV_INTERRUPTIONS=0 ./start-qwen
+```
 
 Each meaningful input advances a voice epoch. Older queued reports are discarded, and late results from older HTTP requests are retained in the brain but not added back to the speech queue. This prevents an old long report and the new short answer from both saying the same result. It does not cancel or replay business operations. Playback claims its own report before waiting, so finishing an interrupted report cannot accidentally remove the next report.
 
@@ -64,7 +99,7 @@ Protocol reference: [Alibaba Cloud Realtime client events](https://www.alibabacl
 
 ## dev: parallel completeness checks and batch latency
 
-The `dev` branch starts Jev completeness classification **at the same time** as the existing quiet-window timer, once final transcripts are available. Submission still waits for both. This changes `window + Jev` into `max(window, Jev)` without shortening the configured window. New speech cancels the entire wait, including the in-flight Jev request. Explicit end commands still bypass Jev, and an incomplete request still cannot auto-execute.
+The retained `window` mode on `dev` starts Jev completeness classification **at the same time** as the existing quiet-window timer, once final transcripts are available. Submission waits for both. This changes `window + Jev` into `max(window, Jev)` without shortening the configured window. New speech cancels the entire wait, including the in-flight Jev request. Explicit end commands still bypass Jev, and an incomplete request still cannot auto-execute. The newer default `jev` mode described above removes that timer only for complete classifications.
 
 Each submitted batch gets an independent ID and captures its own speech-stopped event time, final-transcript readiness and submission time. That object follows the serial HTTP queue and all reports from the batch. Later speech cannot replace the earlier batch's timing origin. Search progress is tagged `search_progress`, final answers `reply`, and device tones `tone`; their audio latencies are not combined into one misleading measurement.
 

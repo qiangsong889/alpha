@@ -74,7 +74,7 @@ class CollectionTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.submit, self.prompt = Mock(), Mock()
         self.router = NS(turn_complete=AsyncMock(return_value=True))
-        self.gate = TurnCollector(self.submit, self.prompt, self.router, window_s=.01, continuation_s=.01)
+        self.gate = TurnCollector(self.submit, self.prompt, self.router, window_s=.01, continuation_s=.01, mode='window')
         self.addAsyncCleanup(self.gate.close)
 
     async def settle(self):
@@ -257,7 +257,7 @@ class ReceiverTests(IsolatedAsyncioTestCase):
         self.ws = NS(send=AsyncMock())
         self.player = NS(clear=Mock(), append=Mock(), finish=Mock(), gain=1, resume=Mock(), pause=Mock(),
                          wait_played=AsyncMock(return_value=True), wait_started=AsyncMock(return_value=115))
-        self.gate = TurnCollector(Mock(), Mock(), NS(turn_complete=AsyncMock(return_value=True)), window_s=10)
+        self.gate = TurnCollector(Mock(), Mock(), NS(turn_complete=AsyncMock(return_value=True)), window_s=10, mode='window')
         self.addAsyncCleanup(self.gate.close)
         self.bridge = BrainBridge(None, 'http://brain')
         self.receiver = Receiver(self.ws, self.player, self.gate, self.bridge, CostTracker('singapore'), 'test')
@@ -352,3 +352,312 @@ class ReceiverTests(IsolatedAsyncioTestCase):
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+class JevSubmissionTests(IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.submitted = asyncio.Event()
+        self.submit = Mock(side_effect=lambda text: self.submitted.set())
+        self.prompt = Mock()
+        self.router = NS(turn_complete=AsyncMock(return_value=True))
+        self.gate = TurnCollector(self.submit, self.prompt, self.router, window_s=10, continuation_s=.08)
+        self.addAsyncCleanup(self.gate.close)
+
+    async def test_complete_submits_without_fixed_window(self):
+        self.gate.transcript('1', '关客厅灯')
+        await asyncio.wait_for(self.submitted.wait(), .2)
+        self.submit.assert_called_once_with('关客厅灯')
+        self.prompt.assert_not_called()
+
+    async def test_incomplete_waits_then_asks_once_without_execution(self):
+        self.router.turn_complete.return_value = False
+        self.gate.transcript('1', '加牛奶')
+        await asyncio.sleep(.02)
+        self.prompt.assert_not_called()
+        await asyncio.sleep(.09)
+        self.prompt.assert_called_once()
+        self.submit.assert_not_called()
+        await asyncio.sleep(.09)
+        self.prompt.assert_called_once()
+
+    async def test_continuation_cancels_incomplete_followup_and_submits_merged_text(self):
+        self.router.turn_complete.return_value = False
+        self.gate.transcript('1', '加牛奶')
+        await asyncio.sleep(.02)
+        self.gate.started('2')
+        self.router.turn_complete.return_value = True
+        self.gate.stopped('2')
+        self.gate.transcript('2', '再加鸡蛋')
+        await asyncio.wait_for(self.submitted.wait(), .2)
+        self.submit.assert_called_once_with('加牛奶；再加鸡蛋')
+        await asyncio.sleep(.09)
+        self.prompt.assert_not_called()
+
+    async def test_uncertain_and_exception_use_window_fallback(self):
+        self.gate.window_s = .08
+        for index, outcome in enumerate((None, TimeoutError('classification failed'))):
+            with self.subTest(outcome=type(outcome).__name__):
+                self.submitted.clear()
+                self.submit.reset_mock()
+                self.router.turn_complete.side_effect = outcome if isinstance(outcome, Exception) else None
+                self.router.turn_complete.return_value = None
+                self.gate.transcript(str(index), '关客厅灯')
+                await asyncio.sleep(.02)
+                self.submit.assert_not_called()
+                await asyncio.wait_for(self.submitted.wait(), .2)
+                self.submit.assert_called_once_with('关客厅灯')
+
+    async def test_obviously_unfinished_phrase_cannot_be_forced_by_complete_classification(self):
+        self.gate.transcript('1', '把牛奶')
+        await asyncio.sleep(.11)
+        self.submit.assert_not_called()
+        self.prompt.assert_called_once()
+
+    async def test_new_speech_cancels_slow_jev(self):
+        started, cancelled = asyncio.Event(), asyncio.Event()
+        async def classify(*args):
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cancelled.set()
+        self.router.turn_complete.side_effect = classify
+        self.gate.transcript('1', '关灯')
+        await started.wait()
+        self.gate.started('2')
+        await asyncio.wait_for(cancelled.wait(), .2)
+        self.submit.assert_not_called()
+
+    async def test_execute_command_skips_jev(self):
+        self.router.turn_complete.side_effect = AssertionError('执行口令不能请求 Jev')
+        self.gate.transcript('1', '关灯，执行吧')
+        await asyncio.wait_for(self.submitted.wait(), .2)
+        self.router.turn_complete.assert_not_called()
+
+    async def test_outstanding_transcript_prevents_early_submission(self):
+        self.gate.started('1')
+        self.gate.stopped('1')
+        self.gate.committed('2')
+        self.gate.transcript('1', '加牛奶')
+        await asyncio.sleep(.02)
+        self.router.turn_complete.assert_not_called()
+        self.gate.transcript('2', '牛奶换成酱油')
+        await asyncio.wait_for(self.submitted.wait(), .2)
+        self.submit.assert_called_once_with('加牛奶；牛奶换成酱油')
+
+
+class InterruptionGateTests(IsolatedAsyncioTestCase):
+    # 复用假设备夹具，不继承原测试方法。
+    async def asyncSetUp(self):
+        await ReceiverTests.asyncSetUp(self)
+        self.gate.mode = 'jev'
+        self.gate.window_s = .01
+        self.gate.router.interruption_and_turn = AsyncMock(return_value=(True, True))
+        self.report = Report('购物清单里有牛奶。', 0)
+        self.receiver.current_report = self.report
+        self.receiver.active = True
+        self.receiver.response_id = 'old'
+
+    async def utterance(self, text, item='speech'):
+        await self.receiver.handle({'type': 'input_audio_buffer.speech_started', 'item_id': item})
+        await self.receiver.handle({'type': 'input_audio_buffer.speech_stopped', 'item_id': item})
+        await self.receiver.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                                    'item_id': item, 'transcript': text})
+
+    async def settle_inputs(self):
+        await asyncio.gather(*list(self.receiver.input_tasks))
+        await asyncio.sleep(.03)
+
+    async def test_side_chat_keeps_report_queue_and_resumes_without_history_or_cancel(self):
+        self.gate.router.interruption_and_turn.return_value = (False, True)
+        self.bridge.say('后续汇报')
+        await self.utterance('小王，晚饭吃什么？')
+        await self.settle_inputs()
+        self.player.clear.assert_not_called()
+        self.player.resume.assert_called_once()
+        self.assertEqual(self.bridge.epoch, 0)
+        self.assertEqual(len(self.bridge.reports), 1)
+        self.assertEqual(self.gate.parts, [])
+        self.assertEqual(self.gate.history, [])
+        self.gate.submit.assert_not_called()
+        self.ws.send.assert_not_awaited()
+
+    async def test_addressed_speech_interrupts_and_reuses_completeness_result(self):
+        await self.utterance('再加鸡蛋')
+        await self.settle_inputs()
+        self.player.clear.assert_called_once()
+        self.gate.submit.assert_called_once_with('再加鸡蛋')
+        self.gate.router.interruption_and_turn.assert_awaited_once()
+        self.gate.router.turn_complete.assert_not_awaited()
+        self.assertEqual(json.loads(self.ws.send.call_args.args[0])['type'], 'response.cancel')
+
+    async def test_legacy_uncertain_accept_mode_can_be_selected(self):
+        self.receiver.uncertain_interruption = 'accept'
+        self.gate.router.interruption_and_turn.return_value = (None, None)
+        await self.utterance('那个改一下')
+        await self.settle_inputs()
+        self.gate.submit.assert_called_once_with('那个改一下')
+        self.player.clear.assert_called_once()
+        self.gate.router.turn_complete.assert_not_awaited()
+
+    async def test_classification_error_preserves_report_in_hold_mode(self):
+        self.gate.router.interruption_and_turn.side_effect = TimeoutError()
+        await self.utterance('再加鸡蛋')
+        await self.settle_inputs()
+        self.gate.submit.assert_not_called()
+        self.player.clear.assert_not_called()
+        self.assertEqual(self.bridge.epoch, 0)
+        self.assertFalse(self.gate.pending)
+
+    async def test_uncertain_casual_statement_does_not_interrupt_or_reach_brain(self):
+        self.gate.router.interruption_and_turn.return_value = (None, True)
+        self.bridge.say('待播的汇报')
+        with self.assertLogs('alpha.qwen_alpha', 'INFO') as logs:
+            await self.utterance('我吃过了。')
+            await self.settle_inputs()
+        self.gate.submit.assert_not_called()
+        self.player.clear.assert_not_called()
+        self.player.resume.assert_called_once()
+        self.ws.send.assert_not_awaited()
+        self.assertEqual(self.bridge.epoch, 0)
+        self.assertEqual(len(self.bridge.reports), 1)
+        self.assertIn('暂不打断', ' '.join(logs.output))
+
+    async def test_idle_voice_does_not_pause_an_empty_player(self):
+        self.receiver.active = False
+        self.receiver.current_report = None
+        self.receiver.activity = NS(voiced_ms=500)
+        self.gate.speaking = True
+        task = asyncio.create_task(self.receiver.confirm_speech())
+        try:
+            await asyncio.sleep(.03)
+            self.player.pause.assert_not_called()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    async def test_jev_wait_does_not_block_websocket_events(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def classify(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return False, None
+        self.gate.router.interruption_and_turn.side_effect = classify
+        await asyncio.wait_for(self.utterance('小王晚上吃什么'), .2)
+        await started.wait()
+        await self.receiver.handle({'type': 'response.audio.delta', 'response_id': 'old',
+                                    'item_id': 'old-audio', 'delta': 'AAA='})
+        self.player.append.assert_called_once()
+        self.player.clear.assert_not_called()
+        release.set()
+        await self.settle_inputs()
+
+    async def test_overlap_is_remembered_after_original_report_finishes(self):
+        self.gate.router.interruption_and_turn.return_value = (False, True)
+        await self.receiver.handle({'type': 'input_audio_buffer.speech_started', 'item_id': 'late'})
+        self.receiver.current_report = None
+        self.receiver.active = False
+        await self.receiver.handle({'type': 'input_audio_buffer.speech_stopped', 'item_id': 'late'})
+        await self.receiver.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                                    'item_id': 'late', 'transcript': '小王你说呢'})
+        await self.settle_inputs()
+        self.gate.router.interruption_and_turn.assert_awaited_once()
+        self.gate.submit.assert_not_called()
+
+    async def test_late_decision_cannot_cancel_a_different_report(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def classify(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return True, True
+        self.gate.router.interruption_and_turn.side_effect = classify
+        await self.utterance('再加鸡蛋')
+        await started.wait()
+        self.receiver.current_report = Report('另一条报告', 1)
+        self.receiver.response_id = 'new'
+        release.set()
+        await self.settle_inputs()
+        self.ws.send.assert_not_awaited()
+        self.player.clear.assert_not_called()
+
+    async def test_wake_name_bypasses_address_filter(self):
+        await self.utterance('Alpha，关客厅灯')
+        await self.settle_inputs()
+        self.gate.router.interruption_and_turn.assert_not_awaited()
+        self.player.clear.assert_called_once()
+        self.gate.submit.assert_called_once_with('Alpha，关客厅灯')
+
+    async def test_wake_name_does_not_require_a_comma_before_chinese(self):
+        speech = self.receiver.speech_input()
+        self.assertEqual(self.receiver.shortcut('Alpha停一下', speech), '呼叫 Alpha')
+        self.assertIsNone(self.receiver.shortcut('alphabet 是什么', speech))
+
+    async def test_idle_input_skips_addressee_classification(self):
+        self.receiver.current_report = None
+        self.receiver.active = False
+        await self.utterance('加牛奶')
+        await self.settle_inputs()
+        self.gate.router.interruption_and_turn.assert_not_awaited()
+        self.gate.submit.assert_called_once_with('加牛奶')
+
+    async def test_filter_can_be_disabled_without_changing_completeness_mode(self):
+        self.receiver.interruption_filter = False
+        await self.utterance('再加鸡蛋')
+        await self.settle_inputs()
+        self.gate.router.interruption_and_turn.assert_not_awaited()
+        self.gate.submit.assert_called_once_with('再加鸡蛋')
+
+    async def test_duplicate_transcript_while_classifying_does_not_call_twice(self):
+        started, release = asyncio.Event(), asyncio.Event()
+        async def classify(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return True, True
+        self.gate.router.interruption_and_turn.side_effect = classify
+        await self.utterance('再加鸡蛋')
+        await started.wait()
+        await self.receiver.handle({'type': 'conversation.item.input_audio_transcription.completed',
+                                    'item_id': 'speech', 'transcript': '再加鸡蛋'})
+        release.set()
+        await self.settle_inputs()
+        self.gate.router.interruption_and_turn.assert_awaited_once()
+        self.gate.submit.assert_called_once_with('再加鸡蛋')
+
+    async def test_close_cancels_pending_classification(self):
+        started = asyncio.Event()
+        async def classify(*args, **kwargs):
+            started.set()
+            await asyncio.Future()
+        self.gate.router.interruption_and_turn.side_effect = classify
+        await self.utterance('再加鸡蛋')
+        await started.wait()
+        tasks = list(self.receiver.input_tasks)
+        await self.receiver.close()
+        self.assertTrue(all(task.cancelled() for task in tasks))
+
+    async def test_answer_after_played_question_bypasses_both_classifiers(self):
+        import time
+        self.receiver.current_report = None
+        self.receiver.active = False
+        self.receiver.question_finished_at = time.perf_counter() - 1
+        self.receiver.question_deadline = time.perf_counter() + 9
+        await self.utterance('对。')
+        await self.settle_inputs()
+        self.gate.router.interruption_and_turn.assert_not_awaited()
+        self.gate.router.turn_complete.assert_not_awaited()
+        self.gate.submit.assert_called_once_with('对。')
+
+    async def test_question_window_opens_only_after_successful_playback(self):
+        for played in (False, True):
+            self.receiver.question_finished_at = self.receiver.question_deadline = 0
+            self.player.wait_played.return_value = played
+            count = 0
+            async def send(raw):
+                nonlocal count
+                count += 1
+                if count == 3:
+                    self.receiver.audio_items = {'answer'}
+                    self.receiver.response_done.set()
+            self.ws.send.side_effect = send
+            await self.receiver._play_report('要创建文档吗？')
+            self.assertEqual(self.receiver.question_deadline > 0, played)

@@ -41,10 +41,13 @@ def session_config(voice):
 
 class TurnCollector:
     """停顿不等于提交。未转写音频、继续说话、语义未完都会阻止调用大脑。"""
-    def __init__(self, submit, prompt, router, *, window_s=2.0, continuation_s=5.0):
+    def __init__(self, submit, prompt, router, *, window_s=2.0, continuation_s=5.0, mode='jev'):
         if any(not math.isfinite(v) or v < 0 for v in (window_s, continuation_s)):
             raise ValueError('收集窗口必须是非负有限数字')
         self.submit, self.prompt, self.router = submit, prompt, router
+        if mode not in {'jev', 'window'}:
+            raise ValueError('QWEN_ALPHA_SUBMIT_MODE 必须是 jev 或 window')
+        self.mode = mode
         self.window_s, self.continuation_s = window_s, continuation_s
         self.parts = []
         self.segments = OrderedDict()
@@ -63,6 +66,7 @@ class TurnCollector:
         self.last_stopped_item = None
         self.last_transcribed_at = None
         self.last_submission = None
+        self.semantic_hint = None
 
     def _change(self):
         self.revision += 1
@@ -99,7 +103,12 @@ class TurnCollector:
             self.pending.add(item_id)
             self._change()
 
-    def transcript(self, item_id, text):
+    def preview(self, item_id, text):
+        segments = OrderedDict(self.segments)
+        segments[item_id] = text.strip()
+        return '；'.join(part for part in segments.values() if part)
+
+    def transcript(self, item_id, text, *, complete=None, decision_text=None, received_at=None):
         if item_id in self.resolved:
             return False
         self.resolved[item_id] = None
@@ -111,7 +120,8 @@ class TurnCollector:
             self._change()
             return False
         self.paused = False
-        self.last_transcribed_at = time.perf_counter()
+        self.last_transcribed_at = max(self.last_transcribed_at or 0,
+                                      received_at if received_at is not None else time.perf_counter())
         text = text.strip()
         # 只识别独立口令/明确分隔的句尾口令，不截断“提醒我执行”。
         last = re.split(r'[，。！？、,;；!?\s]+', text.rstrip('。！!？? '))[-1]
@@ -122,6 +132,8 @@ class TurnCollector:
         # 按发声/提交顺序合并，不按异步转写到达顺序合并，避免把后来的改口放到前面。
         self.segments[item_id] = text
         self.parts = [part for part in self.segments.values() if part]
+        if decision_text is not None and (complete is None or type(complete) is bool) and decision_text == '；'.join(self.parts):
+            self.semantic_hint = (decision_text, complete)
         self.immediate = bool(self.segments) and next(reversed(self.segments)) in self.end_commands
         logger.info('[收集] %d 段，%s', len(self.parts), '收到执行口令' if self.immediate else '等待后续或完整性判断')
         self._change()
@@ -132,15 +144,32 @@ class TurnCollector:
             text = '；'.join(self.parts)
             incomplete = unfinished(text)
             delay = 0 if self.immediate else (self.continuation_s if incomplete else self.window_s)
+            started = time.perf_counter()
+            hint = self.semantic_hint if self.semantic_hint is not None and self.semantic_hint[0] == text else None
             if self.immediate:
                 await asyncio.sleep(delay)
                 decision = None
-            else:
+            elif self.mode == 'window':
                 # 判断与原有静音窗口同时开始；继续说话会取消整个组，旧判断不能提交。
                 async with asyncio.TaskGroup() as checks:
                     checks.create_task(asyncio.sleep(delay))
-                    semantic = checks.create_task(self.router.turn_complete(text, list(self.history)))
+                    semantic = checks.create_task(self._completeness(text, hint))
                 decision = semantic.result()
+            else:
+                try:
+                    decision = await self._completeness(text, hint)
+                except Exception as exc:
+                    # 分类服务故障不等于“可以执行”；与不确定相同，回退原窗口。
+                    logger.warning('[提交判断] Jev 异常 %s，回退窗口', type(exc).__name__)
+                    decision = None
+                if incomplete or decision is False:
+                    logger.info('[提交判断] 尚未完整，继续收集，最多等待 %gs 后追问', self.continuation_s)
+                    await asyncio.sleep(max(0, self.continuation_s - (time.perf_counter() - started)))
+                elif decision is None:
+                    logger.info('[提交判断] Jev 不确定或不可用，回退 %gs 窗口', self.window_s)
+                    await asyncio.sleep(max(0, delay - (time.perf_counter() - started)))
+                else:
+                    logger.info('[提交判断] Jev 判断完整，立即提交，不等固定窗口')
             if revision != self.revision or self.pending or self.speaking or self.paused:
                 return
             if incomplete or decision is False:
@@ -155,10 +184,12 @@ class TurnCollector:
             self.last_submission.log_submission()
             self.last_stopped_at = None
             self.last_stopped_item = None
+            self.last_transcribed_at = None
             self.parts.clear()
             self.segments.clear()
             self.end_commands.clear()
             self.stops.clear()
+            self.semantic_hint = None
             self.immediate = False
             self.history = (self.history + [{'role': 'user', 'content': text}])[-6:]
             logger.info('[提交] %s', text)
@@ -168,6 +199,9 @@ class TurnCollector:
         except Exception:
             logger.exception('[收集] 判断失败，保留请求，尚未执行')
             self.prompt('我还保留着这段请求，请说“执行吧”或继续补充。')
+
+    async def _completeness(self, text, hint):
+        return hint[1] if hint is not None else await self.router.turn_complete(text, list(self.history))
 
     def disconnected(self):
         self.paused = True
@@ -191,6 +225,15 @@ class Report:
     epoch: int
     timing: BatchTiming | None = None
     kind: str = 'reply'
+
+
+@dataclass
+class SpeechInput:
+    started_at: float
+    overlapped: bool
+    report: Report | None
+    assistant_text: str
+    transcribed_at: float | None = None
 
 
 class BrainBridge:
@@ -270,7 +313,8 @@ class BrainBridge:
 
 
 class Receiver:
-    def __init__(self, ws, player, collector, bridge, costs, session_id, activity=None):
+    def __init__(self, ws, player, collector, bridge, costs, session_id, activity=None,
+                 *, interruption_filter=True, uncertain_interruption='hold'):
         self.ws, self.player, self.collector, self.bridge = ws, player, collector, bridge
         self.costs, self.session_id = costs, session_id
         self.active = False
@@ -286,6 +330,84 @@ class Receiver:
         self.paused = False
         self.current_report = None
         self.playback_tasks = set()
+        self.interruption_filter = interruption_filter
+        if uncertain_interruption not in {'hold', 'accept'}:
+            raise ValueError('QWEN_ALPHA_UNCERTAIN_INTERRUPTION 必须是 hold 或 accept')
+        self.uncertain_interruption = uncertain_interruption
+        self.inputs = OrderedDict()
+        self.resolving = set()
+        self.input_tasks = set()
+        self.input_lock = asyncio.Lock()
+        self.question_finished_at = 0.0
+        self.question_deadline = 0.0
+
+    def speech_input(self):
+        report = self.current_report
+        return SpeechInput(time.perf_counter(), report is not None or self.active, report,
+                           (report.text or '') if report is not None else '')
+
+    @staticmethod
+    def meaningful(text):
+        return is_meaningful(text) and text.strip(' []【】。.!！') not in {'咳嗽', '咳嗽声', '笑声', '呼吸声', '噪音', '听不清'}
+
+    def shortcut(self, text, speech):
+        if re.match(r'^\s*(?:(?:嘿|你好|hey)[，,\s]*)?(?:alpha(?![A-Za-z0-9_])|阿尔法|阿爾法)', text, re.I):
+            return '呼叫 Alpha'
+        if (self.question_finished_at > 0 and
+                self.question_finished_at <= speech.started_at <= self.question_deadline and
+                re.fullmatch(r'\s*(?:对|對|是的|不是|不对|不對|好|好的|可以|不用了|不要了|取消|嗯)[。！!，,\s]*', text)):
+            return '提问后的短回答'
+        return None
+
+    def restore_if_quiet(self):
+        if not self.collector.speaking and not self.collector.pending:
+            self.player.gain = 1.0
+            self.player.resume()
+            self.paused = False
+
+    async def resolve_transcript(self, item_id, text, speech):
+        try:
+            async with self.input_lock:
+                shortcut = self.shortcut(text, speech)
+                combined = self.collector.preview(item_id, text)
+                complete = True if shortcut == '提问后的短回答' else None
+                addressed = True
+                classified = False
+                if speech.overlapped and self.interruption_filter and not shortcut:
+                    classified = True
+                    try:
+                        addressed, complete = await self.collector.router.interruption_and_turn(
+                            text, combined_text=combined, assistant=speech.assistant_text,
+                            question_open=(self.question_finished_at <= speech.started_at <= self.question_deadline
+                                           and self.question_finished_at > 0), history=list(self.collector.history))
+                    except Exception as exc:
+                        logger.warning('[打断判断] 判断失败 %s，按不确定策略处理', type(exc).__name__)
+                        addressed, complete = None, None
+                if addressed is False:
+                    self.collector.transcript(item_id, '')
+                    logger.info('[打断忽略] 明确旁聊或附和：%r，保留汇报', text)
+                    self.restore_if_quiet()
+                    return
+                if addressed is None and self.uncertain_interruption == 'hold':
+                    self.collector.transcript(item_id, '')
+                    logger.info('[暂不打断] 未确认对 Alpha 说话：%r；继续汇报，需要时请先叫 Alpha', text)
+                    self.restore_if_quiet()
+                    return
+                if speech.overlapped:
+                    logger.info('[打断判断] %s', shortcut or ('对 Alpha 说话' if addressed is True else '不确定，回退接收有效输入'))
+                accepted = self.collector.transcript(item_id, text, complete=complete,
+                    decision_text=combined if classified or shortcut == '提问后的短回答' else None,
+                    received_at=speech.transcribed_at)
+                if accepted:
+                    logger.info('\033[32m你：%s\033[0m', text)
+                    self.question_deadline = 0.0
+                    self.bridge.new_input()
+                    # 只处理本次发声对应的旧报告，晚到判断不能误取消新的报告。
+                    if self.current_report is speech.report:
+                        await self.interrupt()
+                self.restore_if_quiet()
+        finally:
+            self.resolving.discard(item_id)
 
     async def interrupt(self):
         self.player.clear()
@@ -303,6 +425,9 @@ class Receiver:
             if str(error.get('code')) not in {'response_cancel_not_active', 'response_not_active'}:
                 raise_api_error(error)
         elif kind == 'input_audio_buffer.speech_started':
+            self.inputs[event['item_id']] = self.speech_input()
+            while len(self.inputs) > 200:
+                self.inputs.popitem(last=False)
             self.collector.started(event['item_id'])
             self.player.gain = .2
             if self.activity:
@@ -314,16 +439,24 @@ class Receiver:
         elif kind in {'conversation.item.input_audio_transcription.completed',
                       'conversation.item.input_audio_transcription.failed'}:
             text = event.get('transcript', '')
-            accepted = self.collector.transcript(event['item_id'], text)
-            self.player.gain = 1.0
-            self.player.resume()
-            self.paused = False
-            if accepted:
-                logger.info('\033[32m你：%s\033[0m', text)
-                self.bridge.new_input()
-                await self.interrupt()
-            else:
+            item_id = event['item_id']
+            if item_id in self.collector.resolved or item_id in self.resolving:
+                return
+            speech = self.inputs.pop(item_id, None) or self.speech_input()
+            speech.transcribed_at = time.perf_counter()
+            if not self.meaningful(text):
+                self.collector.transcript(item_id, '')
+                self.restore_if_quiet()
                 logger.info('[恢复] 噪音或重复转写，继续播放')
+                return
+            self.collector.committed(item_id)  # 分类完成前，阻止收集器提交或开始下一段播报。
+            self.resolving.add(item_id)
+            if speech.overlapped and self.interruption_filter and not self.shortcut(text, speech):
+                task = asyncio.create_task(self.resolve_transcript(item_id, text, speech), name='qwen-addressed')
+                self.input_tasks.add(task)
+                task.add_done_callback(self.input_tasks.discard)
+            else:
+                await self.resolve_transcript(item_id, text, speech)
         elif kind == 'response.created':
             self.response_id = event['response']['id']
             if not self.active or self.cancelled:
@@ -363,7 +496,8 @@ class Receiver:
 
     async def confirm_speech(self):
         while True:
-            if (self.collector.speaking and not self.paused and self.activity is not None
+            if ((self.current_report is not None or self.active)
+                    and self.collector.speaking and not self.paused and self.activity is not None
                     and self.activity.voiced_ms >= 400):
                 self.player.pause()
                 self.paused = True
@@ -390,7 +524,7 @@ class Receiver:
                     started - (first_packet if first_packet is not None else sent_at))
 
     async def close(self):
-        tasks = list(self.playback_tasks)
+        tasks = list(self.playback_tasks | self.input_tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -402,6 +536,8 @@ class Receiver:
                 await asyncio.sleep(.05)
                 continue
             await self.response_done.wait()
+            if self.collector.speaking or self.collector.pending:
+                continue
             if not self.bridge.reports:
                 self.bridge.changed.clear()
                 continue
@@ -446,6 +582,10 @@ class Receiver:
         await send_event(self.ws, 'response.create')
         await asyncio.wait_for(self.response_done.wait(), timeout=90)
         played = bool(self.audio_items) and all([await self.player.wait_played(item) for item in self.audio_items])
+        self.question_deadline = 0.0
+        if played and not self.cancelled and re.search(r'[？?]$|(?:吗|嗎|呢)[。！!]*$', text.strip()):
+            self.question_finished_at = time.perf_counter()
+            self.question_deadline = self.question_finished_at + 10
         # 被打断的报告不重播；大脑已保存实际执行结果，下一批照常处理。
         logger.info('[播报结束] played=%s', played)
 
@@ -454,7 +594,8 @@ def make_router(client):
     provider = os.getenv('JEV_PROVIDER', 'typesafe')
     key = os.getenv('AI_GATEWAY_API_KEY' if provider == 'vercel' else 'TYPESAFE_API_KEY', '')
     return JevSearchRouter(client, api_key=key, provider=provider, model=os.getenv('JEV_MODEL') or None,
-                           timeout_s=float(os.getenv('JEV_TIMEOUT_MS', '300')) / 1000)
+                           timeout_s=float(os.getenv('JEV_TIMEOUT_MS', '300')) / 1000,
+                           min_confidence=float(os.getenv('JEV_MIN_CONFIDENCE', '0.8')))
 
 
 async def run_connection(ws, player, collector, bridge, costs, voice):
@@ -465,7 +606,12 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     if updated.get('tools'):
         raise QwenProtocolError('语音入口不允许配置业务工具')
     activity = SpeechActivity(sample_rate=16000)
-    receiver = Receiver(ws, player, collector, bridge, costs, created['session']['id'], activity)
+    receiver = Receiver(ws, player, collector, bridge, costs, created['session']['id'], activity,
+                        interruption_filter=os.getenv('QWEN_ALPHA_JEV_INTERRUPTIONS', '1') == '1',
+                        uncertain_interruption=os.getenv('QWEN_ALPHA_UNCERTAIN_INTERRUPTION', 'hold').strip().lower())
+    logger.info('[打断过滤] %s ｜ 不确定时%s',
+                'Jev 已开启' if receiver.interruption_filter else '已关闭，接收所有有效转写',
+                '继续汇报，可叫 Alpha 打断' if receiver.uncertain_interruption == 'hold' else '接收输入')
     logger.info('[就绪] Qwen 中文收音/播报；等待完整任务后提交 AlphaBrain；说“执行吧”可立即提交')
     if collector.parts:
         bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
@@ -497,7 +643,10 @@ async def main():
         bridge = BrainBridge(client, base_url)
         collector = TurnCollector(lambda text: bridge.submit(text, collector.last_submission), bridge.say, make_router(client),
             window_s=float(os.getenv('QWEN_ALPHA_COLLECTION_SECONDS', '2')),
-            continuation_s=float(os.getenv('QWEN_ALPHA_CONTINUATION_SECONDS', '5')))
+            continuation_s=float(os.getenv('QWEN_ALPHA_CONTINUATION_SECONDS', '5')),
+            mode=os.getenv('QWEN_ALPHA_SUBMIT_MODE', 'jev').strip().lower())
+        logger.info('[提交模式] %s', 'Jev 完整即提交，故障回退窗口' if collector.mode == 'jev'
+                    else '静音窗口与 Jev 并行，等待两者完成')
         async def reconnect():
             while True:
                 try:
