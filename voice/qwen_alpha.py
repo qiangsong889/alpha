@@ -674,51 +674,83 @@ def make_router(client):
 
 
 async def run_connection(ws, player, collector, bridge, costs, voice):
+    # 一次 WebSocket 连接的完整生命周期：配置会话 → 准备播报 → 并行运行收音/接收/播报 → 收尾。
+    # player、collector、bridge、costs 由外层跨重连保留；这里只创建属于本次连接的对象。
+
+    # 本地 VAD 上传门控；QWEN_ALPHA_LOCAL_VAD=0 时返回 None，表示连续上传全部麦克风音频。
     upload_gate = make_upload_gate()
+    # 连接建立后服务端先发 session.created；拿到会话 ID，后面用于日志和费用记录。
     created = await wait_for_event(ws, 'session.created')
+    # 发送本入口的会话配置：VAD、转写、关闭自动回答/自动打断、tools 为空等。
     await send_event(ws, 'session.update', session=session_config(voice))
+    # 等服务端确认，并取出服务端“实际生效”的配置，而不是相信本地发出去的那份。
     updated = (await wait_for_event(ws, 'session.updated'))['session']
     verify_session(updated)  # 只检查 VAD 和手动回答；不加载旧入口的业务/控制工具。
+    # 第二道保险：Qwen 只负责听和说，服务端若返回了任何工具，立即拒绝运行。
     if updated.get('tools'):
         raise QwenProtocolError('语音入口不允许配置业务工具')
+    # 播报引擎：omni 让对话模型朗读（可能改写原文），tts 用专用语音合成（原样朗读）。
     speaker = os.getenv('QWEN_ALPHA_SPEAKER', 'omni').strip().lower()
+    # 配置值写错时直接报错，不悄悄退回某个默认值。
     if speaker not in {'omni', 'tts'}:
         raise ValueError('QWEN_ALPHA_SPEAKER 必须是 omni 或 tts')
+    # 选择 tts 时创建专用 TTS 客户端（凭据、工作空间、区域、音色）；否则为 None，由 Omni 播报。
     tts = (QwenTTS(os.getenv('DASHSCOPE_API_KEY', ''), os.getenv('QWEN_WORKSPACE_ID', ''),
                    os.getenv('QWEN_REGION', 'singapore'), os.getenv('QWEN_TTS_VOICE', 'Ethan'))
            if speaker == 'tts' else None)
+    # 启动日志写明本次实际使用哪个播报引擎和音色，方便确认没有走到 Omni 的后备路径。
     logger.info('[播报引擎] %s', 'Qwen TTS / ' + tts.voice if tts else 'Omni / ' + voice)
     if tts is not None:
         try:
+            # 预先建立 TTS 连接并核对音色，第一次播报就不用再等握手。
             await tts.ready()
         except asyncio.CancelledError:
+            # 启动途中被取消（例如 Ctrl+C）：先关掉半开的 TTS 连接，再把取消继续往上传。
             await tts.close()
             raise
         except Exception as exc:
+            # 预连接失败不致命：关闭残留连接，记一条警告，第一次播报时会重新连接。
             await tts.close()
             logger.warning('[TTS预连接失败] %s；播报时再连接', exc)
 
+    # 本地人声检测（16kHz，与上传给 Qwen 的音频一致）；用于打断确认与上传门控。
     activity = SpeechActivity(sample_rate=16000)
+    # Receiver 处理服务端事件、打断和播报；会话 ID 用于日志/费用，TTS 为 None 时退回 Omni。
     receiver = Receiver(ws, player, collector, bridge, costs, created['session']['id'], activity,
+                        # 播报期间的插话是否先由 Jev 判断“是不是在对 Alpha 说”；默认开启。
                         interruption_filter=os.getenv('QWEN_ALPHA_JEV_INTERRUPTIONS', '1') == '1',
+                        # Jev 判断不了时的策略：hold 继续播报、不接收；accept 接收并打断。
                         uncertain_interruption=os.getenv('QWEN_ALPHA_UNCERTAIN_INTERRUPTION', 'hold').strip().lower(), tts=tts)
+    # 把打断过滤的实际设置打印出来，排查“为什么没被打断/被乱打断”时先看这一行。
     logger.info('[打断过滤] %s ｜ 不确定时%s',
                 'Jev 已开启' if receiver.interruption_filter else '已关闭，接收所有有效转写',
                 '继续汇报，可叫 Alpha 打断' if receiver.uncertain_interruption == 'hold' else '接收输入')
+    # 准备完成，提示提交方式。
     logger.info('[就绪] Qwen 中文收音/播报；等待完整任务后提交 AlphaBrain；说“执行吧”可立即提交')
+    # collector 跨重连保留：上一条连接断开时若还有未提交的话，提醒用户补充或确认提交，不自动执行。
     if collector.parts:
         bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
+    # 按实际上传的音频时长估算本次连接的收音费用。
     audio_costs = AudioCostMeter(created['session']['id'], os.getenv('QWEN_REGION', 'singapore'))
     try:
+        # TaskGroup：下面五个任务同时运行；任何一个出错或结束，其余全部取消，整个连接一起退出。
         async with asyncio.TaskGroup() as tasks:
+            # ① 读麦克风 → （经过门控）上传给 Qwen；每发送一段就计入收音费用。
             tasks.create_task(send_microphone(ws, activity, on_sent=audio_costs.sent, upload_gate=upload_gate))
+            # ② 逐条接收 Qwen 的事件（开始/停止说话、转写……）；连接关闭时抛出 SessionEnded。
             tasks.create_task(receiver.run())
+            # ③ 播报期间持续观察本地 VAD，判断插话是否足够持续，决定暂停/恢复/打断。
             tasks.create_task(receiver.confirm_speech())
+            # ④ 等大脑的回答就绪，在用户没在说话时依次播报。
             tasks.create_task(receiver.speak())
+            # ⑤ 到时间（默认 1800 秒，Qwen 单会话上限）抛出 SessionEnded，让外层重连一条新会话。
             tasks.create_task(rotate_session(float(os.getenv('QWEN_SESSION_SECONDS', '1800'))))
     finally:
+        # 不管是正常轮换、断线还是出错，都把累计的收音费用写入账本。
         audio_costs.flush()
+        # 打印各组件的费用汇总。
         log_summary()
+        # 关闭 Receiver：取消还在运行的播放、输入分类和 TTS 任务，再关闭 TTS 连接。
         await receiver.close()
 
 
