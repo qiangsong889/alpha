@@ -673,6 +673,53 @@ def make_router(client):
                            min_confidence=float(os.getenv('JEV_MIN_CONFIDENCE', '0.8')))
 
 
+def input_mode():
+    mode = os.getenv('QWEN_ALPHA_INPUT', 'omni').strip().lower()
+    if mode not in {'omni', 'asr'}:
+        raise ValueError('QWEN_ALPHA_INPUT 必须是 omni 或 asr')
+    return mode
+
+
+async def run_asr_connection(player, collector, bridge, costs):
+    """独立 ASR + 专用 TTS；此路径完全不建立 Omni 连接、不启用上传门控。"""
+    from voice.asr_client import AsrClient, websocket_url as asr_url
+    from voice.asr_input import AsrInput, SileroActivity
+    from voice.segmenter import Segmenter, SileroVAD, DEFAULT_MODEL
+
+    region = os.getenv('QWEN_REGION', 'singapore')
+    key, workspace = os.getenv('DASHSCOPE_API_KEY', ''), os.getenv('QWEN_WORKSPACE_ID', '')
+    url = asr_url(workspace, region)
+    detector = await asyncio.to_thread(SileroVAD, os.getenv('SILERO_MODEL_PATH') or DEFAULT_MODEL)
+    segmenter = Segmenter(detector)
+    tts = QwenTTS(key, workspace, region, os.getenv('QWEN_TTS_VOICE', 'Ethan'))
+    receiver = Receiver(None, player, collector, bridge, costs, 'local-asr', SileroActivity(),
+        interruption_filter=os.getenv('QWEN_ALPHA_JEV_INTERRUPTIONS', '1') == '1',
+        uncertain_interruption=os.getenv('QWEN_ALPHA_UNCERTAIN_INTERRUPTION', 'hold').strip().lower(), tts=tts)
+    adapter = AsrInput(receiver, segmenter, region=region)
+    client = AsrClient(url, key, adapter.result, notify=adapter.notify)
+    adapter.client = client
+    try:
+        for name, service in (('ASR', client), ('TTS', tts)):
+            try:
+                await service.ready()
+            except Exception as exc:
+                await service.close()
+                logger.warning('[%s预连接失败] %s；首次使用时重连', name, type(exc).__name__)
+        logger.info('[输入路径] asr ｜ Silero ONNX / 静音600ms / 最长15秒 ｜ 串行手动ASR')
+        logger.info('[播报引擎] Qwen TTS / %s（ASR模式不使用Omni播报）', tts.voice)
+        if collector.parts:
+            bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
+        async with asyncio.TaskGroup() as tasks:
+            tasks.create_task(client.run())
+            tasks.create_task(adapter.microphone())
+            tasks.create_task(receiver.confirm_speech())
+            tasks.create_task(receiver.speak())
+    finally:
+        await client.close()
+        await receiver.close()
+        log_summary()
+
+
 async def run_connection(ws, player, collector, bridge, costs, voice):
     # 一次 WebSocket 连接的完整生命周期：配置会话 → 准备播报 → 并行运行收音/接收/播报 → 收尾。
     # player、collector、bridge、costs 由外层跨重连保留；这里只创建属于本次连接的对象。
@@ -760,7 +807,10 @@ async def main():
     key = os.getenv('DASHSCOPE_API_KEY', '').strip()
     if not key:
         raise SystemExit('请在 .env 设置 DASHSCOPE_API_KEY 和 QWEN_WORKSPACE_ID')
-    url = websocket_url(os.getenv('QWEN_WORKSPACE_ID', ''), os.getenv('QWEN_REGION', 'singapore'))
+    mode = input_mode()
+    url = (websocket_url(os.getenv('QWEN_WORKSPACE_ID', ''), os.getenv('QWEN_REGION', 'singapore'))
+           if mode == 'omni' else None)
+    logger.info('[输入路径] %s', mode)
     player = StreamingPlayer()
     costs = CostTracker(os.getenv('QWEN_REGION', 'singapore'))
     async with httpx.AsyncClient() as client:
@@ -779,9 +829,12 @@ async def main():
         async def reconnect():
             while True:
                 try:
-                    async with connect(url, additional_headers={'Authorization': f'Bearer {key}'},
-                                       open_timeout=30, max_size=16 * 1024 * 1024) as ws:
-                        await run_connection(ws, player, collector, bridge, costs, os.getenv('QWEN_VOICE', 'Tina'))
+                    if mode == 'asr':
+                        await run_asr_connection(player, collector, bridge, costs)
+                    else:
+                        async with connect(url, additional_headers={'Authorization': f'Bearer {key}'},
+                                           open_timeout=30, max_size=16 * 1024 * 1024) as ws:
+                            await run_connection(ws, player, collector, bridge, costs, os.getenv('QWEN_VOICE', 'Tina'))
                 except Exception as exc:
                     if not reconnectable(exc):
                         raise

@@ -193,11 +193,13 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['turns'][0]['effects'].get('create_reminder_executions', 0), 0)
         self.assertEqual(result['turns'][0]['executions'], [])
 
-    async def test_default_difference_does_not_hide_gateway_duplicate_bug(self):
+    async def test_default_difference_is_blocked_by_real_gateway_in_eval(self):
         args = {'title': '开会', 'local_time': '2026-10-17T08:00:00', 'minutes_before': 0}
-        result, _ = await self.run_fixture('safety-03', reply(calls=[('create_reminder', args)]), reply('提醒已设。'))
-        self.assertFalse(result['passed'])
-        self.assertEqual(result['turns'][0]['effects']['create_reminder_executions'], 1)
+        result, _ = await self.run_fixture('safety-03', reply(calls=[('create_reminder', args)]),
+                                         reply('此前已有相同提醒，本次没有执行，要重复创建吗？'))
+        self.assertTrue(result['passed'], result)
+        self.assertEqual(result['turns'][0]['effects'].get('create_reminder_executions', 0), 0)
+        self.assertEqual(result['turns'][0]['executions'], [])
 
     async def test_unknown_blocked_and_optional_query_allowed(self):
         result, _ = await self.run_fixture('safety-04',

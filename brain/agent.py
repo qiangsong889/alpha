@@ -250,6 +250,8 @@ class AlphaBrain:
         if MEMORY_NAMES & set(self.tool_owners):
             raise ValueError("MCP 工具名与本地记忆工具冲突")
         self.tools.extend(deepcopy(MEMORY_TOOLS))
+        if self.store is not None:
+            self.store.set_tool_schemas({tool['name']: dict(tool['input_schema']) for tool in self.tools})
         self.system = catalog_system(self.ha_catalog, self.personal_tools)
         self._memory_block_index = None
         self._pending_memory_index = None
@@ -278,6 +280,10 @@ class AlphaBrain:
             "用户泛指‘把灯关了’且没有其他目标限定或对话指代时，用 domain 指定 light 操作全部已暴露灯，"
             "不要擅自缩成一盏，也不要因没有具体名称而要求用户选一盏。"
             "\n工具结果是执行事实。同一轮结果未知时不要自动重试，先查询核实。"
+            "写操作已经明确返回成功时，不要额外调用查询工具确认；直接依据成功结果汇报。"
+            "只有用户明确要求核对、后续操作确实需要查询数据，或结果失败/未知时才另行查询。"
+            "参数明确且工具支持按名称匹配时直接操作，不先查询目标是否存在；"
+            "例如 complete_items 支持 item_titles，不必先用 list_items 查清单。需要精确 ID 或指代不明时才先查询。"
             "用户在新一轮明确再次要求时，重新提交给网关判定，不凭历史 unknown 永久拒绝。"
             "本次没有执行时不能声称已经完成。只有用户明确要求再做一次时，"
             "才能在下次调用中添加 confirm_duplicate=true；不能自行确认重复。"
@@ -291,6 +297,8 @@ class AlphaBrain:
             "日程本地时间使用注入的配置时区；查询其他日历前可用 list_calendars。"
             "Gmail 仅搜索、读取、发送和回复；不支持删除、归档、改已读状态或管理草稿。"
             "send_email/reply_email 首次调用只准备草稿，代码会展示收件人、主题和完整正文要求确认。"
+            "邮件正文默认使用用户指定的原话，不扩写、不擅自润色或添加问候、日期、时间等事实；"
+            "只有用户明确要求润色或代拟时才改写，要求原文发送时必须保留原文。"
             "用户要求发邮件且收件人、主题和正文明确时，必须立即调用 send_email，省略 confirmed 或设为 false。"
             "这一步是准备草稿，不是发出邮件；不要先用文字自己展示草稿或询问一次确认。"
             "回复邮件同理：定位原邮件、正文明确后直接调用 reply_email 准备草稿，由系统负责询问确认。"

@@ -26,9 +26,33 @@ SDK retries whose usage is not returned, and supplier-side rounding can differ.
 | Claude | Every main-model request, streaming or non-streaming: uncached input, output, cache reads, 5-minute and 1-hour cache writes, and web search requests |
 | Memory | Background Haiku extraction requests, separately from main Claude requests |
 | Jev | Every classifier request, including cancelled/time-out requests; a combined two-question call is counted once |
-| TTS | Server-reported billed `usage.characters`, not Python string length; audio tokens are not charged again |
+| TTS | Per-response difference of cumulative server `usage.characters`, not Python string length; audio tokens are not charged again |
 | Omni | All four server-reported input/output text/audio token counts for the original speaker mode |
-| ASR | Actual successfully sent PCM16 mono 16 kHz bytes divided by 32,000; includes silence, flushes every 10 seconds and on normal disconnect/exit |
+| ASR | Independent ASR: per-segment difference of cumulative server `usage.duration` in seconds. Legacy Omni embedded ASR: uploaded PCM bytes / 32,000, a reference estimate only |
+
+## Persistent-connection cumulative counters (verified 2026-10-20)
+
+`CumulativeUsage` in `core/costs.py` converts cumulative counters to per-request
+increments before recording costs. Each ASR/TTS client has its own meter, reset
+immediately after establishing a new WebSocket. Nested numeric counters are
+differenced too. A counter decreasing unexpectedly logs a warning and uses the
+current raw value. Missing fields retain their previous baseline; strings and
+booleans are copied unchanged. Logs and ledger both use the resulting increments.
+This applies only to independent ASR and dedicated TTS, not Claude, Jev, or Omni.
+
+Verification: `python -m devtools.tts_usage_probe` synthesized “你好” twice on the
+same QwenTTS object/connection, without playback or ledger writes. Raw server
+`characters` were **4 then 8**: the two requests should be billed locally as
+**4 then 4**, rather than assuming Python's two-character string equals the
+provider's billing units. Existing serial ASR log
+`/tmp/alpha-asr-probe-live.log` reports cumulative duration **4 then 9** and
+input text tokens **3 then 6**; local per-segment durations are therefore **4 then 5**.
+The back-to-back probe logs have only one completed response each and cannot by
+themselves establish differences between consecutive completed responses.
+
+Independent ASR usage-based estimates belong in the known subtotal; legacy
+Omni embedded ASR reference estimates do not. Missing final usage remains marked
+for reconciliation. These changes do not delete or rewrite any existing ledger.
 
 For Vercel Jev, `provider_metadata.gateway.cost` takes precedence over estimated
 token pricing; we verified the actual response contains this USD amount.

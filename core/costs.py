@@ -8,11 +8,56 @@ import logging
 import os
 import sqlite3
 import time
+from copy import deepcopy
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
 logger = logging.getLogger('alpha.costs')
+
+
+class CumulativeUsage:
+    """每条持久连接一个实例，把累计 JSON 用量换成本次用量。
+
+    缺失字段不输出，也不清除此前的计数基线；返回值和基线均不引用调用方的字典。
+    bool 是状态而非计数；列表等非计数字段原样复制。
+    """
+    def __init__(self):
+        self.last = None
+
+    def reset(self):
+        self.last = None
+
+    def delta(self, usage: dict) -> dict:
+        def numeric(value):
+            return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+        def subtract(current, previous, path):
+            if isinstance(current, dict):
+                old = previous if isinstance(previous, dict) else {}
+                return {key: subtract(value, old.get(key), f'{path}.{key}' if path else key)
+                        for key, value in current.items()}
+            if numeric(current) and numeric(previous):
+                difference = current - previous
+                if difference < 0:
+                    logger.warning('[累计用量重置] %s：%s → %s，使用本次原始值', path, previous, current)
+                    return current
+                return difference
+            return deepcopy(current)
+
+        def merge(previous, current):
+            if isinstance(previous, dict) and isinstance(current, dict):
+                result = deepcopy(previous)
+                for key, value in current.items():
+                    result[key] = merge(previous.get(key), value)
+                return result
+            return deepcopy(current)
+
+        result = subtract(usage, self.last, '')
+        self.last = merge(self.last, usage)
+        return result
+
+
 MILLION = Decimal(1000000)
 # input/output/cache read per million; cache write uses 1.25x/2x input.
 CLAUDE = {
@@ -98,12 +143,14 @@ def quote(component, model, usage, region='singapore'):
                 return Decimal(0), 'missing_modality_usage'
             return sum((Decimal(n)*Decimal(rate) for n, rate in zip(values, OMNI[region])), Decimal(0))/MILLION, ''
         if component == 'ASR':
-            # Embedded Omni transcription does not return authoritative billable duration.
-            seconds = Decimal(str(u['sent_audio_seconds']))
+            # 独立 ASR 的 completed.usage.duration 是服务端报告的秒数。
+            # Omni 内嵌转写仍只能按上传时长参考估算，两者不能混为一谈。
+            reported = 'duration' in u
+            seconds = Decimal(str(u['duration'] if reported else u['sent_audio_seconds']))
             if not seconds.is_finite() or seconds < 0:
                 raise ValueError('invalid duration')
             rate = {'singapore': '.00009', 'beijing': '.000047'}[region]
-            return seconds*Decimal(rate), 'embedded_asr_billing_unverified'
+            return seconds*Decimal(rate), '' if reported else 'embedded_asr_billing_unverified'
     except (KeyError, ValueError, TypeError, ArithmeticError):
         return Decimal(0), 'invalid_usage_or_price'
     return Decimal(0), 'unknown_component'
@@ -169,7 +216,7 @@ def record_cost(component, model, usage=None, *, event_id=None, region='singapor
                 logger.info('[费用][%s] 未计价：%s', component, missing)
             else:
                 logger.info('[费用][%s] %s $%.8f%s', component,
-                            '参考估算' if component == 'ASR' else '估算/接口费用', usd,
+                            '参考估算' if missing == 'embedded_asr_billing_unverified' else '估算/接口费用', usd,
                             ' ｜ 待核对：' + missing if missing else '')
         except Exception:
             logger.exception('[费用] 账本写入失败，统计不完整')
@@ -190,7 +237,9 @@ def log_summary():
     totals = cost_summary()
     if not totals:
         return
-    known = sum((Decimal(v['usd']) for k, v in totals.items() if k != 'ASR'), Decimal(0))
+    # 包含独立 ASR 的服务端用量费用，排除旧 Omni 的 ASR 参考估算。
+    known = sum((Decimal(usd) for usd, reason in _ledger.db.execute(
+        'SELECT usd, reason FROM cost_events') if reason != 'embedded_asr_billing_unverified'), Decimal(0))
     unknown = sum(v['unpriced'] for v in totals.values())
     breakdown = ' ｜ '.join(f"{k} ${Decimal(v['usd']):.6f}" for k, v in sorted(totals.items()))
     logger.info('[费用账本累计] %s ｜ 已知小计 $%.6f（不含 ASR参考估算）｜ 待核对 %d 笔；非实际扣费',

@@ -5,7 +5,7 @@ import json
 import logging
 from urllib.parse import urlencode
 from uuid import uuid4
-from core.costs import record_cost, log_summary
+from core.costs import CumulativeUsage, record_cost, log_summary
 
 from websockets.asyncio.client import connect
 
@@ -21,6 +21,7 @@ class QwenTTS:
                     + urlencode({'model': 'qwen3-tts-flash-realtime'}))
         self.key, self.voice, self.ws = key, voice, None
         self.region = region
+        self.usage_meter = CumulativeUsage()
 
     async def send(self, kind, **fields):
         await self.ws.send(json.dumps({'event_id': uuid4().hex, 'type': kind, **fields}))
@@ -37,6 +38,7 @@ class QwenTTS:
             return
         self.ws = await connect(self.url, additional_headers={'Authorization': f'Bearer {self.key}'},
                                 open_timeout=15, max_size=16 * 1024 * 1024)
+        self.usage_meter.reset()
         async with asyncio.timeout(15):
             while (await self.receive())['type'] != 'session.created':
                 pass
@@ -68,8 +70,9 @@ class QwenTTS:
                         response = event.get('response', {})
                         if response.get('status') not in {None, 'completed'}:
                             raise RuntimeError('TTS 合成没有完成')
-                        logger.info('[TTS用量] %s', json.dumps(response.get('usage', {}), ensure_ascii=False))
-                        record_cost('TTS', 'qwen3-tts-flash-realtime', response.get('usage'),
+                        usage = self.usage_meter.delta(response.get('usage') or {})
+                        logger.info('[TTS用量] %s', json.dumps(usage, ensure_ascii=False))
+                        record_cost('TTS', 'qwen3-tts-flash-realtime', usage,
                                     event_id=cost_id, region=self.region)
                         log_summary()
                         completed = True

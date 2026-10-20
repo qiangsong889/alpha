@@ -1,6 +1,9 @@
 import asyncio
 import json
 import unittest
+from unittest.mock import patch
+
+from core.costs import CostLedger, record_cost
 
 from voice.asr_client import AsrClient, PREFIX
 from voice.segmenter import SegmentReady
@@ -44,7 +47,12 @@ class Socket:
         async def complete():
             if self.gate is not None:
                 await self.gate.wait()
-            await self.events.put({'type': PREFIX + 'completed', 'transcript': f'文字-{self.label}'})
+            event = {'type': PREFIX + 'completed', 'transcript': f'文字-{self.label}'}
+            if self.behavior == 'cumulative':
+                self.completion_count = getattr(self, 'completion_count', 0) + 1
+                event['usage'] = {'duration': 39 + 2 * self.completion_count,
+                                  'output_tokens_details': {'audio_tokens': 726 + 8 * self.completion_count}}
+            await self.events.put(event)
         self.tasks.append(asyncio.create_task(complete()))
 
     async def close(self):
@@ -55,6 +63,28 @@ class Socket:
 
 
 class AsrClientTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cumulative_usage_ledger_and_reset_on_new_connection(self):
+        client, sockets, results, trace = await self.make_client([('cumulative', None), ('cumulative', None)])
+        ledger = CostLedger(':memory:')
+        self.addCleanup(ledger.close)
+        async def notify(kind, seg_id, usage):
+            if kind == 'usage':
+                record_cost('ASR', 'qwen3-asr-flash-realtime', usage, event_id=seg_id)
+        client.notify = notify
+        with patch('core.costs._ledger', ledger):
+            await client.submit(segment('one'))
+            await client.submit(segment('two'))
+            await asyncio.wait_for(client.queue.join(), 1)
+            self.assertEqual(len(sockets), 1)
+            await client.close()
+            await client.submit(segment('new-connection'))
+            await asyncio.wait_for(client.queue.join(), 1)
+        usages = [json.loads(row[0]) for row in ledger.db.execute('SELECT usage FROM cost_events ORDER BY rowid')]
+        self.assertEqual([u['duration'] for u in usages], [41, 2, 41])
+        self.assertEqual([u['output_tokens_details']['audio_tokens'] for u in usages], [734, 8, 734])
+        self.assertEqual(ledger.summary()['ASR'], {'usd': '0.00756', 'unpriced': 0, 'events': 3})
+        self.assertEqual(len(sockets), 2)
+
     async def make_client(self, behaviors, timeout=.3):
         trace, sockets, results = [], [], []
         async def emit(result):
@@ -116,3 +146,34 @@ class AsrClientTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.wait_for(client.queue.join(), 1)
         self.assertEqual(sockets, [])
         self.assertEqual(results[0].kind, 'failed')
+
+    async def test_ready_preconnect_and_commit_notification_precedes_result(self):
+        client, sockets, results, trace = await self.make_client([('ok', None)])
+        notices = []
+        async def notify(kind, seg_id, payload):
+            notices.append((kind, seg_id, payload))
+        client.notify = notify
+        await client.ready()
+        self.assertEqual(len(sockets), 1)
+        self.assertEqual(results, [])
+        await client.submit(segment('local'))
+        await asyncio.wait_for(client.queue.join(), 1)
+        self.assertEqual([n[:2] for n in notices], [('uploading', 'local'), ('committed', 'local'), ('usage', 'local')])
+        self.assertEqual(results[0].seg_id, 'local')
+        self.assertEqual(len(sockets), 1)
+
+    async def test_empty_completed_still_reports_usage_before_failed(self):
+        client, sockets, results, trace = await self.make_client([('hang', None)])
+        notices = []
+        async def notify(kind, seg_id, payload):
+            notices.append((kind, payload))
+        client.notify = notify
+        await client.submit(segment('empty'))
+        while not sockets:
+            await asyncio.sleep(0)
+        await sockets[0].committed.wait()
+        await sockets[0].events.put({'type': PREFIX + 'completed', 'transcript': '', 'usage': {'duration': 2}})
+        await asyncio.wait_for(client.queue.join(), 1)
+        self.assertEqual(notices, [('uploading', None), ('committed', None), ('usage', {'duration': 2})])
+        self.assertEqual(results[0].kind, 'failed')
+        self.assertTrue(sockets[0].closed)

@@ -7,6 +7,9 @@ import sqlite3
 import time
 from typing import IO, Any, Literal, cast
 from uuid import uuid4
+from copy import deepcopy
+
+from integrations.tool_arguments import comparison_arguments
 
 
 OperationStatus = Literal[
@@ -44,6 +47,7 @@ class OperationStore:
     def __init__(self, db_path: str | Path):
         self._db_path = str(db_path)
         self._process_lock: IO[str] | None = None
+        self._tool_schemas: dict[str, dict[str, Any]] = {}
         self._db = sqlite3.connect(str(db_path))
         self._db.row_factory = sqlite3.Row
         with self._db:
@@ -128,18 +132,32 @@ class OperationStore:
         row = self._db.execute("SELECT * FROM operations WHERE id = ?", (op_id,)).fetchone()
         return self._from_row(row) if row is not None else None
 
+    def set_tool_schemas(self, schemas: dict[str, dict[str, Any]]) -> None:
+        """使用当前加载的目录比较新旧记录，不修改历史参数或真实调用。"""
+        self._tool_schemas = deepcopy(schemas)
+
+    def _recent_matching(self, name: str, arguments: dict[str, Any], status: OperationStatus,
+                         within_s: float) -> Operation | None:
+        if within_s < 0:
+            raise ValueError("within_s 不能为负数")
+        schema = self._tool_schemas.get(name, {})
+        expected = _arguments_json(comparison_arguments(arguments, schema))
+        # 不能先按原始 JSON 过滤，否则省略默认值的旧记录仍然查不到。
+        rows = self._db.execute("""
+            SELECT * FROM operations WHERE name=? AND status=? AND updated_at>=?
+            ORDER BY updated_at DESC, rowid DESC
+        """, (name, status, time.time() - within_s))
+        for row in rows:
+            op = self._from_row(row)
+            if _arguments_json(comparison_arguments(op.arguments, schema)) == expected:
+                return op
+        return None
+
     def recent_succeeded(
         self, name: str, arguments: dict[str, Any], within_s: float = 600,
     ) -> Operation | None:
         """找时间窗口内最近成功的相同操作；只是查询记录，不自动拦截或重放操作。"""
-        if within_s < 0:
-            raise ValueError("within_s 不能为负数")
-        row = self._db.execute("""
-            SELECT * FROM operations
-            WHERE name = ? AND arguments = ? AND status = 'succeeded' AND updated_at >= ?
-            ORDER BY updated_at DESC, rowid DESC LIMIT 1
-        """, (name, _arguments_json(arguments), time.time() - within_s)).fetchone()
-        return self._from_row(row) if row is not None else None
+        return self._recent_matching(name, arguments, "succeeded", within_s)
 
     def recover_on_startup(self) -> list[Operation]:
         """应用启动时显式调用：遗留 executing 改为 unknown，返回更新后的记录，不自动重试。"""
@@ -155,13 +173,7 @@ class OperationStore:
 
     def recent_unknown(self, name: str, arguments: dict[str, Any], within_s: float = 600) -> Operation | None:
         """有界的重提保护；过期不等于执行失败，原 unknown 记录仍保留。"""
-        if within_s < 0:
-            raise ValueError("within_s 不能为负数")
-        row = self._db.execute("""
-            SELECT * FROM operations WHERE name=? AND arguments=? AND status='unknown' AND updated_at>=?
-            ORDER BY updated_at DESC, rowid DESC LIMIT 1
-        """, (name, _arguments_json(arguments), time.time() - within_s)).fetchone()
-        return self._from_row(row) if row is not None else None
+        return self._recent_matching(name, arguments, "unknown", within_s)
 
     def acquire_process_lock(self) -> None:
         """生产入口在恢复前独占操作库，防止把另一进程的 executing 当成崩溃遗留。"""

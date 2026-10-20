@@ -1,17 +1,47 @@
 import asyncio
 import base64
 import json
+from decimal import Decimal
 from types import SimpleNamespace as NS
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
 from voice.qwen_tts import QwenTTS
 from voice.qwen_alpha import Receiver
+from core.costs import CostLedger
 
 
 class TTSTests(IsolatedAsyncioTestCase):
     def service(self):
         return QwenTTS('fake-key', 'workspace', voice='Ethan')
+
+    async def test_cumulative_usage_is_differenced_in_ledger_and_log_and_reset_on_reconnect(self):
+        def socket(characters):
+            events = [{'type': 'session.created'}, {'type': 'session.updated', 'session': {'voice': 'Ethan'}}]
+            events += [{'type': 'response.done', 'response': {'status': 'completed', 'usage': {
+                'characters': n, 'output_tokens_details': {'audio_tokens': n * 3}}}} for n in characters]
+            return NS(send=AsyncMock(), recv=AsyncMock(side_effect=[json.dumps(e) for e in events]), close=AsyncMock())
+        first, second = socket([4, 8]), socket([2])
+        service = self.service()
+        self.addAsyncCleanup(service.close)
+        ledger = CostLedger(':memory:')
+        self.addCleanup(ledger.close)
+        with patch('core.costs._ledger', ledger), \
+             patch('voice.qwen_tts.connect', AsyncMock(side_effect=[first, second])) as connect, \
+             patch('voice.qwen_tts.logger.info') as log:
+            for _ in range(2):
+                self.assertEqual([part async for part in service.stream('你好')], [])
+            self.assertEqual(connect.await_count, 1)
+            await service.close()
+            self.assertEqual([part async for part in service.stream('好')], [])
+        usages = [json.loads(row[0]) for row in ledger.db.execute('SELECT usage FROM cost_events ORDER BY rowid')]
+        self.assertEqual([u['characters'] for u in usages], [4, 4, 2])
+        self.assertEqual([u['output_tokens_details']['audio_tokens'] for u in usages], [12, 12, 6])
+        self.assertEqual([json.loads(c.args[1])['characters'] for c in log.call_args_list
+                          if c.args[0] == '[TTS用量] %s'], [4, 4, 2])
+        summary = ledger.summary()['TTS']
+        self.assertEqual(Decimal(summary['usd']), Decimal('0.00013'))
+        self.assertEqual((summary['unpriced'], summary['events']), (0, 3))
 
     async def test_exact_text_and_reuse(self):
         events = [

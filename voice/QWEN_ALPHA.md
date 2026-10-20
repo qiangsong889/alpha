@@ -26,6 +26,41 @@ From `alpha/`, in two terminals, using **Alpha's** environment in both:
 
 Existing `.env` settings apply: `DASHSCOPE_API_KEY`, `QWEN_WORKSPACE_ID`, `QWEN_REGION`, `QWEN_VOICE`, `REALTIME_INPUT_DEVICE` and `REALTIME_OUTPUT_DEVICE`. Brain authentication, reminder timezone and Google credentials remain unchanged. Auto memory still requires `ALPHA_AUTO_MEMORY=1`. The default brain URL is `http://127.0.0.1:8765`; override with `ALPHA_BRAIN_URL`.
 
+## Input switch: Omni or independent ASR
+
+The default remains `QWEN_ALPHA_INPUT=omni`, preserving Omni transcription and its upload gate.
+Try the independent input without editing `.env`:
+
+```bash
+QWEN_ALPHA_INPUT=asr ./start-qwen
+# Restore the original input:
+QWEN_ALPHA_INPUT=omni ./start-qwen
+```
+
+ASR mode uses Silero ONNX (160ms confirmed onset, 400ms pre-roll, 608ms silence)
+and `qwen3-asr-flash-realtime` in manual mode. It requires the ONNX runtime and
+model installed during A2; see [setup and microphone checks](../devtools/SEGMENT_PROBE.md).
+`SILERO_MODEL_PATH` can override `data/models/silero_vad.onnx`.
+ASR preconnects before opening the microphone. Only completed local segments are uploaded,
+one at a time; no next-segment append is sent before the previous completed/error/timeout.
+The local microphone continues collecting while ASR is busy. A failed segment ends with
+an empty transcript so it cannot block later inputs. Failed audio is not automatically retried.
+
+Local speech onset ducks playback first. Silero-confirmed speech lasting 400ms pauses it;
+the existing Jev addressed-to-Alpha check then either restores playback or confirms interruption.
+Fifteen-second cuts keep collection open until real silence, including a very short final tail.
+`TurnCollector` and AlphaBrain are unchanged. ASR mode always uses dedicated Qwen TTS
+(`QWEN_TTS_VOICE`, default Ethan), even if `QWEN_ALPHA_SPEAKER=omni`; no Omni socket
+is opened. The original speaker setting still applies when switching back to Omni input.
+`QWEN_VAD`, `QWEN_SILENCE_MS`, and the Omni upload gate do not control ASR mode.
+
+Independent ASR cost records use the server's `completed.usage.duration` in seconds,
+including empty final transcripts. These are provider-reported usage multiplied by the
+configured regional price, not actual billing receipts. Missing final usage remains pending
+verification. Legacy Omni ASR reference estimates remain separate and excluded from the
+known subtotal; independent ASR usage is included. No wall-clock listening estimate is
+added in ASR mode.
+
 Optional trial settings:
 
 ```dotenv

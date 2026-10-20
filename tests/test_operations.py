@@ -10,6 +10,42 @@ from integrations.tool_policy import get_policy
 
 
 class OperationTests(unittest.TestCase):
+    def test_default_arguments_match_old_and_new_records_in_both_directions(self):
+        base = {'title': '开会', 'local_time': '2026-10-17T08:00:00'}
+        schema = {'create_reminder': {'type': 'object', 'properties': {
+            'minutes_before': {'type': 'integer', 'default': 0}}}}
+        # 记录在注册schema之前写入，模拟已有数据库。
+        old = self.create(base)
+        self.succeed(old)
+        self.store.set_tool_schemas(schema)
+        self.assertEqual(self.store.recent_succeeded(old.name, {**base, 'minutes_before': 0}).id, old.id)
+        self.assertEqual(self.store.get(old.id).arguments, base)
+        self.assertIsNone(self.store.recent_succeeded(old.name, {**base, 'minutes_before': 5}))
+        explicit = self.create({**base, 'minutes_before': 0})
+        self.succeed(explicit)
+        self.assertEqual(self.store.recent_succeeded(old.name, base).id, explicit.id)
+        self.assertEqual(self.store.get(explicit.id).arguments['minutes_before'], 0)
+
+    def test_unknown_default_arguments_also_match(self):
+        self.store.set_tool_schemas({'create_reminder': {'properties': {'minutes_before': {'default': 0}}}})
+        op = self.create({'title': '开会', 'minutes_before': 0})
+        self.store.transition(op.id, 'pending', 'approved')
+        self.store.transition(op.id, 'approved', 'executing')
+        self.store.transition(op.id, 'executing', 'unknown')
+        self.assertEqual(self.store.recent_unknown(op.name, {'title': '开会'}).id, op.id)
+
+    def test_comparison_does_not_drop_required_unknown_keys_or_confuse_bool_and_zero(self):
+        from integrations.tool_arguments import comparison_arguments
+        schema = {'required': ['required'], 'properties': {
+            'required': {'default': 0}, 'optional': {'default': 0},
+            'items': {'items': {'properties': {'flag': {'default': False}}}}}}
+        args = {'required': 0, 'optional': False, 'unknown': 0,
+                'items': [{'name': '牛奶', 'flag': False}, {'name': '鸡蛋'}, {'name': '牛奶'}]}
+        result = comparison_arguments(args, schema)
+        self.assertEqual(result, {'required': 0, 'optional': False, 'unknown': 0,
+                                 'items': [{'name': '牛奶'}, {'name': '鸡蛋'}, {'name': '牛奶'}]})
+        self.assertFalse(args['items'][0]['flag'])
+
     def test_process_lock_prevents_competing_recovery_and_releases_on_close(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "operations.db"

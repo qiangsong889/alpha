@@ -1013,6 +1013,27 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([row["status"] for row in rows], ["succeeded", "cancelled"])
         self.assertNotEqual(rows[0]["turn_id"], rows[1]["turn_id"])
 
+    async def test_reminder_default_from_loaded_schema_deduplicates_and_preserves_real_args(self):
+        self.personal.append({'name': 'create_reminder', 'input_schema': {
+            'type': 'object', 'properties': {'minutes_before': {'type': 'integer', 'default': 0}}}})
+        await self.brain.start()
+        args = {'title': '开会', 'local_time': '2026-10-17T08:00:00'}
+        await self.invoke_tool('create_reminder', args)
+        result = await self.invoke_tool('create_reminder', {**args, 'minutes_before': 0})
+        self.assertIn('本次没有执行', result['content'])
+        self.executor.assert_awaited_once_with('create_reminder', args)
+        # 明确要求重复时仍然可以执行，schema规范化不改变真实参数。
+        await self.invoke_tool('create_reminder', {**args, 'minutes_before': 0, 'confirm_duplicate': True})
+        self.executor.assert_awaited_with('create_reminder', {**args, 'minutes_before': 0})
+        self.assertEqual(self.executor.await_count, 2)
+
+    async def test_success_query_and_verbatim_email_rules_are_in_system(self):
+        await self.brain.start()
+        rules = self.brain.system[0]['text']
+        self.assertIn('不要额外调用查询工具确认', rules)
+        self.assertIn('不必先用 list_items', rules)
+        self.assertIn('邮件正文默认使用用户指定的原话，不扩写', rules)
+
     async def test_explicit_duplicate_control_is_removed_before_executor(self):
         self.add_catalog_tools("create_reminder")
         await self.brain.start()

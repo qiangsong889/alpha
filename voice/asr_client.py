@@ -6,13 +6,23 @@ from dataclasses import dataclass
 import base64
 import json
 import math
+import re
 import time
 from uuid import uuid4
 
 from websockets.asyncio.client import connect
 from voice.segmenter import SegmentReady
+from core.costs import CumulativeUsage
 
 PREFIX = 'conversation.item.input_audio_transcription.'
+MODEL = 'qwen3-asr-flash-realtime'
+
+
+def websocket_url(workspace, region):
+    regions = {'singapore': 'ap-southeast-1', 'beijing': 'cn-beijing'}
+    if region not in regions or not re.fullmatch(r'[A-Za-z0-9-]+', workspace):
+        raise ValueError('需要有效的 QWEN_WORKSPACE_ID 和 QWEN_REGION=singapore|beijing')
+    return f'wss://{workspace}.{regions[region]}.maas.aliyuncs.com/api-ws/v1/realtime?model={MODEL}'
 
 
 @dataclass(frozen=True)
@@ -26,13 +36,27 @@ class AsrEvent:
 
 
 class AsrClient:
-    def __init__(self, url, key, emit, *, timeout_s=5, queue_size=8, connector=connect):
+    def __init__(self, url, key, emit, *, timeout_s=5, queue_size=8, connector=connect, notify=None):
         if not key or not math.isfinite(timeout_s) or timeout_s <= 0 or queue_size <= 0:
             raise ValueError('超时和队列容量必须大于零')
         self.url, self.key, self.emit = url, key, emit
         self.timeout_s, self.connector = timeout_s, connector
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
         self.ws = self.reader = self.incoming = None
+        self.notify = notify
+        self.usage_meter = CumulativeUsage()
+
+    async def ready(self):
+        """开始收音前预连接；失败时关闭半开的连接，后续段落仍可重新连接。"""
+        try:
+            await self._ready()
+        except BaseException:
+            await self.close()
+            raise
+
+    async def _notify(self, kind, seg_id, payload=None):
+        if self.notify is not None:
+            await self.notify(kind, seg_id, payload)
 
     async def submit(self, segment: SegmentReady):
         await self.queue.put((segment, time.perf_counter()))
@@ -69,6 +93,7 @@ class AsrClient:
         async with asyncio.timeout(self.timeout_s):
             self.ws = await self.connector(self.url, additional_headers={'Authorization': f'Bearer {self.key}'},
                                            open_timeout=self.timeout_s, max_size=16 * 1024 * 1024)
+            self.usage_meter.reset()
             self.incoming = asyncio.Queue(maxsize=256)
             self.reader = asyncio.create_task(self._read(self.ws, self.incoming), name='serial-asr-receiver')
             await self._wait('session.created')
@@ -83,17 +108,22 @@ class AsrClient:
             raise ValueError('段落少于100ms或不是PCM16，未发送')
         await self._ready()
         async with asyncio.timeout(self.timeout_s):
+            # 开始上传就登记待核对；append之后断线也可能已产生用量。
+            await self._notify('uploading', segment.seg_id)
             for start in range(0, len(segment.pcm), 3200):
                 await self._send('input_audio_buffer.append', audio=base64.b64encode(
                     segment.pcm[start:start + 3200]).decode('ascii'))
             committed_at = time.perf_counter()
             deadline = asyncio.get_running_loop().time() + self.timeout_s
             await self._send('input_audio_buffer.commit')
+            await self._notify('committed', segment.seg_id)
         # 5秒从commit发出开始计，不包含连接握手或本地队列等待。
         async with asyncio.timeout_at(deadline):
             arrived, event = await self._wait(PREFIX + 'completed')
             if arrived < committed_at:
                 raise RuntimeError('commit之前出现最终结果，段落关联异常')
+            # 即使最终文字为空，也记录服务端实际报告的用量。
+            await self._notify('usage', segment.seg_id, self.usage_meter.delta(event.get('usage') or {}))
             text = event.get('transcript')
             if not isinstance(text, str) or not text.strip():
                 raise ValueError('ASR返回空转写')

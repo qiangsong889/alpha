@@ -50,8 +50,24 @@ class PricingTests(TestCase):
         self.assertEqual(value, Decimal('.0009'))
         self.assertEqual(reason, 'embedded_asr_billing_unverified')
 
+    def test_independent_asr_uses_reported_duration_and_rejects_invalid_usage(self):
+        self.assertEqual(quote('ASR', 'qwen3-asr-flash-realtime', {'duration': 3}),
+                         (Decimal('.00027'), ''))
+        for duration in (-1, 'NaN', 'Infinity', None):
+            self.assertEqual(quote('ASR', 'qwen3-asr-flash-realtime', {'duration': duration})[1],
+                             'invalid_usage_or_price')
+
 
 class LedgerTests(TestCase):
+    def test_summary_includes_independent_asr_but_not_embedded_reference(self):
+        store = CostLedger(':memory:')
+        self.addCleanup(store.close)
+        store.record('old', 'ASR', 'qwen3-asr-flash-realtime', {'sent_audio_seconds': 100})
+        store.record('new', 'ASR', 'qwen3-asr-flash-realtime', {'duration': 3})
+        with patch.object(costs, '_ledger', store), patch.object(costs.logger, 'info') as log:
+            costs.log_summary()
+        self.assertEqual(log.call_args.args[2], Decimal('.00027'))
+
     def test_duplicate_event_is_upsert_and_unknown_can_be_resolved(self):
         store = CostLedger(':memory:')
         self.addCleanup(store.close)
