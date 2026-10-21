@@ -86,7 +86,7 @@ def quote(component, model, usage, region='singapore'):
     """返回 (已知小计, 未计价原因)；数值必须来自服务端或明确的本地测量。"""
     u = data(usage)
     try:
-        if component in {'Claude', 'Memory'}:
+        if component in {'Claude', 'Memory', 'Context'}:
             rates = next((v for k, v in sorted(CLAUDE.items(), key=lambda p: -len(p[0]))
                           if model == k or model.startswith(k + '-20')), None)
             if rates is None:

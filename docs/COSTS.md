@@ -25,6 +25,7 @@ SDK retries whose usage is not returned, and supplier-side rounding can differ.
 | --- | --- |
 | Claude | Every main-model request, streaming or non-streaming: uncached input, output, cache reads, 5-minute and 1-hour cache writes, and web search requests |
 | Memory | Background Haiku extraction requests, separately from main Claude requests |
+| Context | Haiku conversation-summary requests; separate from persistent memory extraction |
 | Jev | Every classifier request, including cancelled/time-out requests; a combined two-question call is counted once |
 | TTS | Per-response difference of cumulative server `usage.characters`, not Python string length; audio tokens are not charged again |
 | Omni | All four server-reported input/output text/audio token counts for the original speaker mode |

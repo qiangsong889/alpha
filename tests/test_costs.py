@@ -12,6 +12,10 @@ from voice_pipeline.search_router import JevSearchRouter
 
 
 class PricingTests(TestCase):
+    def test_context_summary_has_separate_component_and_haiku_price(self):
+        self.assertEqual(quote('Context', 'claude-haiku-5-5', {'input_tokens': 100, 'output_tokens': 20}),
+                         quote('Memory', 'claude-haiku-5-5', {'input_tokens': 100, 'output_tokens': 20}))
+
     def test_claude_cache_ttls_and_search_are_not_regular_input(self):
         value, reason = quote('Claude', 'claude-sonnet-5', {
             'input_tokens': 100, 'output_tokens': 200,

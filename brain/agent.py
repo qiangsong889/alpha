@@ -13,6 +13,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 from typing import Literal, cast
 from uuid import uuid4
+from brain.context import ConversationContext
 
 import httpx2
 from anthropic import AsyncAnthropic
@@ -205,6 +206,7 @@ class AlphaBrain:
         self.email_confirmation: EmailConfirmation | None = None
         # 放在实例上的对话历史和目录会跨 ask 保留，而不是每句话都重新建立一份。
         self.messages: list[MessageParam] = []
+        self.conversation = ConversationContext()
         self.personal_tools: list[ToolParam] | None = None
         self.ha_catalog: tuple[list[ToolParam], list[TextBlockParam]] | None = None
         self.tools: list[ToolParam] = []
@@ -222,6 +224,14 @@ class AlphaBrain:
     @property
     def ha_available(self) -> bool:
         return self.ha_catalog is not None
+
+    @property
+    def session_id(self) -> str:
+        return self.conversation.session_id
+
+    def _request_system(self):
+        # 摘要是单独的数据块；静态规则与持久记忆的缓存块保持独立。
+        return [*self.system, *self.conversation.system_block()]
 
     def _prepare_catalog(self) -> None:
         if self.reminder_tz is None:
@@ -387,6 +397,7 @@ class AlphaBrain:
             if self._started:
                 return
             load_dotenv(ENV_FILE)
+            self.conversation.configure_from_env()
             ha_root = os.environ.get("HA_URL", "").strip()
             token = os.environ.get("HA_TOKEN", "").strip()
             if not ha_root or not token or not os.environ.get("ANTHROPIC_API_KEY", "").strip():
@@ -434,6 +445,7 @@ class AlphaBrain:
                 if os.getenv("ALPHA_AUTO_MEMORY", "0").strip() == "1":
                     self.auto_memory = AutoMemory(self.memory_store, self.client, self._lock)
                     self._refresh_memory_system()
+                self.conversation.closed = False
                 self._started = True
             except BaseException:
                 try:
@@ -452,12 +464,24 @@ class AlphaBrain:
     async def ask(self, request: str, *, on_text: TextSink | None = None,
                   on_signal: TextSink | None = None, search_announced: bool = False) -> str:
         # 一次用户提问的入口：确认启动状态、重试失败的目录发现、注入时间、进入工具循环。
+        received_at = self.conversation.clock()
         async with self._lock:
             if not isinstance(request, str) or not request.strip():
                 raise ValueError("用户输入不能为空")
             if (not self._started or self.http_client is None or self.personal_server is None
                     or self.reminder_tz is None):
                 raise RuntimeError("请先调用 AlphaBrain.start()")
+            if self.conversation.observe_user(received_at):
+                await self.conversation.reset()
+                self.messages = []
+                if self.email_confirmation is not None:
+                    self.email_confirmation.close()  # 取消旧草稿，不发送，也不删除执行记录。
+                if self.auto_memory is not None:
+                    self.auto_memory.pending.clear()
+                    self.auto_memory.retired.clear()
+                    self.auto_memory.receipts.clear()
+                logger.info('[上下文] 空闲超过%g分钟，已清空历史和摘要、作废旧确认；新会话 %s',
+                            self.conversation.idle_s / 60, self.session_id)
             started = time.perf_counter()
             self.last_timings = []
             self.last_response_fallback = False
@@ -473,6 +497,7 @@ class AlphaBrain:
             timed_request = (
                 f"[当前本地时间：{current_time}；时区：{self.reminder_tz.key}]\n{request}"
             )
+            await self.conversation.ensure_budget(self, {'role': 'user', 'content': timed_request})
             turn_id = uuid4().hex
             self._turn_memory_calls = []
             self._turn_memory_saved = False
@@ -543,6 +568,7 @@ class AlphaBrain:
             logger.debug("[耗时] %s ｜ brain总计 %.2fs", " ｜ ".join(
                 f"{label} {elapsed:.2f}s" for label, elapsed in self.last_timings
             ), time.perf_counter() - started)
+            self.conversation.after_turn(self)
             return answer
 
     async def _correct_memory_answer(self, answer, saved):
@@ -554,7 +580,7 @@ class AlphaBrain:
             self._refresh_memory_system()
             response = await costed_call(self.client.messages.create(
                 model=self.model, max_tokens=1024,
-                system=[*self.system, {"type": "text", "text": facts +
+                system=[*self._request_system(), {"type": "text", "text": facts +
                     "只修正上一条回答的记忆表述，保留已核实的业务结果。不要调用工具，不要声称未保存的内容已记住。"}],
                 messages=[*self.messages, {"role": "user", "content":
                     "请根据上述真实保存结果，仅修正上一条回答的记忆表述。不要重新执行任务。"}],
@@ -584,6 +610,7 @@ class AlphaBrain:
     async def close(self) -> None:
         # 即使使用者异常退出，也应调用 close；清理 callback 会停止后台 worker。
         async with self._lock:
+            await self.conversation.close()
             if self.email_confirmation is not None:
                 self.email_confirmation.close()
                 self.email_confirmation = None
@@ -610,7 +637,7 @@ class AlphaBrain:
         assert self.client is not None
         self._refresh_memory_system()
         async with self.client.messages.stream(
-            model=self.model, max_tokens=4096, system=self.system,
+            model=self.model, max_tokens=4096, system=self._request_system(),
             tools=[*self._request_tools(), self.web_search, VOICE_REPLY_TOOL], messages=messages,
             tool_choice={"type": "any"},
             cache_control={"type": "ephemeral"},
@@ -676,7 +703,7 @@ class AlphaBrain:
                     # await 等这次 Claude 返回，但不阻止 MCP worker 等其他任务继续执行。
                     model=model,
                     max_tokens=4096,
-                    system=self.system,
+                    system=self._request_system(),
                     tools=[*tools, self.web_search],
                     messages=messages + current,
                     cache_control={"type": "ephemeral"},
