@@ -8,6 +8,7 @@ import time
 
 from brain.agent import AlphaBrain
 from core.paths import ARCHIVE_DB
+from core.settings import setting
 from integrations.mcp_client import format_error
 
 logger = logging.getLogger("alpha.cli")
@@ -16,7 +17,7 @@ async def speak(text: str) -> None:
     """通过 macOS say 的标准输入朗读，避免把回答当命令参数。"""
     # 启动系统朗读子进程；异步等它读完，不在事件循环中执行阻塞式命令。
     process = await asyncio.create_subprocess_exec(
-        "say", "-v", os.environ.get("ALPHA_VOICE", "Meijia"),
+        "say", "-v", setting("ALPHA_VOICE"),
         stdin=asyncio.subprocess.PIPE,
     )
     try:

@@ -26,6 +26,7 @@ from websockets.exceptions import ConnectionClosed
 
 import sounddevice as sd  # type: ignore[import-untyped]
 from dotenv import load_dotenv
+from core.settings import setting
 
 from anthropic.types import ToolParam
 from mcp import StdioServerParameters
@@ -95,11 +96,11 @@ def websocket_url(workspace: str, region: str) -> str:
 
 
 def turn_detection_config() -> dict:
-    vad = os.environ.get("QWEN_VAD", "server_vad").strip()
+    vad = setting("QWEN_VAD")
     if vad not in {"server_vad", "semantic_vad"}:
         raise ValueError("QWEN_VAD 必须是 server_vad 或 semantic_vad")
     try:
-        silence_ms = int(os.environ.get("QWEN_SILENCE_MS", "800"))
+        silence_ms = setting("QWEN_SILENCE_MS")
     except ValueError as exc:
         raise ValueError("QWEN_SILENCE_MS 必须是 200 到 6000 的整数") from exc
     if not 200 <= silence_ms <= 6000:

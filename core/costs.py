@@ -125,7 +125,8 @@ def quote(component, model, usage, region='singapore'):
             if n is None:
                 return Decimal(0), 'missing_token_usage'
             # Gateway reports exact cost when available; otherwise use published rate.
-            rate = Decimal(os.getenv('JEV_INPUT_USD_PER_MTOK', '.042'))
+            from core.settings import setting  # 延迟导入：settings 的规则里也会读取价格表
+            rate = Decimal(str(setting('JEV_INPUT_USD_PER_MTOK')))
             if not rate.is_finite() or rate < 0:
                 raise ValueError('invalid rate')
             return Decimal(n)*rate/MILLION, ''

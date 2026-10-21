@@ -17,6 +17,7 @@ from typing import Any, Literal
 from dotenv import load_dotenv
 
 from core.paths import ENV_FILE
+from core.settings import setting
 from opencc import OpenCC
 
 from servers.google_auth import get_credentials
@@ -255,11 +256,11 @@ def create_reminder(title: str, local_time: str, minutes_before: int = 0,
         r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?", local_time
     ):
         raise ToolError("时间必须包含日期和时分秒，例如 2026-11-03T08:00:00")
-    tz_name = os.environ.get("REMINDER_TIMEZONE", "America/Los_Angeles")
     try:
+        tz_name = setting("REMINDER_TIMEZONE")
         tz = ZoneInfo(tz_name)
     except (ZoneInfoNotFoundError, ValueError) as exc:
-        raise ToolError(f"REMINDER_TIMEZONE 不是可用的 IANA 时区：{tz_name}") from exc
+        raise ToolError(f"REMINDER_TIMEZONE 不是可用的 IANA 时区：{exc}") from exc
     try:
         candidates = []
         # 夏令时切换时，本地时间可能不存在，或对应两个真实时刻；fold 分别检查两种解释。

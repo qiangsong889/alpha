@@ -29,6 +29,7 @@ from voice.batch_timing import BatchTiming
 from voice.qwen_tts import QwenTTS
 from voice.upload_gate import make_upload_gate
 from core.costs import configure_costs, record_cost, log_summary, AudioCostMeter
+from core.settings import VOICE, SettingsError, require_settings, setting
 
 logger = logging.getLogger('alpha.qwen_alpha')
 SPEAKER_RULES = ('你是 Alpha 的中文语音播报器，没有执行任何操作的权限。'
@@ -540,7 +541,7 @@ class Receiver:
                 self.player.finish(item)
             record_cost('Omni', MODEL, result.get('usage'),
                         event_id=self.omni_cost_ids.get(result['id']) or 'omni:' + self.session_id + ':' + result['id'],
-                        region=os.getenv('QWEN_REGION', 'singapore'))
+                        region=setting('QWEN_REGION'))
             log_summary()
             price = self.costs.record(self.session_id, result)
             if price is not None:
@@ -649,7 +650,7 @@ class Receiver:
             'type': 'message', 'role': 'user', 'content': [
                 {'type': 'input_text', 'text': '请仅朗读这段文本：' + json.dumps(text, ensure_ascii=False)}]})
         self.omni_attempt = record_cost('Omni', MODEL,
-            region=os.getenv('QWEN_REGION', 'singapore'), reason='response_requested_no_final_usage')
+            region=setting('QWEN_REGION'), reason='response_requested_no_final_usage')
         await send_event(self.ws, 'response.create')
         await asyncio.wait_for(self.response_done.wait(), timeout=90)
         played = bool(self.audio_items) and all([await self.player.wait_played(item) for item in self.audio_items])
@@ -710,15 +711,15 @@ class Receiver:
 
 
 def make_router(client):
-    provider = os.getenv('JEV_PROVIDER', 'typesafe')
-    key = os.getenv('AI_GATEWAY_API_KEY' if provider == 'vercel' else 'TYPESAFE_API_KEY', '')
-    return JevSearchRouter(client, api_key=key, provider=provider, model=os.getenv('JEV_MODEL') or None,
-                           timeout_s=float(os.getenv('JEV_TIMEOUT_MS', '300')) / 1000,
-                           min_confidence=float(os.getenv('JEV_MIN_CONFIDENCE', '0.8')))
+    provider = setting('JEV_PROVIDER')
+    key = setting('AI_GATEWAY_API_KEY' if provider == 'vercel' else 'TYPESAFE_API_KEY')
+    return JevSearchRouter(client, api_key=key, provider=provider, model=setting('JEV_MODEL') or None,
+                           timeout_s=setting('JEV_TIMEOUT_MS') / 1000,
+                           min_confidence=setting('JEV_MIN_CONFIDENCE'))
 
 
 def input_mode():
-    mode = os.getenv('QWEN_ALPHA_INPUT', 'asr').strip().lower()
+    mode = setting('QWEN_ALPHA_INPUT')
     if mode not in {'omni', 'asr'}:
         raise ValueError('QWEN_ALPHA_INPUT 必须是 omni 或 asr')
     return mode
@@ -730,15 +731,15 @@ async def run_asr_connection(player, collector, bridge, costs):
     from voice.asr_input import AsrInput, SileroActivity
     from voice.segmenter import Segmenter, SileroVAD, DEFAULT_MODEL
 
-    region = os.getenv('QWEN_REGION', 'singapore')
-    key, workspace = os.getenv('DASHSCOPE_API_KEY', ''), os.getenv('QWEN_WORKSPACE_ID', '')
+    region = setting('QWEN_REGION')
+    key, workspace = setting('DASHSCOPE_API_KEY'), setting('QWEN_WORKSPACE_ID')
     url = asr_url(workspace, region)
-    detector = await asyncio.to_thread(SileroVAD, os.getenv('SILERO_MODEL_PATH') or DEFAULT_MODEL)
+    detector = await asyncio.to_thread(SileroVAD, setting('SILERO_MODEL_PATH') or DEFAULT_MODEL)
     segmenter = Segmenter(detector)
-    tts = QwenTTS(key, workspace, region, os.getenv('QWEN_TTS_VOICE', 'Ethan'))
+    tts = QwenTTS(key, workspace, region, setting('QWEN_TTS_VOICE'))
     receiver = Receiver(None, player, collector, bridge, costs, 'local-asr', SileroActivity(),
-        interruption_filter=os.getenv('QWEN_ALPHA_JEV_INTERRUPTIONS', '1') == '1',
-        uncertain_interruption=os.getenv('QWEN_ALPHA_UNCERTAIN_INTERRUPTION', 'hold').strip().lower(), tts=tts)
+        interruption_filter=setting('QWEN_ALPHA_JEV_INTERRUPTIONS'),
+        uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'), tts=tts)
     adapter = AsrInput(receiver, segmenter, region=region)
     client = AsrClient(url, key, adapter.result, notify=adapter.notify)
     adapter.client = client
@@ -781,13 +782,13 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     if updated.get('tools'):
         raise QwenProtocolError('语音入口不允许配置业务工具')
     # 播报引擎：omni 让对话模型朗读（可能改写原文），tts 用专用语音合成（原样朗读）。
-    speaker = os.getenv('QWEN_ALPHA_SPEAKER', 'tts').strip().lower()
+    speaker = setting('QWEN_ALPHA_SPEAKER')
     # 配置值写错时直接报错，不悄悄退回某个默认值。
     if speaker not in {'omni', 'tts'}:
         raise ValueError('QWEN_ALPHA_SPEAKER 必须是 omni 或 tts')
     # 选择 tts 时创建专用 TTS 客户端（凭据、工作空间、区域、音色）；否则为 None，由 Omni 播报。
-    tts = (QwenTTS(os.getenv('DASHSCOPE_API_KEY', ''), os.getenv('QWEN_WORKSPACE_ID', ''),
-                   os.getenv('QWEN_REGION', 'singapore'), os.getenv('QWEN_TTS_VOICE', 'Ethan'))
+    tts = (QwenTTS(setting('DASHSCOPE_API_KEY'), setting('QWEN_WORKSPACE_ID'),
+                   setting('QWEN_REGION'), setting('QWEN_TTS_VOICE'))
            if speaker == 'tts' else None)
     # 启动日志写明本次实际使用哪个播报引擎和音色，方便确认没有走到 Omni 的后备路径。
     logger.info('[播报引擎] %s', 'Qwen TTS / ' + tts.voice if tts else 'Omni / ' + voice)
@@ -809,9 +810,9 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     # Receiver 处理服务端事件、打断和播报；会话 ID 用于日志/费用，TTS 为 None 时退回 Omni。
     receiver = Receiver(ws, player, collector, bridge, costs, created['session']['id'], activity,
                         # 播报期间的插话是否先由 Jev 判断“是不是在对 Alpha 说”；默认开启。
-                        interruption_filter=os.getenv('QWEN_ALPHA_JEV_INTERRUPTIONS', '1') == '1',
+                        interruption_filter=setting('QWEN_ALPHA_JEV_INTERRUPTIONS'),
                         # Jev 判断不了时的策略：hold 继续播报、不接收；accept 接收并打断。
-                        uncertain_interruption=os.getenv('QWEN_ALPHA_UNCERTAIN_INTERRUPTION', 'hold').strip().lower(), tts=tts)
+                        uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'), tts=tts)
     # 把打断过滤的实际设置打印出来，排查“为什么没被打断/被乱打断”时先看这一行。
     logger.info('[打断过滤] %s ｜ 不确定时%s',
                 'Jev 已开启' if receiver.interruption_filter else '已关闭，接收所有有效转写',
@@ -822,7 +823,7 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     if collector.parts:
         bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
     # 按实际上传的音频时长估算本次连接的收音费用。
-    audio_costs = AudioCostMeter(created['session']['id'], os.getenv('QWEN_REGION', 'singapore'))
+    audio_costs = AudioCostMeter(created['session']['id'], setting('QWEN_REGION'))
     try:
         # TaskGroup：下面五个任务同时运行；任何一个出错或结束，其余全部取消，整个连接一起退出。
         async with asyncio.TaskGroup() as tasks:
@@ -835,7 +836,7 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
             # ④ 等大脑的回答就绪，在用户没在说话时依次播报。
             tasks.create_task(receiver.speak())
             # ⑤ 到时间（默认 1800 秒，Qwen 单会话上限）抛出 SessionEnded，让外层重连一条新会话。
-            tasks.create_task(rotate_session(float(os.getenv('QWEN_SESSION_SECONDS', '1800'))))
+            tasks.create_task(rotate_session(setting('QWEN_SESSION_SECONDS')))
     finally:
         # 不管是正常轮换、断线还是出错，都把累计的收音费用写入账本。
         audio_costs.flush()
@@ -847,27 +848,30 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
 
 async def main():
     load_dotenv(ENV_FILE)
+    try:
+        # 整份清单和参数之间的关系一次校验完；语音只检查自己会读的参数。
+        require_settings(VOICE, logger)
+    except SettingsError as exc:
+        raise SystemExit('alpha/.env 配置有误：' + '；'.join(exc.problems)) from None
     configure_costs()
-    key = os.getenv('DASHSCOPE_API_KEY', '').strip()
-    if not key:
-        raise SystemExit('请在 .env 设置 DASHSCOPE_API_KEY 和 QWEN_WORKSPACE_ID')
+    key = setting('DASHSCOPE_API_KEY')
     mode = input_mode()
-    url = (websocket_url(os.getenv('QWEN_WORKSPACE_ID', ''), os.getenv('QWEN_REGION', 'singapore'))
+    url = (websocket_url(setting('QWEN_WORKSPACE_ID'), setting('QWEN_REGION'))
            if mode == 'omni' else None)
     logger.info('[输入路径] %s', mode)
     player = StreamingPlayer()
-    costs = CostTracker(os.getenv('QWEN_REGION', 'singapore'))
+    costs = CostTracker(setting('QWEN_REGION'))
     async with httpx.AsyncClient() as client:
-        base_url = os.getenv('ALPHA_BRAIN_URL', 'http://127.0.0.1:8765')
+        base_url = setting('ALPHA_BRAIN_URL')
         try:
             (await client.get(base_url + '/health', timeout=3)).raise_for_status()
         except httpx.HTTPError as exc:
             raise SystemExit('请先启动 .venv/bin/python -m brain.server') from exc
         bridge = BrainBridge(client, base_url)
         collector = TurnCollector(lambda text: bridge.submit(text, collector.last_submission), bridge.say, make_router(client),
-            window_s=float(os.getenv('QWEN_ALPHA_COLLECTION_SECONDS', '2')),
-            continuation_s=float(os.getenv('QWEN_ALPHA_CONTINUATION_SECONDS', '5')),
-            mode=os.getenv('QWEN_ALPHA_SUBMIT_MODE', 'jev').strip().lower())
+            window_s=setting('QWEN_ALPHA_COLLECTION_SECONDS'),
+            continuation_s=setting('QWEN_ALPHA_CONTINUATION_SECONDS'),
+            mode=setting('QWEN_ALPHA_SUBMIT_MODE'))
         logger.info('[提交模式] %s', 'Jev 完整即提交，故障回退窗口' if collector.mode == 'jev'
                     else '静音窗口与 Jev 并行，等待两者完成')
         async def reconnect():
@@ -878,7 +882,7 @@ async def main():
                     else:
                         async with connect(url, additional_headers={'Authorization': f'Bearer {key}'},
                                            open_timeout=30, max_size=16 * 1024 * 1024) as ws:
-                            await run_connection(ws, player, collector, bridge, costs, os.getenv('QWEN_VOICE', 'Tina'))
+                            await run_connection(ws, player, collector, bridge, costs, setting('QWEN_VOICE'))
                 except Exception as exc:
                     if not reconnectable(exc):
                         raise

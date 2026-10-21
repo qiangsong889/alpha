@@ -10,8 +10,9 @@ import httpx2
 from dotenv import load_dotenv
 
 from core.paths import ENV_FILE, PROJECT_ROOT, VENV_PYTHON
+from core.settings import REGISTRY, setting
 
-DEFAULT_URL = 'http://127.0.0.1:8765'
+DEFAULT_URL = REGISTRY['ALPHA_BRAIN_URL'].default  # 默认值只写在参数清单里
 
 
 async def healthy(client, url):
@@ -113,7 +114,7 @@ async def main():
         parser.error('--startup-timeout 必须为正的有限数字')
     load_dotenv(ENV_FILE)
     env = {**os.environ, 'PYTHONUNBUFFERED': '1'}
-    url = env.get('ALPHA_BRAIN_URL', DEFAULT_URL).rstrip('/')
+    url = setting('ALPHA_BRAIN_URL', env).rstrip('/')
     stopping = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):

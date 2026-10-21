@@ -6,6 +6,8 @@ import time
 import numpy as np
 import os
 
+from core.settings import setting
+
 import webrtcvad  # type: ignore[import-untyped]
 
 logger = logging.getLogger('alpha.qwen_alpha')
@@ -104,24 +106,23 @@ class UploadGate:
 
 def make_upload_gate():
     """仅 Qwen Alpha 入口调用。环境变量=0 可恢复原来的连续上传。"""
-    enabled = os.getenv('QWEN_ALPHA_LOCAL_VAD', '0').strip()
-    if enabled not in {'0', '1'}:
-        raise ValueError('QWEN_ALPHA_LOCAL_VAD 必须是 0 或 1')
-    if enabled == '0':
+    if not setting('QWEN_ALPHA_LOCAL_VAD'):
         logger.info('[上传模式] 连续上传（本地 VAD 门控关闭）')
         return None
-    if os.getenv('QWEN_VAD', 'server_vad').strip() != 'server_vad':
+    if setting('QWEN_VAD') != 'server_vad':
         raise ValueError('本地上传门控需要 QWEN_VAD=server_vad，以尾部静音结束转写')
-    silence_ms = int(os.getenv('QWEN_SILENCE_MS', '800'))
+    silence_ms = setting('QWEN_SILENCE_MS')
     minimum_tail = ((silence_ms + 200 + 19) // 20) * 20
-    tail_ms = int(os.getenv('QWEN_ALPHA_VAD_TAIL_MS', str(max(1000, minimum_tail))))
+    configured_tail = setting('QWEN_ALPHA_VAD_TAIL_MS')
+    # 没配置尾部时长时按静音时长自动计算；这个默认值依赖另一个参数，所以不写在清单里。
+    tail_ms = max(1000, minimum_tail) if configured_tail is None else configured_tail
     if tail_ms < minimum_tail:
         raise ValueError(f'QWEN_ALPHA_VAD_TAIL_MS 需要至少 {minimum_tail}ms，保证服务端正常结束转写')
-    gate = UploadGate(pre_ms=int(os.getenv('QWEN_ALPHA_VAD_PRE_MS', '400')),
-                      tail_ms=tail_ms, mode=int(os.getenv('QWEN_ALPHA_VAD_MODE', '3')),
-                      onset_ms=int(os.getenv('QWEN_ALPHA_VAD_ONSET_MS', '80')),
-                      min_rms=float(os.getenv('QWEN_ALPHA_VAD_MIN_RMS', '.003')),
-                      debug=os.getenv('QWEN_ALPHA_VAD_DEBUG', '0') == '1')
+    gate = UploadGate(pre_ms=setting('QWEN_ALPHA_VAD_PRE_MS'),
+                      tail_ms=tail_ms, mode=setting('QWEN_ALPHA_VAD_MODE'),
+                      onset_ms=setting('QWEN_ALPHA_VAD_ONSET_MS'),
+                      min_rms=setting('QWEN_ALPHA_VAD_MIN_RMS'),
+                      debug=setting('QWEN_ALPHA_VAD_DEBUG'))
     logger.info('[上传模式] 本地VAD ｜ 前置 %dms ｜ 开口确认 %dms ｜ 尾部 %dms ｜ mode=%d ｜ 最低RMS=%.4f',
                 gate.pre_ms, gate.onset_ms, gate.tail_ms, gate.mode, gate.min_rms)
     return gate

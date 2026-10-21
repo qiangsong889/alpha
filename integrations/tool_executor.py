@@ -3,6 +3,7 @@
 from datetime import datetime
 import json
 import os
+from core.settings import setting
 from typing import TypedDict
 from zoneinfo import ZoneInfo
 
@@ -121,7 +122,7 @@ def format_for_model(op: Operation, duplicate_of: Operation | None = None) -> Mo
     if duplicate_of is not None:
         if op.status not in {"pending", "approved", "cancelled"} or duplicate_of.status != "succeeded":
             raise ValueError("重复提示必须对应未执行的本次操作和成功的旧操作")
-        tz = ZoneInfo(os.environ.get("REMINDER_TIMEZONE", "America/Los_Angeles"))
+        tz = ZoneInfo(setting("REMINDER_TIMEZONE"))
         executed_at = datetime.fromtimestamp(duplicate_of.updated_at, tz).strftime("%H:%M")
         return {"is_error": False, "text": (
             f"本次没有执行。相同操作在 {executed_at} 已经成功执行过（那是之前的那次）。"

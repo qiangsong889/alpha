@@ -2,6 +2,7 @@
 
 import math
 import os
+from core.settings import setting
 from threading import RLock
 from typing import Any, Literal
 from zoneinfo import ZoneInfo
@@ -26,8 +27,8 @@ def _number(value: Any) -> float:
 
 
 def home_location(client: httpx2.Client) -> tuple[float, float, str]:
-    root = os.getenv("HA_URL", "").strip().rstrip("/")
-    token = os.getenv("HA_TOKEN", "").strip()
+    root = setting("HA_URL").rstrip("/")
+    token = setting("HA_TOKEN")
     if not root or not token:
         raise ValueError("请配置 HA_URL 和 HA_TOKEN")
     key = (root, token)

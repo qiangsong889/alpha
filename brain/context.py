@@ -11,6 +11,7 @@ import time
 from uuid import uuid4
 
 from core.costs import costed_call
+from core.settings import setting
 from core.trace import CURRENT_TURN
 
 logger = logging.getLogger('alpha.context')
@@ -98,9 +99,9 @@ class ConversationContext:
     def configure_from_env(self):
         """由AlphaBrain.start在load_dotenv之后调用，模块导入时不读取环境。"""
         try:
-            idle_s = float(os.getenv('ALPHA_CONTEXT_IDLE_MIN', '30')) * 60
-            soft_tokens = int(os.getenv('ALPHA_CONTEXT_COMPACT_TOKENS', '15000'))
-            hard_tokens = int(os.getenv('ALPHA_CONTEXT_HARD_TOKENS', '40000'))
+            idle_s = setting('ALPHA_CONTEXT_IDLE_MIN') * 60
+            soft_tokens = setting('ALPHA_CONTEXT_COMPACT_TOKENS')
+            hard_tokens = setting('ALPHA_CONTEXT_HARD_TOKENS')
             self._validate_limits(idle_s, soft_tokens, hard_tokens, self.keep_turns)
         except (ValueError, OverflowError) as exc:
             raise ValueError('请检查 ALPHA_CONTEXT_IDLE_MIN、ALPHA_CONTEXT_COMPACT_TOKENS、'

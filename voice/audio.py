@@ -12,9 +12,11 @@ from numpy.typing import NDArray
 import sounddevice as sd  # type: ignore[import-untyped]
 import webrtcvad  # type: ignore[import-untyped]
 
+from core.settings import setting
+
 def audio_device(env_name: str) -> int | str | None:
     # 环境变量既可以填设备编号（如 2），也可以填设备名；没填就让音频库使用默认设备。
-    value = os.environ.get(env_name, "").strip()
+    value = setting(env_name)  # REALTIME_INPUT_DEVICE / REALTIME_OUTPUT_DEVICE，默认值在参数清单里
     return int(value) if value.isdecimal() else value or None
 
 

@@ -13,6 +13,7 @@ from html.parser import HTMLParser
 import hashlib
 import json
 import os
+from core.settings import setting
 import re
 import time
 from uuid import uuid4
@@ -246,7 +247,7 @@ def _local(value: str) -> datetime:
         raise ToolError("本地时间必须是不带偏移的 YYYY-MM-DDTHH:MM:SS")
     try:
         local = datetime.fromisoformat(value)
-        tz = ZoneInfo(os.getenv("REMINDER_TIMEZONE", "America/Los_Angeles"))
+        tz = ZoneInfo(setting("REMINDER_TIMEZONE"))
         candidates = {local.replace(tzinfo=tz, fold=f).astimezone(timezone.utc) for f in (0, 1)
                       if local.replace(tzinfo=tz, fold=f).astimezone(timezone.utc).astimezone(tz).replace(tzinfo=None) == local}
     except (ValueError, KeyError, OverflowError) as exc:
