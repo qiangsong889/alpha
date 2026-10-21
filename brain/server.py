@@ -11,6 +11,7 @@
     POST /interrupted  {"spoken": "..."}  → {"ok": true}
     POST /delivered    {"turn_id": "...", "delivery": "played|interrupted|not_played"} → {"ok": bool}
     GET  /health
+    GET  /status       运行状态（配置指纹、生效中的参数、依赖状态、心跳）
 """
 
 import logging
@@ -79,6 +80,12 @@ app = FastAPI(lifespan=lifespan)
 @app.get("/health")
 async def health() -> dict[str, bool]:
     return {"ok": True, "ha_available": brain.ha_available}
+
+
+@app.get("/status")
+async def status() -> dict:
+    """只读的运行状态：配置指纹、实际在用的参数（密钥只说明是否已设置）、各依赖最近一次的状态和心跳。"""
+    return brain.status()
 
 
 @app.get("/costs")

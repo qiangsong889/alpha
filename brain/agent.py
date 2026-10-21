@@ -12,7 +12,7 @@ from contextlib import AsyncExitStack
 from collections.abc import Awaitable, Callable
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 from brain.context import ConversationContext
 
@@ -25,6 +25,7 @@ from core.archive import ArchiveStore
 from core.costs import costed_call
 from core.memory import MemoryStore, MemoryKind
 from core.settings import BRAIN, SettingsError, SettingsReport, require_settings, setting
+from core.runtime import snapshot
 from core.trace import CURRENT_SESSION, CURRENT_TURN
 from brain.auto_memory import AutoMemory
 from brain.memory_tools import MEMORY_NAMES, MEMORY_RULES, MEMORY_TOOLS
@@ -192,7 +193,11 @@ class AlphaBrain:
         # 存档默认关闭：只有正式入口传入路径才写，测试和 eval 不会污染真实的对话记录。
         self._archive_path = archive_path
         self.archive: ArchiveStore | None = None
-        self.settings_report: SettingsReport | None = None  # 启动时实际生效的配置（D2 的运行状态会用到）
+        self.settings_report: SettingsReport | None = None  # 启动时实际生效的配置（/status 用）
+        # 运行状态用墙钟时间（time.time），读取方在别的进程里比较；上下文的空闲判断仍用单调时钟。
+        self.started_at: float | None = None
+        self.catalog_checked_at: float | None = None
+        self.last_turn_at: float | None = None
         self._model_override = model
         self.model = ""
         self.ha_url = ""
@@ -237,6 +242,25 @@ class AlphaBrain:
     @property
     def session_id(self) -> str:
         return self.conversation.session_id
+
+    def status(self) -> dict[str, Any]:
+        """只读的运行快照：实际在用的配置（不含密钥的值）和各依赖最近一次的状态。
+
+        HA 和个人服务的状态来自最近一次发现工具目录的结果，不是实时探测，所以一并给出检查时间。
+        """
+        if not self._started or self.settings_report is None or self.started_at is None:
+            return {'process': BRAIN, 'state': 'starting'}
+
+        def component(available: bool) -> dict[str, Any]:
+            return {'state': 'available' if available else 'unavailable', 'checked_at': self.catalog_checked_at}
+
+        return snapshot(self.settings_report, started_at=self.started_at, model=self.model,
+                        session_id=self.session_id, last_turn_at=self.last_turn_at,
+                        components={'home_assistant': component(self.ha_catalog is not None),
+                                    'personal': component(self.personal_tools is not None),
+                                    'archive': {'state': 'enabled' if self.archive is not None else 'disabled'},
+                                    'auto_memory': {'state': 'enabled' if self.auto_memory is not None
+                                                    else 'disabled'}})
 
     def _request_system(self):
         # 摘要是单独的数据块；静态规则与持久记忆的缓存块保持独立。
@@ -461,12 +485,14 @@ class AlphaBrain:
                 self.email_confirmation = EmailConfirmation(self.gateway)
                 self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
                 self._prepare_catalog()
+                self.catalog_checked_at = time.time()
                 logger.info("可用工具：%s", "、".join(tool["name"] for tool in self.tools) or "无")
                 self.client = await stack.enter_async_context(AsyncAnthropic())
                 if setting("ALPHA_AUTO_MEMORY"):
                     self.auto_memory = AutoMemory(self.memory_store, self.client, self._lock)
                     self._refresh_memory_system()
                 self.conversation.closed = False
+                self.started_at = time.time()
                 self._started = True
             except BaseException:
                 try:
@@ -524,6 +550,7 @@ class AlphaBrain:
                     if self.ha_catalog is None:
                         self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
                     self._prepare_catalog()
+                    self.catalog_checked_at = time.time()
                 current_time = datetime.now(self.reminder_tz).isoformat(timespec="seconds")
                 # 时间放进本轮用户消息；system 的静态规则保持稳定，便于利用提示缓存。
                 timed_request = (
@@ -617,6 +644,7 @@ class AlphaBrain:
     def _archive_turn(self, *, turn_id: str, session_id: str, request: str, answer: str | None,
                       status: str, failure: str | None, brain_ms: int) -> None:
         """旁路写入对话存档；失败只记警告，不能影响已经生成的回答或异常。"""
+        self.last_turn_at = time.time()
         if self.archive is None:
             return
         try:

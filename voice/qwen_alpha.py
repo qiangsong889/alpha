@@ -29,6 +29,7 @@ from voice.batch_timing import BatchTiming
 from voice.qwen_tts import QwenTTS
 from voice.upload_gate import make_upload_gate
 from core.costs import configure_costs, record_cost, log_summary, AudioCostMeter
+from core.runtime import VOICE_STATUS, StatusWriter
 from core.settings import VOICE, SettingsError, require_settings, setting
 
 logger = logging.getLogger('alpha.qwen_alpha')
@@ -850,7 +851,7 @@ async def main():
     load_dotenv(ENV_FILE)
     try:
         # 整份清单和参数之间的关系一次校验完；语音只检查自己会读的参数。
-        require_settings(VOICE, logger)
+        settings_report = require_settings(VOICE, logger)
     except SettingsError as exc:
         raise SystemExit('alpha/.env 配置有误：' + '；'.join(exc.problems)) from None
     configure_costs()
@@ -859,6 +860,10 @@ async def main():
     url = (websocket_url(setting('QWEN_WORKSPACE_ID'), setting('QWEN_REGION'))
            if mode == 'omni' else None)
     logger.info('[输入路径] %s', mode)
+    # 写进状态文件的运行信息；控制台据此区分"运行中 / 重连中 / 心跳过期 / 已停止"。
+    runtime = {'input': mode, 'speaker': setting('QWEN_ALPHA_SPEAKER'),
+               'brain_url': setting('ALPHA_BRAIN_URL'), 'connection': 'starting', 'last_error': None}
+    status_writer = StatusWriter(VOICE_STATUS, settings_report, lambda: runtime)
     player = StreamingPlayer()
     costs = CostTracker(setting('QWEN_REGION'))
     async with httpx.AsyncClient() as client:
@@ -876,6 +881,7 @@ async def main():
                     else '静音窗口与 Jev 并行，等待两者完成')
         async def reconnect():
             while True:
+                runtime['connection'] = 'connected'
                 try:
                     if mode == 'asr':
                         await run_asr_connection(player, collector, bridge, costs)
@@ -886,6 +892,7 @@ async def main():
                 except Exception as exc:
                     if not reconnectable(exc):
                         raise
+                    runtime['connection'], runtime['last_error'] = 'reconnecting', type(exc).__name__
                     logger.warning('[重连] %s；不会重发已提交的任务', type(exc).__name__)
                 finally:
                     collector.disconnected()
@@ -896,6 +903,7 @@ async def main():
                 tasks.create_task(player.run())
                 tasks.create_task(bridge.run())
                 tasks.create_task(reconnect())
+                tasks.create_task(status_writer.run())  # 退出（包括 Ctrl+C）时会写一次 stopped
         finally:
             await collector.close()
             log_summary()
