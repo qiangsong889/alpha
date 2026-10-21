@@ -674,7 +674,7 @@ def make_router(client):
 
 
 def input_mode():
-    mode = os.getenv('QWEN_ALPHA_INPUT', 'omni').strip().lower()
+    mode = os.getenv('QWEN_ALPHA_INPUT', 'asr').strip().lower()
     if mode not in {'omni', 'asr'}:
         raise ValueError('QWEN_ALPHA_INPUT 必须是 omni 或 asr')
     return mode
@@ -737,7 +737,7 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     if updated.get('tools'):
         raise QwenProtocolError('语音入口不允许配置业务工具')
     # 播报引擎：omni 让对话模型朗读（可能改写原文），tts 用专用语音合成（原样朗读）。
-    speaker = os.getenv('QWEN_ALPHA_SPEAKER', 'omni').strip().lower()
+    speaker = os.getenv('QWEN_ALPHA_SPEAKER', 'tts').strip().lower()
     # 配置值写错时直接报错，不悄悄退回某个默认值。
     if speaker not in {'omni', 'tts'}:
         raise ValueError('QWEN_ALPHA_SPEAKER 必须是 omni 或 tts')

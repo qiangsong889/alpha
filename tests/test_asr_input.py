@@ -13,8 +13,10 @@ from voice.segmenter import FRAME, Segmenter, SpeechStarted, SegmentReady
 
 
 class InputConfigTests(TestCase):
-    def test_default_omni_and_explicit_asr_and_invalid(self):
+    def test_default_asr_and_explicit_omni_and_invalid(self):
         with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(input_mode(), 'asr')
+        with patch.dict('os.environ', {'QWEN_ALPHA_INPUT': 'omni'}):
             self.assertEqual(input_mode(), 'omni')
         with patch.dict('os.environ', {'QWEN_ALPHA_INPUT': 'asr'}):
             self.assertEqual(input_mode(), 'asr')

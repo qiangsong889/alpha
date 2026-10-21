@@ -28,13 +28,15 @@ Existing `.env` settings apply: `DASHSCOPE_API_KEY`, `QWEN_WORKSPACE_ID`, `QWEN_
 
 ## Input switch: Omni or independent ASR
 
-The default remains `QWEN_ALPHA_INPUT=omni`, preserving Omni transcription and its upload gate.
-Try the independent input without editing `.env`:
+The code defaults are `QWEN_ALPHA_INPUT=asr` and `QWEN_ALPHA_SPEAKER=tts`, even
+without `.env` overrides. Omni input and its upload gate remain explicitly selectable:
 
 ```bash
 QWEN_ALPHA_INPUT=asr ./start-qwen
-# Restore the original input:
+# Select the original input (still using dedicated TTS by default):
 QWEN_ALPHA_INPUT=omni ./start-qwen
+# Select both original Omni input and Omni speaker:
+QWEN_ALPHA_INPUT=omni QWEN_ALPHA_SPEAKER=omni ./start-qwen
 ```
 
 ASR mode uses Silero ONNX (160ms confirmed onset, 400ms pre-roll, 608ms silence)
@@ -157,10 +159,10 @@ Earlier parallel classification is speculative: continuing to speak cancels that
 
 ## Dedicated TTS trial (Ethan)
 
-The local `.env` now selects `QWEN_ALPHA_SPEAKER=tts` and `QWEN_TTS_VOICE=Ethan`.
+The code defaults to `QWEN_ALPHA_SPEAKER=tts` and `QWEN_TTS_VOICE=Ethan`.
 This uses `qwen3-tts-flash-realtime` on an independent, persistent WebSocket, with
-PCM16 mono 24 kHz output fed into the existing player. Omni still provides input
-transcription; Jev and AlphaBrain are unchanged. TTS receives the exact brain text
+PCM16 mono 24 kHz output fed into the existing player. Input defaults to independent
+ASR; Jev and AlphaBrain are unchanged. TTS receives the exact brain text
 through `input_text_buffer.append` and `commit`, without conversation instructions.
 Startup preconnects TTS; interrupted synthesis closes its connection so late audio
 cannot enter the next report. Errors do not automatically replay reports with Omni.
@@ -170,10 +172,10 @@ Start the trial: `./start-qwen`.
 Restore the previous Omni speaker for one run:
 
 ```bash
-QWEN_ALPHA_SPEAKER=omni ./start-qwen
+QWEN_ALPHA_INPUT=omni QWEN_ALPHA_SPEAKER=omni ./start-qwen
 ```
 
-For persistent rollback set `QWEN_ALPHA_SPEAKER=omni` in `.env`.
+For persistent rollback set both `QWEN_ALPHA_INPUT=omni` and `QWEN_ALPHA_SPEAKER=omni` in `.env`.
 The original `QWEN_VOICE` is untouched (Zane in the local pre-trial configuration).
 A non-secret snapshot of the pre-trial settings is saved locally in
 `data/qwen-speaker-before-tts.json` (ignored by git).
