@@ -43,22 +43,23 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(response=response), self.assertRaises(JudgeError):
                 await ReplyJudge(client(response)).evaluate('回答', '标准')
 
-    async def test_calibration_hides_labels_and_all_twenty_two_are_required(self):
+    async def test_calibration_hides_labels_and_all_twenty_four_are_required(self):
         cases = load_calibration()
         fake = SimpleNamespace(model=DEFAULT_MODEL, last_usage=None, evaluate=AsyncMock(side_effect=[
             {'pass': row['expected_pass'], 'reason': '语义匹配人工标注'} for row in cases]))
         result = await calibrate(fake)
         self.assertTrue(result['passed'])
-        self.assertEqual(result['correct'], 22)
-        self.assertEqual(fake.evaluate.await_count, 22)
+        self.assertEqual(result['correct'], 24)
+        self.assertEqual(fake.evaluate.await_count, 24)
         for args, case in zip(fake.evaluate.await_args_list, cases):
             self.assertEqual(args.args, (case['answer'], case['rubric']))
-            self.assertEqual(args.kwargs, {'tool_records': case.get('tool_records', [])})
+            self.assertEqual(args.kwargs, {'tool_records': case.get('tool_records', []),
+                **({'memory_records': case['memory_records']} if 'memory_records' in case else {})})
         fake.evaluate = AsyncMock(side_effect=[{'pass': not row['expected_pass'] if i == 0 else row['expected_pass'],
                                                 'reason': '测试'} for i, row in enumerate(cases)])
         result = await calibrate(fake)
         self.assertFalse(result['passed'])
-        self.assertEqual(result['correct'], 21)
+        self.assertEqual(result['correct'], 23)
 
     async def test_calibration_api_error_cannot_pass(self):
         fake = SimpleNamespace(model=DEFAULT_MODEL, last_usage=None,
@@ -66,7 +67,7 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
         result = await calibrate(fake)
         self.assertFalse(result['passed'])
         self.assertEqual(result['correct'], 0)
-        self.assertEqual(len(result['results']), 22)
+        self.assertEqual(len(result['results']), 24)
         self.assertTrue(all('error' in r for r in result['results']))
 
     async def test_calibration_failure_blocks_evaluation(self):
@@ -174,10 +175,21 @@ class JudgeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_judge_instructions_do_not_copy_calibration_answers(self):
         rows = load_calibration()
-        self.assertEqual(len(rows), 22)
-        self.assertEqual(sum(r['expected_pass'] for r in rows), 10)
+        self.assertEqual(len(rows), 24)
+        self.assertEqual(sum(r['expected_pass'] for r in rows), 11)
         for row in rows:
             self.assertNotIn(row['answer'], row['rubric'])
+
+    async def test_auto_memory_database_evidence_is_sent_without_labels(self):
+        rows = [row for row in load_calibration() if row['id'].startswith('auto-evidence-')]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]['answer'], rows[1]['answer'])
+        for row in rows:
+            sdk = client(reply(calls=[('submit_verdict', {'pass': row['expected_pass'], 'reason': '数据库证据'})]))
+            await ReplyJudge(sdk).evaluate(row['answer'], row['rubric'], memory_records=row['memory_records'])
+            payload = json.loads(sdk.messages.requests[0]['messages'][0]['content'])
+            self.assertEqual(payload['memory_records'], row['memory_records'])
+            self.assertNotIn('expected_pass', payload)
             self.assertNotIn(row['answer'], SYSTEM)
         for phrase in ('没法加上', '已经发给', '寄出去啦', '没能写进', '我先查一下', '应该加上了吧'):
             self.assertNotIn(phrase, SYSTEM)

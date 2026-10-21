@@ -9,7 +9,7 @@ import eval.run_eval as eval_module
 from copy import deepcopy
 from types import SimpleNamespace as NS
 from unittest import IsolatedAsyncioTestCase
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from eval.run_eval import ROOT, load_cases, run_case
 from tests.test_eval import FakeMessages, reply
@@ -35,6 +35,30 @@ class Dispatch:
 
 
 class AutoEvalTests(IsolatedAsyncioTestCase):
+    async def test_judge_receives_actual_before_after_database_snapshots(self):
+        self.cases = {row['id']: row for row in load_cases(ROOT / 'eval/cases.jsonl')}
+        dispatch = Dispatch([reply('好的。'), reply('你好。'), reply('不错。')],
+                            [extraction(SAVE), extraction(), extraction()])
+        judge = NS(model='fake-judge', last_usage=None,
+                   evaluate=AsyncMock(return_value={'pass': True, 'reason': '数据库已保存'}))
+        result = await run_case(self.cases['auto-02'], NS(messages=dispatch), model='fake-model',
+                                auto_memory=True, judge=judge)
+        self.assertTrue(result['passed'], result)
+        evidence = judge.evaluate.call_args.kwargs['memory_records']
+        self.assertEqual(evidence['before'], [])
+        self.assertEqual(evidence['after'][0]['content'], '不吃香菜')
+        self.assertEqual(evidence['after'][0]['source'], 'auto')
+        self.assertEqual(judge.evaluate.call_args.kwargs['tool_records'], [])
+
+    async def test_tool_free_memory_wording_correction_is_supported(self):
+        result, sdk = await self.run_fixture('auto-02',
+            [reply('记住你的全部偏好了。'), reply('明白。'), reply('你好。'), reply('不错。')],
+            [extraction(SAVE), extraction(), extraction()])
+        self.assertTrue(result['passed'], result)
+        self.assertNotIn('tools', sdk.main.requests[1])
+        self.assertIn('记下了：不吃香菜', result['turns'][0]['answer'])
+        self.assertNotIn('记忆表述不准确', result['turns'][0]['answer'])
+
     def setUp(self):
         self.cases = {row['id']: row for row in load_cases(ROOT / 'eval/cases.jsonl')}
 

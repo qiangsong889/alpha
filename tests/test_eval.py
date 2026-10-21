@@ -60,6 +60,14 @@ def client(*responses):
 
 
 class EvalTests(unittest.IsolatedAsyncioTestCase):
+    def test_tool_free_correction_preserves_previous_schemas(self):
+        recorder = RecordingMessages(None)
+        schema = {'type': 'object', 'properties': {'minutes_before': {'default': 0}}}
+        recorder.request({'tools': [{'name': 'create_reminder', 'input_schema': schema}]})
+        corrected = recorder.request({'messages': [{'role': 'user', 'content': '仅修正措辞'}]})
+        self.assertNotIn('tools', corrected)
+        self.assertEqual(recorder.schemas['create_reminder'], schema)
+
     def setUp(self):
         self.cases = {c['id']: c for c in load_cases(ROOT / 'eval/cases.jsonl')}
 

@@ -123,14 +123,16 @@ class RecordingMessages:
         # 大脑把搜索单独附加一次，而 eval 为路由还需把它放入 self.tools。
         # 只在测试包装器去掉这一个重复声明；绝不发送真正的服务端搜索定义。
         unique = {}
-        for tool in kwargs['tools']:
+        for tool in kwargs.get('tools', []):
             if tool.get('type', 'custom') != 'custom':
                 raise ValueError('eval 禁止真实服务端工具')
             if tool['name'] in unique and unique[tool['name']] != tool:
                 raise ValueError('同名工具声明不一致')
             unique[tool['name']] = deepcopy(tool)
-        kwargs['tools'] = list(unique.values())
-        self.schemas = {name: tool['input_schema'] for name, tool in unique.items()}
+        if 'tools' in kwargs:
+            kwargs['tools'] = list(unique.values())
+        # 无工具的措辞修正不能抹掉本轮此前业务调用的 schema。
+        self.schemas.update({name: tool['input_schema'] for name, tool in unique.items()})
         self.request_locations.append(deepcopy(self.search_location))
         return kwargs
 
@@ -747,10 +749,16 @@ async def run_case(case, sdk_client, *, model: str, timeout_s: float = 90, judge
                         'response_fallback': brain.last_response_fallback,
                         'elapsed_s': round(time.perf_counter() - started, 3)}
             observed['reply_scoring'] = 'judge' if semantic_judge else 'literal'
+            if auto_memory:
+                observed['memory_records'] = {
+                    'before': [vars(memory) for memory in memory_before_answer],
+                    'after': deepcopy(memories),
+                }
             if semantic_judge and exception is None:
                 try:
                     observed['reply_judge'] = await judge.evaluate(
-                        answer, turn['reply_rubric'], tool_records=observed['tool_records'])
+                        answer, turn['reply_rubric'], tool_records=observed['tool_records'],
+                        **({'memory_records': observed['memory_records']} if auto_memory else {}))
                     observed['judge_model'] = judge.model
                     observed['judge_usage'] = judge.last_usage
                 except Exception as exc:

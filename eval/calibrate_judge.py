@@ -1,4 +1,4 @@
-"""评判器校准：python -m eval.calibrate_judge，22 条全正确才返回 0。"""
+"""评判器校准：python -m eval.calibrate_judge，24 条全正确才返回 0。"""
 
 import argparse
 import asyncio
@@ -16,15 +16,15 @@ from eval.judge import DEFAULT_MODEL, ReplyJudge, SYSTEM, VERDICT_TOOL
 
 ROOT = Path(__file__).resolve().parents[1]
 CALIBRATION_FILE = Path(__file__).with_name('judge_calibration.jsonl')
-CALIBRATION_SIZE = 22
+CALIBRATION_SIZE = 24
 
 
 def load_calibration(path=CALIBRATION_FILE):
     rows = [json.loads(s) for s in Path(path).read_text().splitlines() if s.strip()]
     if len(rows) != CALIBRATION_SIZE or len({r.get('id') for r in rows}) != CALIBRATION_SIZE:
-        raise ValueError('校准必须有 22 条、且 ID 唯一')
-    if sum(r.get('expected_pass') is True for r in rows) != 10:
-        raise ValueError('校准必须有 10 条正确回答和 12 条错误回答')
+        raise ValueError('校准必须有 24 条、且 ID 唯一')
+    if sum(r.get('expected_pass') is True for r in rows) != 11:
+        raise ValueError('校准必须有 11 条正确回答和 13 条错误回答')
     for row in rows:
         if (type(row.get('expected_pass')) is not bool
                 or not isinstance(row.get('answer'), str)
@@ -39,9 +39,12 @@ async def calibrate(judge, *, path=CALIBRATION_FILE):
     for row in rows:
         result = {'id': row['id'], 'answer': row['answer'], 'rubric': row['rubric'],
                   'expected_pass': row['expected_pass'], 'tool_records': row.get('tool_records', [])}
+        if 'memory_records' in row:
+            result['memory_records'] = row['memory_records']
         try:
             # 标签和来源不会发送给模型，避免把答案泄露给评判器。
-            verdict = await judge.evaluate(row['answer'], row['rubric'], tool_records=row.get('tool_records', []))
+            verdict = await judge.evaluate(row['answer'], row['rubric'], tool_records=row.get('tool_records', []),
+                **({'memory_records': row['memory_records']} if 'memory_records' in row else {}))
             result.update(verdict=verdict, correct=verdict['pass'] is row['expected_pass'],
                           usage=judge.last_usage)
         except Exception as exc:
