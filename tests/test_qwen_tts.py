@@ -92,7 +92,7 @@ class TTSTests(IsolatedAsyncioTestCase):
         ws.close.assert_awaited_once()
 
     async def test_tts_playback_uses_existing_player_and_no_omni_generation(self):
-        async def stream(text):
+        async def stream(text, turn_id=None):
             self.assertEqual(text, '没有发送邮件。')
             yield b'pcm'
         tts = NS(voice='Ethan', stream=stream, close=AsyncMock())
@@ -110,7 +110,7 @@ class TTSTests(IsolatedAsyncioTestCase):
     async def test_interruption_cancels_tts_not_microphone_socket(self):
         started = asyncio.Event()
         closed = asyncio.Event()
-        async def stream(text):
+        async def stream(text, turn_id=None):
             try:
                 started.set()
                 await asyncio.Future()

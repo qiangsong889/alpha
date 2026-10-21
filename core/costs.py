@@ -13,6 +13,8 @@ from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
 
+from core.trace import CURRENT_SESSION, CURRENT_TURN
+
 logger = logging.getLogger('alpha.costs')
 
 
@@ -167,18 +169,31 @@ class CostLedger:
             id TEXT PRIMARY KEY, component TEXT NOT NULL, model TEXT NOT NULL,
             region TEXT NOT NULL, usage TEXT NOT NULL, usd TEXT NOT NULL,
             reason TEXT NOT NULL, updated_at REAL NOT NULL)''')
+        # 旧账本没有归属列；补列后旧记录保持 NULL，不猜测它们属于哪一轮。
+        columns = {row[1] for row in self.db.execute('PRAGMA table_info(cost_events)')}
+        for column in ('session_id', 'turn_id'):
+            if column not in columns:
+                self.db.execute(f'ALTER TABLE cost_events ADD COLUMN {column} TEXT')
+        self.db.execute('CREATE INDEX IF NOT EXISTS cost_events_turn ON cost_events (turn_id)')
         self.db.commit()
 
-    def record(self, event_id, component, model, usage=None, *, region='singapore', reason=None):
+    def record(self, event_id, component, model, usage=None, *, region='singapore', reason=None,
+               session_id=None, turn_id=None):
         usage = data(usage)
         cost, missing = quote(component, model, usage, region)
         missing = reason if reason is not None else missing
         with self.db:
-            self.db.execute('''INSERT INTO cost_events VALUES (?,?,?,?,?,?,?,?)
+            # 开始记录和最终用量用同一个 id 两次写入；归属以先写入的非空值为准，不被后来的空值覆盖。
+            self.db.execute('''INSERT INTO cost_events
+                (id, component, model, region, usage, usd, reason, updated_at, session_id, turn_id)
+                VALUES (?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET usage=excluded.usage, usd=excluded.usd,
-                reason=excluded.reason, updated_at=excluded.updated_at
+                reason=excluded.reason, updated_at=excluded.updated_at,
+                session_id=COALESCE(cost_events.session_id, excluded.session_id),
+                turn_id=COALESCE(cost_events.turn_id, excluded.turn_id)
                 WHERE length(cost_events.reason) > 0 OR length(excluded.reason) = 0''',
-                (event_id, component, model, region, json.dumps(usage), str(cost), missing, time.time()))
+                (event_id, component, model, region, json.dumps(usage), str(cost), missing, time.time(),
+                 session_id, turn_id))
         return cost, missing
 
     def summary(self):
@@ -206,12 +221,24 @@ def configure_costs(path=None):
     return _ledger
 
 
-def record_cost(component, model, usage=None, *, event_id=None, region='singapore', reason=None):
-    """旁路计费不得影响语音或工具执行；未启用时不写入（例如单元测试）。"""
+_FROM_CONTEXT = object()
+
+
+def record_cost(component, model, usage=None, *, event_id=None, region='singapore', reason=None,
+                session_id=_FROM_CONTEXT, turn_id=_FROM_CONTEXT):
+    """旁路计费不得影响语音或工具执行；未启用时不写入（例如单元测试）。
+
+    归属默认取当前上下文（大脑的一轮对话）；其他进程（例如语音层的 TTS）可以显式传入。
+    """
     ident = event_id or uuid4().hex
+    if session_id is _FROM_CONTEXT:
+        session_id = CURRENT_SESSION.get()
+    if turn_id is _FROM_CONTEXT:
+        turn_id = CURRENT_TURN.get()
     if _ledger is not None:
         try:
-            usd, missing = _ledger.record(ident, component, model, usage, region=region, reason=reason)
+            usd, missing = _ledger.record(ident, component, model, usage, region=region, reason=reason,
+                                          session_id=session_id, turn_id=turn_id)
             if missing and not usd:
                 logger.info('[费用][%s] 未计价：%s', component, missing)
             else:

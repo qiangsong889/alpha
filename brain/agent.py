@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+from pathlib import Path
 import re
 import time
 from copy import deepcopy
@@ -20,8 +21,10 @@ from anthropic import AsyncAnthropic
 from anthropic.types import MessageParam, TextBlockParam, ToolParam, ToolResultBlockParam, ToolUnionParam
 from dotenv import load_dotenv
 
+from core.archive import ArchiveStore
 from core.costs import costed_call
 from core.memory import MemoryStore, MemoryKind
+from core.trace import CURRENT_SESSION, CURRENT_TURN
 from brain.auto_memory import AutoMemory
 from brain.memory_tools import MEMORY_NAMES, MEMORY_RULES, MEMORY_TOOLS
 from core.paths import ENV_FILE, OPERATIONS_DB, PROJECT_ROOT, VENV_PYTHON
@@ -180,10 +183,14 @@ def device_action_reply(op: Operation, *, voice: bool = False) -> str | None:
 
 class AlphaBrain:
     # 大脑不读取麦克风、不直接朗读；CLI 或 HTTP 语音层都只需要调用 start/ask/close。
-    def __init__(self, *, model: str | None = None, style: Literal["text", "voice"] = "text"):
+    def __init__(self, *, model: str | None = None, style: Literal["text", "voice"] = "text",
+                 archive_path: str | Path | None = None):
         if style not in {"text", "voice"}:
             raise ValueError("style 必须是 text 或 voice")
         self.style = style
+        # 存档默认关闭：只有正式入口传入路径才写，测试和 eval 不会污染真实的对话记录。
+        self._archive_path = archive_path
+        self.archive: ArchiveStore | None = None
         self._model_override = model
         self.model = ""
         self.ha_url = ""
@@ -421,6 +428,15 @@ class AlphaBrain:
                 self.store.acquire_process_lock()
                 self.memory_store = MemoryStore(OPERATIONS_DB)
                 stack.callback(self.memory_store.close)
+                if self._archive_path is not None:
+                    try:
+                        self.archive = ArchiveStore(self._archive_path)
+                        stack.callback(self.archive.close)
+                    except Exception as exc:
+                        # 存档是旁路记录，打不开不能阻止大脑工作。
+                        logger.warning("[存档] 无法打开 %s：%s；本次运行不记录对话", self._archive_path,
+                                       type(exc).__name__)
+                        self.archive = None
                 for op in self.store.recover_on_startup():
                     logger.warning("[恢复] %s %s → unknown，不自动重试", op.id, op.name)
                 for op in self.store.discard_unsubmitted():
@@ -459,10 +475,12 @@ class AlphaBrain:
                     self.worker_task = None
                     self.store = self.gateway = None
                     self.memory_store = None
+                    self.archive = None
                 raise
 
     async def ask(self, request: str, *, on_text: TextSink | None = None,
-                  on_signal: TextSink | None = None, search_announced: bool = False) -> str:
+                  on_signal: TextSink | None = None, search_announced: bool = False,
+                  turn_id: str | None = None) -> str:
         # 一次用户提问的入口：确认启动状态、重试失败的目录发现、注入时间、进入工具循环。
         received_at = self.conversation.clock()
         async with self._lock:
@@ -482,94 +500,139 @@ class AlphaBrain:
                     self.auto_memory.receipts.clear()
                 logger.info('[上下文] 空闲超过%g分钟，已清空历史和摘要、作废旧确认；新会话 %s',
                             self.conversation.idle_s / 60, self.session_id)
+            turn_id = turn_id or uuid4().hex
+            session_id = self.session_id
+            # 同一个 ask 里所有的 Claude 请求、工具操作和由这一轮触发的后台任务，都带着这两个 ID。
+            session_token = CURRENT_SESSION.set(session_id)
+            turn_token = CURRENT_TURN.set(None)  # 同步压缩跨越多轮，费用只归属会话
             started = time.perf_counter()
-            self.last_timings = []
-            self.last_response_fallback = False
-            # 发现失败的服务在下一次 ask 时重试；成功的目录继续缓存。
-            if self.personal_tools is None or self.ha_catalog is None:
-                if self.personal_tools is None:
-                    self.personal_tools = await load_personal_catalog(self.personal_server)
-                if self.ha_catalog is None:
-                    self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
-                self._prepare_catalog()
-            current_time = datetime.now(self.reminder_tz).isoformat(timespec="seconds")
-            # 时间放进本轮用户消息；system 的静态规则保持稳定，便于利用提示缓存。
-            timed_request = (
-                f"[当前本地时间：{current_time}；时区：{self.reminder_tz.key}]\n{request}"
-            )
-            await self.conversation.ensure_budget(self, {'role': 'user', 'content': timed_request})
-            turn_id = uuid4().hex
-            self._turn_memory_calls = []
-            self._turn_memory_saved = False
-            self._raw_request = request
-            auto = self.auto_memory
-            sequence = auto.begin_turn() if auto is not None else 0
-            # 显式记忆请求由主模型处理，不启动第二个写入来源。
-            prepared = (auto.prepare(request, sequence) if auto is not None
-                        and not auto.explicit_tools_available(request) else None)
-            signals: list[str] = []
-            async def buffer_text(text):
-                # 搜索前提示无需等待最终答案；只有最终回答需要核对记忆事实。
-                if text == "我查一下。" and on_text is not None:
-                    await on_text(text)
-            async def buffer_signal(signal):
-                signals.append(signal)
+            answer: str | None = None
+            status = "error"
+            failure: str | None = None
             try:
-                answer = await self._agent_turn(timed_request, self.last_timings,
-                    turn_id=turn_id,
-                    on_text=(buffer_text if auto else on_text) if on_text else None,
-                    on_signal=(buffer_signal if auto else on_signal) if on_signal else None,
-                    search_announced=search_announced)
-                # 可开放显式工具的输入先交给主模型；只有它未使用记忆工具才补做提取。
-                if auto is not None and prepared is None and not self._turn_memory_calls:
-                    prepared = auto.prepare(request, sequence)
-                original_answer = answer
-                saved = []
-                if prepared is not None:
-                    version, task = prepared
-                    wait_started = time.perf_counter()
-                    candidates = await task
-                    wait_s = time.perf_counter() - wait_started
-                    self.last_timings.append(("记忆核对等待", wait_s))
-                    logger.info("[自动记忆] 主回答完成后等待提取 %.3fs", wait_s)
-                    if not self._turn_memory_calls and not self.last_response_fallback:
-                        assert auto is not None
-                        saved = auto.apply(candidates, turn_id, sequence, version)
-                if auto is not None:
-                    # 不能用“本轮有保存”替任何内容背书：声称保存时必须提到每条实际内容。
-                    if not self._turn_memory_saved and claims_memory_saved(answer):
-                        if not saved or not all(row.content in answer for row in saved):
-                            answer = await self._correct_memory_answer(answer, saved)
-                    if saved and not (claims_memory_saved(answer)
-                                      and all(row.content in answer for row in saved)):
-                        answer = answer.rstrip() + ("。" if answer and answer[-1] not in "。！？!?" else "")
-                        answer += "记下了：" + "、".join(row.content for row in saved) + "。"
-                    suffix = auto.question(mark=False)
-                    if suffix:
-                        answer += ("。" if answer and answer[-1] not in "。！？!?" else "") + suffix
-                    # 历史只保存核对后的文字；修正请求不允许调用业务工具。
-                    if answer != original_answer and self.messages and self.messages[-1]['role'] == 'assistant':
-                        previous = self.messages[-1]['content']
-                        # 保留服务端搜索结果、引用和 thinking 块，只替换对用户的最终文字。
-                        content = ([b for b in previous if
-                            (b.get('type') if isinstance(b, dict) else b.type) != 'text']
-                            + [{"type": "text", "text": answer}]) if isinstance(previous, list) else answer
-                        self.messages[-1] = {"role": "assistant", "content": content}
-                    if on_text is not None and (not signals or saved or suffix):
-                        await on_text(answer)
-                    if on_signal is not None:
-                        for signal in signals:
-                            await on_signal(signal)
-                    auto.ack_question(suffix)
+                self.last_timings = []
+                self.last_response_fallback = False
+                # 发现失败的服务在下一次 ask 时重试；成功的目录继续缓存。
+                if self.personal_tools is None or self.ha_catalog is None:
+                    if self.personal_tools is None:
+                        self.personal_tools = await load_personal_catalog(self.personal_server)
+                    if self.ha_catalog is None:
+                        self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
+                    self._prepare_catalog()
+                current_time = datetime.now(self.reminder_tz).isoformat(timespec="seconds")
+                # 时间放进本轮用户消息；system 的静态规则保持稳定，便于利用提示缓存。
+                timed_request = (
+                    f"[当前本地时间：{current_time}；时区：{self.reminder_tz.key}]\n{request}"
+                )
+                await self.conversation.ensure_budget(self, {'role': 'user', 'content': timed_request})
+                # 预算检查里的同步压缩已经完成；从这里开始产生的费用都归属于这一轮。
+                CURRENT_TURN.set(turn_id)
+                self._turn_memory_calls = []
+                self._turn_memory_saved = False
+                self._raw_request = request
+                auto = self.auto_memory
+                sequence = auto.begin_turn() if auto is not None else 0
+                # 显式记忆请求由主模型处理，不启动第二个写入来源。
+                prepared = (auto.prepare(request, sequence) if auto is not None
+                            and not auto.explicit_tools_available(request) else None)
+                signals: list[str] = []
+                async def buffer_text(text):
+                    # 搜索前提示无需等待最终答案；只有最终回答需要核对记忆事实。
+                    if text == "我查一下。" and on_text is not None:
+                        await on_text(text)
+                async def buffer_signal(signal):
+                    signals.append(signal)
+                try:
+                    answer = await self._agent_turn(timed_request, self.last_timings,
+                        turn_id=turn_id,
+                        on_text=(buffer_text if auto else on_text) if on_text else None,
+                        on_signal=(buffer_signal if auto else on_signal) if on_signal else None,
+                        search_announced=search_announced)
+                    # 可开放显式工具的输入先交给主模型；只有它未使用记忆工具才补做提取。
+                    if auto is not None and prepared is None and not self._turn_memory_calls:
+                        prepared = auto.prepare(request, sequence)
+                    original_answer = answer
+                    saved = []
+                    if prepared is not None:
+                        version, task = prepared
+                        wait_started = time.perf_counter()
+                        candidates = await task
+                        wait_s = time.perf_counter() - wait_started
+                        self.last_timings.append(("记忆核对等待", wait_s))
+                        logger.info("[自动记忆] 主回答完成后等待提取 %.3fs", wait_s)
+                        if not self._turn_memory_calls and not self.last_response_fallback:
+                            assert auto is not None
+                            saved = auto.apply(candidates, turn_id, sequence, version)
+                    if auto is not None:
+                        # 不能用“本轮有保存”替任何内容背书：声称保存时必须提到每条实际内容。
+                        if not self._turn_memory_saved and claims_memory_saved(answer):
+                            if not saved or not all(row.content in answer for row in saved):
+                                answer = await self._correct_memory_answer(answer, saved)
+                        if saved and not (claims_memory_saved(answer)
+                                          and all(row.content in answer for row in saved)):
+                            answer = answer.rstrip() + ("。" if answer and answer[-1] not in "。！？!?" else "")
+                            answer += "记下了：" + "、".join(row.content for row in saved) + "。"
+                        suffix = auto.question(mark=False)
+                        if suffix:
+                            answer += ("。" if answer and answer[-1] not in "。！？!?" else "") + suffix
+                        # 历史只保存核对后的文字；修正请求不允许调用业务工具。
+                        if answer != original_answer and self.messages and self.messages[-1]['role'] == 'assistant':
+                            previous = self.messages[-1]['content']
+                            # 保留服务端搜索结果、引用和 thinking 块，只替换对用户的最终文字。
+                            content = ([b for b in previous if
+                                (b.get('type') if isinstance(b, dict) else b.type) != 'text']
+                                + [{"type": "text", "text": answer}]) if isinstance(previous, list) else answer
+                            self.messages[-1] = {"role": "assistant", "content": content}
+                        if on_text is not None and (not signals or saved or suffix):
+                            await on_text(answer)
+                        if on_signal is not None:
+                            for signal in signals:
+                                await on_signal(signal)
+                        auto.ack_question(suffix)
+                finally:
+                    if prepared is not None and not prepared[1].done():
+                        prepared[1].cancel()
+                        await asyncio.gather(prepared[1], return_exceptions=True)
+                logger.debug("[耗时] %s ｜ brain总计 %.2fs", " ｜ ".join(
+                    f"{label} {elapsed:.2f}s" for label, elapsed in self.last_timings
+                ), time.perf_counter() - started)
+                self.conversation.after_turn(self)
+                status = "ok"
+                return answer
+            except BaseException as exc:
+                failure = type(exc).__name__
+                raise
             finally:
-                if prepared is not None and not prepared[1].done():
-                    prepared[1].cancel()
-                    await asyncio.gather(prepared[1], return_exceptions=True)
-            logger.debug("[耗时] %s ｜ brain总计 %.2fs", " ｜ ".join(
-                f"{label} {elapsed:.2f}s" for label, elapsed in self.last_timings
-            ), time.perf_counter() - started)
-            self.conversation.after_turn(self)
-            return answer
+                self._archive_turn(turn_id=turn_id, session_id=session_id, request=request,
+                                   answer=answer, status=status, failure=failure,
+                                   brain_ms=round((time.perf_counter() - started) * 1000))
+                CURRENT_TURN.reset(turn_token)
+                CURRENT_SESSION.reset(session_token)
+
+    def _archive_turn(self, *, turn_id: str, session_id: str, request: str, answer: str | None,
+                      status: str, failure: str | None, brain_ms: int) -> None:
+        """旁路写入对话存档；失败只记警告，不能影响已经生成的回答或异常。"""
+        if self.archive is None:
+            return
+        try:
+            # 存用户原话，不存大脑自己加的时间前缀；出错时只记异常类型，不记可能含敏感信息的消息。
+            self.archive.record_turn(turn_id=turn_id, session_id=session_id, user_text=request,
+                                     answer_text=answer, status=status, error=failure,
+                                     model=self.model or None, brain_ms=brain_ms)
+        except Exception as exc:
+            logger.warning("[存档] 写入失败：%s；对话不受影响", type(exc).__name__)
+
+    async def mark_delivery(self, turn_id: str, delivery: str) -> bool:
+        """语音层报告这一轮的回答实际播放得怎样。只更新存档，不修改对话历史。"""
+        if self.archive is None:
+            return False
+        try:
+            return self.archive.mark_delivery(turn_id, delivery)
+        except ValueError:
+            raise
+        except Exception as exc:
+            logger.warning("[存档] 播放状态写入失败：%s", type(exc).__name__)
+            return False
 
     async def _correct_memory_answer(self, answer, saved):
         """最多一次、无工具的措辞修正；不能重跑原任务或产生第二次副作用。"""
@@ -627,6 +690,7 @@ class AlphaBrain:
                 self.worker_task = None
                 self.store = self.gateway = None
                 self.memory_store = None
+                self.archive = None
 
     async def _stream_response(self, messages: list[MessageParam], *,
                                on_search: Callable[[], Awaitable[None]] | None = None):

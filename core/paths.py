@@ -8,6 +8,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ENV_FILE = PROJECT_ROOT / ".env"
 VENV_PYTHON = PROJECT_ROOT / ".venv" / "bin" / "python"
 OPERATIONS_DB = PROJECT_ROOT / "data" / "operations.db"
+# 对话存档：只有正式入口（brain.server、CLI）显式开启，测试和 eval 不会写入。
+ARCHIVE_DB = PROJECT_ROOT / "data" / "archive.db"
 
 # Google OAuth：客户端凭据和授权后保存的令牌（都不进 git）。
 GOOGLE_CREDENTIALS = PROJECT_ROOT / "credentials.json"

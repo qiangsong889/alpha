@@ -51,14 +51,17 @@ class QwenTTS:
                         raise RuntimeError('TTS 音色配置未生效')
                     break
 
-    async def stream(self, text):
-        """按原文合成 PCM16 24kHz。失败不自动重播；取消后关闭连接。"""
+    async def stream(self, text, *, turn_id=None):
+        """按原文合成 PCM16 24kHz。失败不自动重播；取消后关闭连接。
+
+        turn_id 是大脑那一轮的 ID：语音进程没有大脑的上下文变量，所以显式传入，费用才能归到那一轮。
+        """
         completed = False
         cost_id = None
         try:
             await self.ready()
             cost_id = record_cost('TTS', 'qwen3-tts-flash-realtime',
-                region=self.region, reason='synthesis_started_no_final_usage')
+                region=self.region, reason='synthesis_started_no_final_usage', turn_id=turn_id)
             await self.send('input_text_buffer.append', text=text)
             await self.send('input_text_buffer.commit')
             async with asyncio.timeout(90):
@@ -73,7 +76,7 @@ class QwenTTS:
                         usage = self.usage_meter.delta(response.get('usage') or {})
                         logger.info('[TTS用量] %s', json.dumps(usage, ensure_ascii=False))
                         record_cost('TTS', 'qwen3-tts-flash-realtime', usage,
-                                    event_id=cost_id, region=self.region)
+                                    event_id=cost_id, region=self.region, turn_id=turn_id)
                         log_summary()
                         completed = True
                         return

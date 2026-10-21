@@ -11,6 +11,7 @@ import time
 from uuid import uuid4
 
 from core.costs import costed_call
+from core.trace import CURRENT_TURN
 
 logger = logging.getLogger('alpha.context')
 SUMMARY_RULES = (
@@ -227,6 +228,8 @@ class ConversationContext:
         self.task = asyncio.create_task(self._compact(brain, snapshot, summary, session_id), name='context-summary')
 
     async def _compact(self, brain, snapshot, summary, session_id):
+        # 任务复制了触发它那一轮的上下文；压缩跨越多轮，费用只归属会话，不能算进最后一轮。
+        CURRENT_TURN.set(None)
         try:
             if await self.count(brain, snapshot, summary) <= self.soft_tokens:
                 return

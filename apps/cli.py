@@ -7,6 +7,7 @@ import os
 import time
 
 from brain.agent import AlphaBrain
+from core.paths import ARCHIVE_DB
 from integrations.mcp_client import format_error
 
 logger = logging.getLogger("alpha.cli")
@@ -33,7 +34,7 @@ async def main(voice: bool = False) -> None:
         from voice.listen import _get_model
         _get_model()
     # 大脑只创建一次，整个输入循环复用，才能保留多轮对话和个人 server 连接。
-    brain = AlphaBrain()
+    brain = AlphaBrain(archive_path=ARCHIVE_DB)
     try:
         await brain.start()
         print("Alpha 已启动。输入 exit / quit / 退出 结束对话。")

@@ -9,6 +9,7 @@
     POST /ask          {"text": "..."}    → {"answer": "...", "timings": [...]}
     POST /ask/stream   {"text": "..."}    → NDJSON delta / done / error
     POST /interrupted  {"spoken": "..."}  → {"ok": true}
+    POST /delivered    {"turn_id": "...", "delivery": "played|interrupted|not_played"} → {"ok": bool}
     GET  /health
 """
 
@@ -17,6 +18,8 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
+from typing import Literal
+from uuid import uuid4
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -27,9 +30,10 @@ from pydantic import BaseModel, Field
 from brain.agent import AlphaBrain
 from core.tool_timing import TOOL_TIMING_SINK
 from core.costs import configure_costs, cost_summary, log_summary
+from core.paths import ARCHIVE_DB
 
 logger = logging.getLogger("alpha.brain_server")
-brain = AlphaBrain(style="voice")
+brain = AlphaBrain(style="voice", archive_path=ARCHIVE_DB)
 stream_tasks: set[asyncio.Task[None]] = set()
 
 
@@ -46,6 +50,11 @@ class AskResponse(BaseModel):
 
 class InterruptedRequest(BaseModel):
     spoken: str = ""
+
+
+class DeliveredRequest(BaseModel):
+    turn_id: str = Field(pattern=r'^[0-9a-f]{32}$')
+    delivery: Literal["played", "interrupted", "not_played"]
 
 
 @asynccontextmanager
@@ -83,7 +92,7 @@ async def ask(body: AskRequest) -> AskResponse:
     # 语音层被打断时会断开连接，但这里不会被取消：正在执行的工具调用会完整做完，
     # 避免“写到一半”的状态；之后语音层再通过 /interrupted 告诉大脑用户实际听到了哪里。
     try:
-        answer = await brain.ask(body.text, search_announced=body.search_announced)
+        answer = await brain.ask(body.text, search_announced=body.search_announced, turn_id=uuid4().hex)
     except Exception as exc:
         logger.exception("brain.ask 失败")
         raise HTTPException(status_code=502, detail="大脑处理失败") from exc
@@ -93,6 +102,12 @@ async def ask(body: AskRequest) -> AskResponse:
 @app.post("/interrupted")
 async def interrupted(body: InterruptedRequest) -> dict[str, bool]:
     return {"ok": await brain.mark_interrupted(body.spoken)}
+
+
+@app.post("/delivered")
+async def delivered(body: DeliveredRequest) -> dict[str, bool]:
+    """语音层报告某一轮回答的实际播放结果；只更新存档，不改变对话历史或已执行的操作。"""
+    return {"ok": await brain.mark_delivery(body.turn_id, body.delivery)}
 
 
 @app.post("/ask/stream")
@@ -106,6 +121,11 @@ async def ask_stream(body: AskRequest) -> StreamingResponse:
     async def signal(name: str) -> None:
         events.put_nowait({"type": "signal", "name": name})
 
+    turn_id = uuid4().hex
+    if body.request_id is not None:
+        # 只有声明了 request_id 的客户端（Qwen 语音层）才会收到 turn 事件；其他客户端的协议不变。
+        events.put_nowait({"type": "turn", "request_id": body.request_id, "turn_id": turn_id})
+
     async def produce() -> None:
         started = time.perf_counter()
         def tool_timing(event):
@@ -114,7 +134,7 @@ async def ask_stream(body: AskRequest) -> StreamingResponse:
         token = TOOL_TIMING_SINK.set(tool_timing if body.request_id is not None else None)
         try:
             await brain.ask(body.text, on_text=emit, on_signal=signal,
-                            search_announced=body.search_announced)
+                            search_announced=body.search_announced, turn_id=turn_id)
             events.put_nowait({"type": "done", "timings": brain.last_timings})
         except Exception:
             logger.exception("brain.ask 流式处理失败")
