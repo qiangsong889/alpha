@@ -42,6 +42,7 @@ class AskRequest(BaseModel):
     text: str = Field(min_length=1, max_length=2000)
     search_announced: bool = False
     request_id: str | None = Field(default=None, max_length=64, pattern=r'^[A-Za-z0-9_-]+$')
+    interruptions: list['InterruptedRequest'] = Field(default_factory=list, max_length=200)
 
 
 class AskResponse(BaseModel):
@@ -50,7 +51,22 @@ class AskResponse(BaseModel):
 
 
 class InterruptedRequest(BaseModel):
-    spoken: str = ""
+    spoken: str = Field(default='', max_length=32000)
+    turn_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
+    session_id: str | None = Field(default=None, pattern=r'^[0-9a-f]{32}$')
+    uncertain_text: str = Field(default='', max_length=32000)
+    delivery: Literal['interrupted', 'not_played'] = 'interrupted'
+
+
+AskRequest.model_rebuild()
+
+
+async def apply_interruptions(items: list[InterruptedRequest]) -> None:
+    for item in items:
+        if item.turn_id is not None:  # 请求附带的兜底通知必须指定回答，不能套用到最新一条。
+            await brain.mark_interrupted(item.spoken, turn_id=item.turn_id,
+                                         session_id=item.session_id, uncertain_text=item.uncertain_text,
+                                         delivery=item.delivery)
 
 
 class DeliveredRequest(BaseModel):
@@ -99,6 +115,7 @@ async def ask(body: AskRequest) -> AskResponse:
     # 语音层被打断时会断开连接，但这里不会被取消：正在执行的工具调用会完整做完，
     # 避免“写到一半”的状态；之后语音层再通过 /interrupted 告诉大脑用户实际听到了哪里。
     try:
+        await apply_interruptions(body.interruptions)
         answer = await brain.ask(body.text, search_announced=body.search_announced, turn_id=uuid4().hex)
     except Exception as exc:
         logger.exception("brain.ask 失败")
@@ -108,7 +125,9 @@ async def ask(body: AskRequest) -> AskResponse:
 
 @app.post("/interrupted")
 async def interrupted(body: InterruptedRequest) -> dict[str, bool]:
-    return {"ok": await brain.mark_interrupted(body.spoken)}
+    return {"ok": await brain.mark_interrupted(body.spoken, turn_id=body.turn_id,
+                                               session_id=body.session_id, uncertain_text=body.uncertain_text,
+                                               delivery=body.delivery)}
 
 
 @app.post("/delivered")
@@ -140,9 +159,13 @@ async def ask_stream(body: AskRequest) -> StreamingResponse:
                               **event, 'elapsed_s': time.perf_counter() - started})
         token = TOOL_TIMING_SINK.set(tool_timing if body.request_id is not None else None)
         try:
+            await apply_interruptions(body.interruptions)
             await brain.ask(body.text, on_text=emit, on_signal=signal,
                             search_announced=body.search_announced, turn_id=turn_id)
-            events.put_nowait({"type": "done", "timings": brain.last_timings})
+            done = {"type": "done", "timings": brain.last_timings}
+            if body.request_id is not None:
+                done['session_id'] = brain.session_id
+            events.put_nowait(done)
         except Exception:
             logger.exception("brain.ask 流式处理失败")
             events.put_nowait({"type": "error", "text": "未能拿到完整结果，操作可能已生效，请先查询确认。"})

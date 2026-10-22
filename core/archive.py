@@ -82,7 +82,7 @@ class ArchiveStore:
             raise ValueError(f'未知的播放状态：{delivery}')
         with self._db:
             return self._db.execute("""
-                UPDATE turns SET delivery = ?, delivered_at = ?, spoken_text = ?
+                UPDATE turns SET delivery = ?, delivered_at = ?, spoken_text = COALESCE(?, spoken_text)
                 WHERE turn_id = ?
             """, (delivery, time.time(), spoken_text, turn_id)).rowcount == 1
 

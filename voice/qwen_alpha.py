@@ -44,6 +44,21 @@ def session_config(voice):
     return config
 
 
+def tts_sentences(text: str) -> list[str]:
+    """按句末切分，空白/标点并到邻句；有可读内容时拼回去与原文一致。"""
+    sentences: list[str] = []
+    leading = ''
+    for part in re.findall(r'.+?(?:[。！？!?；;\n]+|(?<!\d)\.(?!\d)|$)', text, re.S):
+        if any(char.isalnum() for char in part):
+            sentences.append(leading + part)
+            leading = ''
+        elif sentences:
+            sentences[-1] += part
+        else:
+            leading += part
+    return sentences
+
+
 class TurnCollector:
     """停顿不等于提交。未转写音频、继续说话、语义未完都会阻止调用大脑。"""
     def __init__(self, submit, prompt, router, *, window_s=2.0, continuation_s=5.0, mode='jev'):
@@ -231,6 +246,7 @@ class Report:
     timing: BatchTiming | None = None
     kind: str = 'reply'
     turn_id: str | None = None  # 大脑这一轮的 ID；用于报告实际播放结果
+    session_id: str | None = None
 
 
 # 这些报告是某一轮的最终输出；搜索进度只是过渡提示，不代表这一轮的播放结果。
@@ -256,6 +272,35 @@ class BrainBridge:
         self.epoch = 0
         self.delivered = OrderedDict()
         self.delivery_tasks = set()
+        self.interruptions = OrderedDict()
+        self.interruption_tasks = set()
+
+    def report_interruption(self, report, spoken='', uncertain_text='', *, delivery='interrupted'):
+        """同步登记屏障，再异步通知；失败的记录随下一次ask一起送达。"""
+        if report.turn_id is None or report.kind != 'reply' or report.turn_id in self.interruptions:
+            return
+        body = {'turn_id': report.turn_id, 'spoken': spoken, 'uncertain_text': uncertain_text}
+        if delivery != 'interrupted':
+            body['delivery'] = delivery
+        if report.session_id is not None:
+            body['session_id'] = report.session_id
+        self.interruptions[report.turn_id] = body
+        task = asyncio.create_task(self._post_interruption(body), name='brain-interrupted')
+        self.interruption_tasks.add(task)
+        task.add_done_callback(self.interruption_tasks.discard)
+
+    async def _post_interruption(self, body):
+        try:
+            response = await self.client.post(self.base_url + '/interrupted', json=body, timeout=3)
+            response.raise_for_status()
+            if response.json().get('ok'):
+                self.interruptions.pop(body['turn_id'], None)
+            else:
+                logger.warning('[打断通知] 未接受 %s，下一请求携带播放状态', body['turn_id'][:8])
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning('[打断通知] %s，下一请求携带播放状态', type(exc).__name__)
 
     def new_input(self):
         """新输入作废旧播报；不取消业务请求、不删除操作结果。"""
@@ -267,9 +312,9 @@ class BrainBridge:
     def submit(self, text, timing=None):
         self.requests.put_nowait((text, self.epoch, timing or BatchTiming()))
 
-    def say(self, text, *, epoch=None, timing=None, kind='reply', turn_id=None):
+    def say(self, text, *, epoch=None, timing=None, kind='reply', turn_id=None, session_id=None):
         epoch = self.epoch if epoch is None else epoch
-        report = Report(text, epoch, timing, kind, turn_id)
+        report = Report(text, epoch, timing, kind, turn_id, session_id)
         if epoch != self.epoch:
             logger.info('[播报跳过] 旧轮次结果已被新输入替代；操作结果仍保存在大脑')
             self.report_delivery(report, 'not_played')
@@ -278,9 +323,11 @@ class BrainBridge:
         self.changed.set()
 
     def report_delivery(self, report, delivery):
-        """把一轮回答的实际播放结果告诉大脑；只更新存档，失败不影响语音。"""
+        """更新播放存档；被作废的回答另发未播放通知，避免假定用户已听到。"""
         if report.turn_id is None or report.kind not in FINAL_KINDS or report.turn_id in self.delivered:
             return
+        if delivery == 'not_played':
+            self.report_interruption(report, delivery='not_played')
         self.delivered[report.turn_id] = delivery
         while len(self.delivered) > 200:
             self.delivered.popitem(last=False)
@@ -308,9 +355,17 @@ class BrainBridge:
             answer = ''
             device_done = False
             turn_id = None
+            session_id = None
             try:
+                # interrupt()登记屏障时不await，因此刚提交的新输入也不能越过打断通知。
+                if self.interruption_tasks:
+                    await asyncio.gather(*list(self.interruption_tasks))
+                pending = list(self.interruptions.values())
+                body = {'text': text, 'request_id': timing.id}
+                if pending:
+                    body['interruptions'] = pending
                 async with self.client.stream('POST', self.base_url + '/ask/stream',
-                                               json={'text': text, 'request_id': timing.id}, timeout=180) as response:
+                                               json=body, timeout=180) as response:
                     response.raise_for_status()
                     done = False
                     async for line in response.aiter_lines():
@@ -333,14 +388,17 @@ class BrainBridge:
                             raise RuntimeError('brain error')
                         elif event['type'] == 'done':
                             done = True
+                            session_id = event.get('session_id')
                     if not done:
                         raise RuntimeError('brain disconnected')
+                for item in pending:
+                    self.interruptions.pop(item['turn_id'], None)
                 timing.brain_done_at = time.perf_counter()
                 logger.info('[批次 %s] 大脑完成 %.3fs ｜ 停说→大脑完成 %s', timing.id,
                             timing.brain_done_at - started, timing.elapsed(timing.brain_done_at))
                 if answer.strip():
                     logger.info('[大脑] %.2fs ｜ %s', time.perf_counter() - started, answer)
-                    self.say(answer, epoch=epoch, timing=timing, turn_id=turn_id)
+                    self.say(answer, epoch=epoch, timing=timing, turn_id=turn_id, session_id=session_id)
                 elif device_done:
                     self.say(None, epoch=epoch, timing=timing, kind='tone', turn_id=turn_id)
                 else:
@@ -377,6 +435,7 @@ class Receiver:
         self.activity = activity
         self.paused = False
         self.current_report = None
+        self.tts_segments = []
         self.playback_tasks = set()
         self.interruption_filter = interruption_filter
         if uncertain_interruption not in {'hold', 'accept'}:
@@ -458,8 +517,22 @@ class Receiver:
             self.resolving.discard(item_id)
 
     async def interrupt(self):
+        report = self.current_report
+        if report is not None and not self.cancelled:
+            spoken, uncertain = '', ''
+            if self.tts is not None:
+                for ident, text in self.tts_segments:
+                    if self.player.playback_finished(ident) is True:
+                        spoken += text
+                    else:
+                        uncertain = text
+                        break
+            else:
+                # Omni无逐字对齐；宁可保守，不把收到音频误当成已听完。
+                uncertain = report.text or ''
+            self.bridge.report_interruption(report, spoken, uncertain)
         self.player.clear()
-        self.cancelled = self.active
+        self.cancelled = self.active or report is not None
         if self.response_id:
             self.ignored.add(self.response_id)
         if self.tts is not None:
@@ -614,6 +687,7 @@ class Receiver:
                 continue
             logger.info('[播报开始] 输入轮次=%d', report.epoch)
             self.current_report = report
+            self.tts_segments = []
             try:
                 played = await self._play_report(report.text)
                 self.bridge.report_delivery(report, 'played' if played else
@@ -669,23 +743,30 @@ class Receiver:
         turn_id = report.turn_id if report is not None else None
         self.active = True
         self.response_done.clear()
-        ident = 'tts_' + str(time.monotonic_ns())
+        self.tts_segments = []
         sent_at = time.perf_counter()
         async def generate():
             first = True
-            stream = self.tts.stream(text, turn_id=turn_id)
-            try:
-                async for chunk in stream:
-                    if self.cancelled:
-                        break
-                    if first:
-                        now = time.perf_counter()
-                        logger.info('[TTS首包] %s %.2fs（含首次连接）', self.tts.voice, now - sent_at)
-                        self.watch_playback(ident, self.current_report, now, sent_at)
-                        first = False
-                    self.player.append(chunk, ident, 0)
-            finally:
-                await stream.aclose()
+            for sentence in tts_sentences(text):
+                if self.cancelled:
+                    break
+                ident = 'tts_' + str(time.monotonic_ns())
+                self.tts_segments.append((ident, sentence))
+                stream = self.tts.stream(sentence, turn_id=turn_id)
+                try:
+                    async for chunk in stream:
+                        if self.cancelled:
+                            break
+                        if first:
+                            now = time.perf_counter()
+                            logger.info('[TTS首包] %s %.2fs（含首次连接）', self.tts.voice, now - sent_at)
+                            self.watch_playback(ident, self.current_report, now, sent_at)
+                            first = False
+                        self.player.append(chunk, ident, 0)
+                finally:
+                    await stream.aclose()
+                self.player.finish(ident)
+                # 下一句合成与上一句播放重叠，不必等扬声器放完才请求下一句。
         self.tts_task = asyncio.create_task(generate(), name='qwen-tts')
         try:
             try:
@@ -697,8 +778,8 @@ class Receiver:
                 self.player.clear()
                 logger.error('[TTS失败] %s；未自动改用 Omni，避免重复或改写播报', exc)
                 return False
-            self.player.finish(ident)
-            played = await self.player.wait_played(ident)
+            played = bool(self.tts_segments) and not self.cancelled and all([
+                await self.player.wait_played(ident) for ident, _ in self.tts_segments])
             self.question_deadline = 0.0
             if played and not self.cancelled and re.search(r'[？?]$|(?:吗|嗎|呢)[。！!]*$', text.strip()):
                 self.question_finished_at = time.perf_counter()
@@ -906,6 +987,9 @@ async def main():
                 tasks.create_task(status_writer.run())  # 退出（包括 Ctrl+C）时会写一次 stopped
         finally:
             await collector.close()
+            notifications = list(bridge.interruption_tasks | bridge.delivery_tasks)
+            if notifications:
+                await asyncio.gather(*notifications, return_exceptions=True)
             log_summary()
 
 

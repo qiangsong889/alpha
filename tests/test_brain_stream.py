@@ -20,7 +20,7 @@ class BrainStreamTests(unittest.IsolatedAsyncioTestCase):
         async def collect(text):
             response = await server.ask_stream(server.AskRequest(text=text, request_id='batch-' + text))
             return [json.loads(line) async for line in response.body_iterator]
-        with patch.object(server, 'brain', SimpleNamespace(ask=ask, last_timings=[])):
+        with patch.object(server, 'brain', SimpleNamespace(ask=ask, last_timings=[], session_id='s')):
             batches = await asyncio.gather(collect('one'), collect('two'))
         for name, events in zip(('one', 'two'), batches):
             tools = [e for e in events if e['type'] == 'tool_timing']

@@ -242,6 +242,15 @@ class StreamingPlayer:
             self._notify_playback(playback)
             self._trim_playbacks()
 
+    def playback_finished(self, item_id: str) -> bool:
+        """同步快照：含声卡延迟，供打断瞬间记录已完整播完的短句。"""
+        with self.lock:
+            playback = self._playbacks.get(item_id)
+            if playback is None:
+                return False
+            self._mark_played(playback)
+            return playback.result is True
+
     async def wait_played(self, item_id: str) -> bool:
         """等待该 item 播完；无音频、丢弃或被 clear 打断都返回 False。
 

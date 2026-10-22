@@ -206,6 +206,66 @@ class BrainTraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.brain.messages, history)
         self.assertFalse(await self.brain.mark_delivery("e" * 32, "played"))
 
+    async def test_interruption_preserves_full_answer_and_updates_next_request(self):
+        text = '购物清单更新了。提醒也设好了。'
+        self.client.messages.create.return_value = reply([NS(type="text", text=text)])
+        await self.brain.ask('安排任务', turn_id='a' * 32)
+        session = self.brain.session_id
+        self.assertTrue(await self.brain.mark_interrupted('购物清单更新了。', turn_id='a' * 32,
+                            session_id=session, uncertain_text='提醒也设好了。'))
+        self.assertIn(text, str(self.brain.messages))
+        turn = self.brain.archive.turn('a' * 32)
+        self.assertEqual((turn['answer_text'], turn['spoken_text'], turn['delivery']),
+                         (text, '购物清单更新了。', 'interrupted'))
+        await self.brain.mark_delivery('a' * 32, 'interrupted')
+        self.assertEqual(self.brain.archive.turn('a' * 32)['spoken_text'], '购物清单更新了。')
+        previous = repr(self.brain.messages)
+        self.assertTrue(await self.brain.mark_interrupted('购物清单更新了。', turn_id='a' * 32,
+                            session_id=session, uncertain_text='提醒也设好了。'))
+        self.assertEqual(previous, repr(self.brain.messages))
+        await self.brain.ask('继续', turn_id='b' * 32)
+        system = self.client.messages.create.call_args.kwargs['system']
+        self.assertIn('实际播放状态', system[-1]['text'])
+        self.assertIn('购物清单更新了。', system[-1]['text'])
+        self.assertIn('播放状态记录', str(self.brain.messages))
+        self.executor.assert_not_awaited()
+
+    async def test_old_interruption_is_not_a_standalone_hint_after_a_new_answer(self):
+        self.client.messages.create.return_value = reply([NS(type='text', text='第一句。第二句。')])
+        await self.brain.ask('问题一', turn_id='a' * 32)
+        self.assertTrue(await self.brain.mark_interrupted('第一句。', turn_id='a' * 32,
+                                                         uncertain_text='第二句。'))
+        await self.brain.ask('问题二', turn_id='b' * 32)
+        self.assertNotIn('[实际播放状态]', str(self.brain._request_system()))
+        await self.brain.ask('继续放音乐', turn_id='c' * 32)
+        self.assertNotIn('[实际播放状态]', str(self.client.messages.create.call_args.kwargs['system']))
+        self.assertIn('播放状态记录', str(self.brain.messages))
+        # 晚到的旧通知也不能让更早的回答重新成为独立提示。
+        self.assertTrue(await self.brain.mark_interrupted('第一句。', turn_id='a' * 32,
+                                                         uncertain_text='第二句。'))
+        self.assertNotIn('[实际播放状态]', str(self.brain._request_system()))
+        self.assertTrue(await self.brain.mark_interrupted('第一句。', turn_id='c' * 32,
+                                                         uncertain_text='第二句。'))
+        self.assertIn('[实际播放状态]', str(self.brain._request_system()))
+
+    async def test_stale_or_invalid_interruption_cannot_modify_another_answer(self):
+        self.client.messages.create.return_value = reply([NS(type='text', text='第一句。第二句。')])
+        await self.brain.ask('问', turn_id='a' * 32)
+        session = self.brain.session_id
+        before = repr(self.brain.messages)
+        self.assertFalse(await self.brain.mark_interrupted('伪造文字', turn_id='a' * 32))
+        self.assertFalse(await self.brain.mark_interrupted('', turn_id='a' * 32, session_id='f' * 32))
+        self.assertFalse(await self.brain.mark_interrupted('', turn_id='f' * 32))
+        self.assertEqual(before, repr(self.brain.messages))
+        # 模拟已压缩：播放状态仍能通过独立system记录到达下一次模型请求。
+        self.brain.messages.clear()
+        self.assertTrue(await self.brain.mark_interrupted('第一句。', turn_id='a' * 32,
+                            session_id=session, uncertain_text='第二句。'))
+        self.assertIn('实际播放状态', self.brain._request_system()[-1]['text'])
+        await self.brain.conversation.reset()
+        self.assertFalse(await self.brain.mark_interrupted('', turn_id='a' * 32, session_id=session))
+        self.assertNotIn('实际播放状态', str(self.brain._request_system()))
+
     async def test_archive_is_off_unless_an_entry_point_enables_it(self):
         plain = module.AlphaBrain()
         self.addAsyncCleanup(plain.close)
@@ -247,12 +307,28 @@ class ServerTraceTests(unittest.IsolatedAsyncioTestCase):
             response = await server.ask_stream(request)
             return [json.loads(line) async for line in response.body_iterator]
 
-        with patch.object(server, "brain", NS(ask=ask, last_timings=[])):
+        with patch.object(server, "brain", NS(ask=ask, last_timings=[], session_id="s")):
             with_id = await collect(server.AskRequest(text="开灯", request_id="batch1"))
             without = await collect(server.AskRequest(text="开灯"))
         self.assertEqual(with_id[0], {"type": "turn", "request_id": "batch1", "turn_id": seen[0]})
         self.assertTrue(all(event["type"] != "turn" for event in without))
         self.assertEqual([len(turn_id) for turn_id in seen], [32, 32])
+
+    async def test_pending_interruption_is_applied_before_next_ask(self):
+        order = []
+        async def mark(*args, **kwargs):
+            order.append('interruption')
+            return True
+        async def ask(*args, **kwargs):
+            order.append('ask')
+        fake = NS(mark_interrupted=mark, ask=ask, last_timings=[], session_id='s')
+        body = server.AskRequest(text='继续', interruptions=[{
+            'turn_id': 'a' * 32, 'spoken': '第一句。', 'uncertain_text': '第二句。'}])
+        with patch.object(server, 'brain', fake):
+            response = await server.ask_stream(body)
+            events = [json.loads(line) async for line in response.body_iterator]
+        self.assertEqual(order, ['interruption', 'ask'])
+        self.assertEqual(events[-1]['type'], 'done')
 
     async def test_delivered_validates_and_forwards(self):
         mark = AsyncMock(return_value=True)
