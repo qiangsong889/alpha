@@ -4,6 +4,74 @@ Alpha is a personal AI assistant under development. Its goal is to control home 
 
 The current implementation connects AlphaBrain and its voice/CLI frontends to Home Assistant and a local Google personal-services MCP server, including Tasks, Calendar, Docs, Drive, Gmail and YouTube Analytics.
 
+## Quick Start (current version)
+
+Everything runs from the `alpha/` directory with the project's `.venv` (see [Installation](#installation)
+and [Google Authorization](#google-authorization-and-api-verification) for first-time setup).
+The sections further down also document earlier paths (Qwen Omni, LiveKit, push-to-talk); the
+commands below are the ones in daily use.
+
+### 1. Check the configuration
+
+All settings live in `.env`; their names, defaults, and valid ranges are listed in
+[docs/SETTINGS.md](docs/SETTINGS.md). Required keys:
+
+| Process | Required |
+| --- | --- |
+| Brain | `HA_URL`, `HA_TOKEN`, `ANTHROPIC_API_KEY` |
+| Voice | `DASHSCOPE_API_KEY`, `QWEN_WORKSPACE_ID` (`TYPESAFE_API_KEY` recommended for Jev; without it Jev falls back to local rules) |
+
+```bash
+.venv/bin/python -m core.settings      # errors, warnings and current values; secrets shown only as set/unset
+```
+
+Both processes run the same check at startup and refuse to start with a list of every problem.
+
+### 2. Start Alpha (voice)
+
+```bash
+./start-qwen
+```
+
+The launcher starts AlphaBrain (`brain.server`, `http://127.0.0.1:8765`), waits until it is healthy,
+then starts the voice layer (`voice.qwen_alpha`: Silero segmenter → Qwen ASR → Jev → AlphaBrain → Qwen TTS).
+Press Ctrl+C once to stop both. If a healthy brain is already running, it is reused and left running.
+Wear headphones: there is no echo cancellation.
+
+To run the two processes separately (for example, to read each one's logs in its own terminal):
+
+```bash
+.venv/bin/python -m brain.server        # terminal 1: brain on 127.0.0.1:8765
+.venv/bin/python -m voice.qwen_alpha    # terminal 2: voice, after the brain is ready
+```
+
+Text-only, without voice or `brain.server` (the CLI runs its own AlphaBrain in-process):
+
+```bash
+.venv/bin/python -m apps.cli            # add --voice for macOS record + `say` playback
+```
+
+### 3. Open the console (optional, read-only)
+
+The console shows process status, today's conversations and costs, and every setting
+(saved value vs. the value the running process is using). It needs Node.js only to build the page once.
+
+```bash
+cd console/web && npm install && npm run build && cd ../..   # first time, or after frontend changes
+.venv/bin/python -m apps.console                             # 127.0.0.1:8770
+```
+
+Open the `http://127.0.0.1:8770/login?token=...` link printed in the terminal. The token changes
+on every start. The console can run whether or not Alpha is running. Details: [docs/CONSOLE.md](docs/CONSOLE.md).
+
+### 4. Tests
+
+```bash
+.venv/bin/python -m unittest discover -s tests -t .   # unit tests, no real services, no model calls
+```
+
+The eval in `eval/` calls real models and costs money; run only the cases affected by a change.
+
 ## Current Features
 
 ### Home Assistant Agent

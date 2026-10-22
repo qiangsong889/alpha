@@ -217,8 +217,8 @@ def configure_costs(path=None):
     global _ledger
     if _ledger is not None:
         _ledger.close()
-    from core.paths import PROJECT_ROOT
-    _ledger = CostLedger(path or PROJECT_ROOT / 'data' / 'costs.db')
+    from core.paths import COSTS_DB
+    _ledger = CostLedger(path or COSTS_DB)
     return _ledger
 
 
