@@ -103,6 +103,27 @@ class PersonalTaskTests(unittest.IsolatedAsyncioTestCase):
         self.resource.delete.assert_called_once()
         server._find_list_id.assert_not_called()  # ID 定位，不按名字重新找清单。
 
+    def test_delete_auth_failure_is_not_unknown_and_tells_how_to_reauthorize(self):
+        # 刷新令牌失败时请求没有发出（或已被 401 拒绝），不能记成"可能已生效"。
+        self.resource.delete.return_value.execute.side_effect = server.RefreshError("invalid_grant")
+        with self.assertRaises(server.GoogleAuthRequired) as error:
+            server.delete_task("list-1", "task-1")
+        self.assertIn("python -m servers.google_auth", str(error.exception))
+
+    def test_tasks_service_is_rebuilt_only_when_the_token_changes(self):
+        self.patches[0].stop()
+        self.addCleanup(setattr, server, "_TASKS_SERVICE", None)
+        server._TASKS_SERVICE = None
+        first, renewed = Mock(token="t1"), Mock(token="t2")
+        with patch.object(server, "get_credentials", side_effect=[first, first, renewed]) as load, \
+                patch.object(server, "build", side_effect=["service-1", "service-2"]) as build:
+            self.assertEqual(server.get_tasks_service(), "service-1")
+            self.assertEqual(server.get_tasks_service(), "service-1")
+            self.assertEqual(server.get_tasks_service(), "service-2")  # 刷新或重新授权后不用重启
+        self.assertEqual(load.call_count, 3)
+        self.assertEqual([call.kwargs["credentials"] for call in build.call_args_list], [first, renewed])
+        self.patches[0].start()
+
     async def test_invalid_inputs_do_not_call_google(self):
         for args in ({"list_name": "", "items": ["牛奶"]},
                      {"list_name": "购物清单", "items": []}):

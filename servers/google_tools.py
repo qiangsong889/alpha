@@ -8,7 +8,7 @@ from email.message import EmailMessage
 from email.message import Message
 from email.headerregistry import Address
 from email.utils import getaddresses
-from functools import cache, wraps
+from functools import wraps
 from html.parser import HTMLParser
 import hashlib
 import json
@@ -28,7 +28,8 @@ from googleapiclient.errors import HttpError  # type: ignore[import-untyped]
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import CallToolResult, TextContent
 
-from servers.google_auth import get_credentials, get_youtube_credentials
+from google.auth.exceptions import RefreshError
+from servers.google_auth import GoogleAuthRequired, get_credentials, get_youtube_credentials
 
 _LOCK = RLock()
 MAX_TEXT = 20000
@@ -38,23 +39,23 @@ _MAIL_DRAFTS: OrderedDict[str, dict] = OrderedDict()
 MAIL_TTL_S = 120.0
 
 
-@cache
-def _credentials():
-    return get_credentials()
+# (api, version) -> (创建时的 access token, service)。
+_SERVICES: dict[tuple[str, str], tuple[str | None, Any]] = {}
 
 
-@cache
-def _youtube_credentials():
-    return get_youtube_credentials()
-
-
-@cache
 def _service(api: str, version: str) -> Any:
-    # 全部调用在 _LOCK 内：googleapiclient/httplib2 的连接不是线程安全的。
-    # service 与凭据持续复用，让 access token 到期后由授权 transport 自动刷新。
-    credentials = _youtube_credentials() if api in {"youtubeAnalytics", "youtube"} else _credentials()
-    http = AuthorizedHttp(credentials, http=httplib2.Http(timeout=15))
-    return build(api, version, http=http, cache_discovery=False)
+    """每次调用都从磁盘取凭据（必要时刷新，失败抛 GoogleAuthRequired）；令牌换了才重建 service。
+
+    全部调用在 _LOCK 内：googleapiclient/httplib2 的连接不是线程安全的。
+    不把凭据缓存在内存里：重新授权后不用重启 Alpha；写请求发出前令牌也一定有效。
+    """
+    credentials = get_youtube_credentials() if api in {"youtubeAnalytics", "youtube"} else get_credentials()
+    cached = _SERVICES.get((api, version))
+    if cached is None or cached[0] != credentials.token:
+        http = AuthorizedHttp(credentials, http=httplib2.Http(timeout=15))
+        cached = (credentials.token, build(api, version, http=http, cache_discovery=False))
+        _SERVICES[(api, version)] = cached
+    return cached[1]
 
 
 def _result(text: str, data: dict, *, error: bool = False) -> CallToolResult:
@@ -69,6 +70,9 @@ class _Unknown(RuntimeError):
 def _execute(request: Any, *, write: bool = False) -> Any:
     try:
         return request.execute(num_retries=0)
+    except RefreshError as exc:
+        # 刷新在请求发出前失败，或请求被 401 拒绝后刷新失败：都没有执行，不能记成"结果未知"。
+        raise GoogleAuthRequired("已失效") from exc
     except HttpError as exc:
         # 4xx 通常是明确拒绝；408/5xx 无法保证写请求没有生效。
         if write and (exc.resp.status == 408 or exc.resp.status >= 500):
@@ -91,6 +95,8 @@ def _tool(function):
                            {"status": "unknown"}, error=True)
         except ToolError:
             raise
+        except RefreshError as exc:
+            raise GoogleAuthRequired("已失效") from exc
         except HttpError as exc:
             status = exc.resp.status
             reason = {401: "请重新授权", 403: "请检查 API 是否启用、scope 和资源访问权限",

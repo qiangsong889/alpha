@@ -14,9 +14,11 @@ from googleapiclient.errors import HttpError
 from googleapiclient.discovery import build
 from googleapiclient.http import HttpRequest
 from google.auth.credentials import AnonymousCredentials
+from google.auth.exceptions import RefreshError
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import CallToolResult, TextContent
 
 with patch("dotenv.load_dotenv"):
     from servers import personal_server
@@ -57,6 +59,13 @@ class GoogleToolsTests(unittest.IsolatedAsyncioTestCase):
 
     async def call(self, name, args):
         return await personal_server.mcp.call_tool(name, args)
+
+    async def wire_call(self, name, args):
+        """和 stdio 上的 MCP 服务端一样：工具抛出的异常变成 is_error 结果，而不是让客户端收到异常。"""
+        try:
+            return await self.call(name, args)
+        except Exception as exc:
+            return CallToolResult(content=[TextContent(type="text", text=str(exc))], is_error=True)
 
     def test_docs_nested_tabs_and_tables_are_read(self):
         paragraph = {"paragraph": {"elements": [{"textRun": {"content": "正文\n"}}]}}
@@ -324,10 +333,10 @@ class GoogleToolsTests(unittest.IsolatedAsyncioTestCase):
         messages = self.setup_send()
         store = OperationStore(":memory:")
         self.addCleanup(store.close)
-        worker = Mock(closed=False, call=AsyncMock(side_effect=self.call))
+        worker = Mock(closed=False, call=AsyncMock(side_effect=self.wire_call))
         gateway = ToolGateway(store, make_executor(ha_url="", http_client=None, worker=worker))
         for error, status in [(TimeoutError(), "unknown"), (http_error(503), "unknown"),
-                              (http_error(403), "failed")]:
+                              (http_error(403), "failed"), (RefreshError("invalid_grant"), "failed")]:
             args = {"to": "person@example.com", "subject": "会", "body": "正文"}
             prepared = tools.prepare_email("send_email", args)
             messages.send.return_value.execute.side_effect = error
@@ -341,8 +350,11 @@ class GoogleToolsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(op.status, status)
             if status == "unknown":
                 self.assertIn("不要重试", format_for_model(op)["text"])
+            if isinstance(error, RefreshError):
+                # 授权失败一定没有执行；模型拿到的文字要告诉用户怎么重新授权。
+                self.assertIn("python -m servers.google_auth", format_for_model(op)["text"])
             await gateway.execute(op.id)
-        self.assertEqual(messages.send.return_value.execute.call_count, 3)
+        self.assertEqual(messages.send.return_value.execute.call_count, 4)
         self.assertNotIn("sensitive", str(op.result))
 
     async def test_bad_inputs_are_mcp_errors_and_no_write_is_sent(self):
@@ -420,25 +432,25 @@ class GoogleToolsTests(unittest.IsolatedAsyncioTestCase):
                     self.assertFalse(result.is_error)
         self.assertGreaterEqual(len(requests), len(calls))
 
-    def test_service_credential_cache_is_separate_for_youtube(self):
+    def test_service_reloads_credentials_each_call_and_rebuilds_only_when_token_changes(self):
         self.patch.stop()
-        tools._service.cache_clear()
-        tools._credentials.cache_clear()
-        tools._youtube_credentials.cache_clear()
-        self.addCleanup(tools._service.cache_clear)
-        self.addCleanup(tools._credentials.cache_clear)
-        self.addCleanup(tools._youtube_credentials.cache_clear)
-        workspace, youtube = object(), object()
+        tools._SERVICES.clear()
+        self.addCleanup(tools._SERVICES.clear)
+        workspace, youtube = Mock(token="w1"), Mock(token="y1")
         with patch.object(tools, "get_credentials", return_value=workspace) as get_workspace, \
                 patch.object(tools, "get_youtube_credentials", return_value=youtube) as get_youtube, \
                 patch.object(tools, "AuthorizedHttp") as transport, patch.object(tools, "build"):
             tools._service("docs", "v1")
             tools._service("youtubeAnalytics", "v2")
-            tools._service("calendar", "v3")
-            tools._service("youtubeAnalytics", "v2")
-        get_workspace.assert_called_once()
-        get_youtube.assert_called_once()
-        self.assertEqual([call.args[0] for call in transport.call_args_list], [workspace, youtube, workspace])
+            tools._service("docs", "v1")
+            self.assertEqual([call.args[0] for call in transport.call_args_list], [workspace, youtube])
+            # 刷新或重新授权后令牌变了：用新凭据重建，不需要重启 Alpha。
+            renewed = Mock(token="w2")
+            get_workspace.return_value = renewed
+            tools._service("docs", "v1")
+        self.assertEqual(get_workspace.call_count, 3)  # 每次都从磁盘读取，不缓存凭据
+        self.assertEqual(get_youtube.call_count, 1)
+        self.assertEqual([call.args[0] for call in transport.call_args_list], [workspace, youtube, renewed])
 
     def test_oauth_allows_gmail_read_send_only_and_required_youtube_read(self):
         gmail = {scope for scope in SCOPES if "gmail" in scope or "mail.google.com" in scope}

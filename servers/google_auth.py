@@ -2,11 +2,13 @@
 
 在 alpha 目录运行：.venv/bin/python -m servers.google_auth
 将桌面应用的 OAuth 配置放在项目根目录 credentials.json 中。
-首次运行或调整权限后分组打开浏览器授权：Workspace 用 token.json，YouTube 用 youtube_token.json。
+每次运行都分组打开浏览器重新授权：Workspace 用 token.json，YouTube 用 youtube_token.json。
+Alpha 运行时只读取和刷新令牌，失败就报错，不会打开浏览器。
 """
 
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 
 from core.paths import GOOGLE_CREDENTIALS, GOOGLE_TOKEN, GOOGLE_YOUTUBE_TOKEN
@@ -16,6 +18,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
+from mcp.server.mcpserver.exceptions import ToolError
 
 
 # scopes 是应用向用户请求的权限范围；最终是否授权，由登录的 Google 用户确认。
@@ -70,6 +73,19 @@ def _compatible_scopes(creds: Credentials, scopes: list[str] | None = None,
     return set(scopes) <= actual and not (forbidden & actual)
 
 
+AUTHORIZE_COMMAND = ".venv/bin/python -m servers.google_auth"
+
+
+class GoogleAuthRequired(ToolError):
+    """授权缺失、失效或权限不符：请求没有发给 Google，本次操作没有执行。
+
+    继承 ToolError：MCP 只把 ToolError 的文字交给模型，模型才能告诉用户该怎么做。
+    """
+
+    def __init__(self, reason: str):
+        super().__init__(f"Google 授权{reason}，本次没有执行。请在电脑上运行 {AUTHORIZE_COMMAND} 重新授权。")
+
+
 def get_credentials() -> Credentials:
     """Workspace：Drive/Docs、Calendar、Tasks、Gmail，使用 token.json。"""
     return _get_credentials(SCOPES, TOKEN_PATH, FORBIDDEN_SCOPES | frozenset(YOUTUBE_SCOPES))
@@ -81,41 +97,51 @@ def get_youtube_credentials() -> Credentials:
 
 
 def _get_credentials(scopes: list[str], token_path: Path, forbidden: frozenset[str]) -> Credentials:
-    creds = None
-    if token_path.exists():
-        # token.json 保存之前同意授权的用户凭据，存在时优先复用，不必每次打开登录页。
-        try:
-            creds = Credentials.from_authorized_user_file(str(token_path))
-        except ValueError:
-            # 文件内容无效时，重新走授权流程。
-            creds = None
+    """运行时读取凭据：必要时刷新，失败就抛出 GoogleAuthRequired。
+
+    绝不打开浏览器：Alpha 常驻时没有人去点登录页，交互授权只能由 authorize() 发起。
+    每次都从磁盘读取，重新授权后不用重启 Alpha。
+    """
+    try:
+        # token.json 保存之前同意授权的用户凭据。
+        creds = Credentials.from_authorized_user_file(str(token_path))
+    except FileNotFoundError:
+        raise GoogleAuthRequired("还没有完成") from None
+    except ValueError:
+        raise GoogleAuthRequired("文件内容无效") from None
 
     # 权限增加或收窄都要重新授权；不把修改本地声明当作已经撤回 Google 端授权。
-    if creds is not None and not _compatible_scopes(creds, scopes, forbidden):
-        creds = None
-
-    if creds is not None and creds.expired and creds.refresh_token:
+    if not _compatible_scopes(creds, scopes, forbidden):
+        raise GoogleAuthRequired("的权限范围和当前要求不一致")
+    if creds.valid:
+        return creds
+    if not creds.refresh_token:
+        raise GoogleAuthRequired("已过期，且没有刷新令牌")
+    try:
         # access token 过期不一定要重新登录；refresh token 可换取新的 access token。
-        try:
-            creds.refresh(Request())
-        except RefreshError:
-            # refresh token 已失效或被撤销时，重新授权。
-            creds = None
+        creds.refresh(Request())
+    except RefreshError as exc:
+        # refresh token 过期（测试模式 7 天）、被撤销，或改了 Google 密码。
+        raise GoogleAuthRequired("已失效") from exc
+    return _checked_and_saved(creds, scopes, token_path, forbidden)
 
-    if creds is None or not creds.valid:
-        # credentials.json 标识“哪个应用在申请权限”，与用户授权后保存的 token.json 不同。
-        flow = InstalledAppFlow.from_client_secrets_file(
-            str(CREDENTIALS_PATH), scopes
-        )
-        # 临时启动本地服务接收授权回调；0 表示使用空闲端口。
-        # 桌面应用不支持增量授权；不要传 include_granted_scopes（即使值是 false）。
-        # 收窄权限仍靠移除旧授权，并在下面检查实际返回的 scope。
-        creds = flow.run_local_server(port=0, prompt="consent")
 
+def _authorize(scopes: list[str], token_path: Path, forbidden: frozenset[str]) -> Credentials:
+    """交互授权：总是打开浏览器拿一个新的 refresh token，不复用旧令牌。"""
+    # credentials.json 标识“哪个应用在申请权限”，与用户授权后保存的 token.json 不同。
+    flow = InstalledAppFlow.from_client_secrets_file(str(CREDENTIALS_PATH), scopes)
+    # 临时启动本地服务接收授权回调；0 表示使用空闲端口。
+    # 桌面应用不支持增量授权；不要传 include_granted_scopes（即使值是 false）。
+    # 收窄权限仍靠移除旧授权，并在下面检查实际返回的 scope。
+    creds = flow.run_local_server(port=0, prompt="consent")
     # SDK 声明可能返回多种凭据；本脚本只接受普通用户 OAuth 凭据。
     if not isinstance(creds, Credentials):
         raise TypeError("授权返回的不是 Google 用户 OAuth 凭据")
+    return _checked_and_saved(creds, scopes, token_path, forbidden)
 
+
+def _checked_and_saved(creds: Credentials, scopes: list[str], token_path: Path,
+                       forbidden: frozenset[str]) -> Credentials:
     actual = _actual_scopes(creds)
     if forbidden & actual:
         raise RuntimeError(
@@ -126,11 +152,14 @@ def _get_credentials(scopes: list[str], token_path: Path, forbidden: frozenset[s
     if not set(scopes) <= actual:
         raise RuntimeError(f"授权未包含 {token_path.name} 本组请求的全部权限，请重新授权并勾选所需权限")
 
-    # 刷新或首次授权后都保存更新后的凭据；只允许当前系统用户读写这个文件。
+    # 刷新或授权后保存；只允许当前系统用户读写。先写临时文件再改名：
+    # 大脑和个人服务可能同时刷新，读取方不会读到写了一半的文件。
     saved = json.loads(creds.to_json())
     saved["scopes"] = sorted(actual)  # 保留实际授予范围，不能把超额/部分授权藏在请求范围里。
-    token_path.write_text(json.dumps(saved), encoding="utf-8")
-    token_path.chmod(0o600)
+    temporary = token_path.with_name(f".{token_path.name}.{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(saved), encoding="utf-8")
+    temporary.chmod(0o600)
+    os.replace(temporary, token_path)
     return creds
 
 
@@ -139,11 +168,11 @@ def authorize(service: str = "all") -> None:
         raise ValueError("service 必须是 all、workspace 或 youtube")
     if service in {"all", "workspace"}:
         print("授权 Workspace（Drive、Docs、Calendar、Tasks、Gmail）")
-        get_credentials()
+        _authorize(SCOPES, TOKEN_PATH, FORBIDDEN_SCOPES | frozenset(YOUTUBE_SCOPES))
         print("Workspace 凭据已保存到 token.json")
     if service in {"all", "youtube"}:
         print("单独授权 YouTube，请选择要查询的频道")
-        get_youtube_credentials()
+        _authorize(YOUTUBE_SCOPES, YOUTUBE_TOKEN_PATH, FORBIDDEN_SCOPES | frozenset(SCOPES))
         print("YouTube 凭据已保存到 youtube_token.json")
 
 

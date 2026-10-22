@@ -129,7 +129,7 @@ The current allowlist is shown below. Available tools depend on what the Home As
 
 ### Google Personal Services
 
-- Browser-based OAuth authorization, saved credentials in `token.json`, and automatic refresh of expired credentials.
+- Browser-based OAuth authorization (`python -m servers.google_auth`), saved credentials in `token.json`, and automatic refresh at runtime without ever opening a browser.
 - Google Tasks API verification: list task list names and IDs.
 - Google Calendar API verification: retrieve up to three upcoming events from the primary calendar.
 - A local stdio MCP server exposing Google personal-services tools (see the tool list below).
@@ -208,7 +208,7 @@ Enter `exit`, `quit`, or `退出`, or press Ctrl+C to stop. Conversation history
 
 ## Google Authorization and API Verification
 
-Enable Google Tasks API, Google Calendar API, Google Docs API, Google Drive API, Gmail API and YouTube Analytics API in your Google Cloud project. Configure the OAuth consent screen, create a desktop application OAuth client, and save its downloaded configuration as `credentials.json` in this directory. If the app is in testing mode, add the Google account used for authorization as a test user.
+Enable Google Tasks API, Google Calendar API, Google Docs API, Google Drive API, Gmail API and YouTube Analytics API in your Google Cloud project. Configure the OAuth consent screen, create a desktop application OAuth client, and save its downloaded configuration as `credentials.json` in this directory. Set the app's publishing status to **In production** (Google Auth Platform → Audience): in **Testing**, refresh tokens expire after 7 days. A personal-use app (fewer than 100 users) does not need Google verification; sign-in shows an "unverified app" warning that you can click through (Advanced → continue). In testing mode, also add the authorizing account as a test user.
 
 Scopes are requested in **two separate OAuth flows**, using the same desktop
 client configuration. Google rejects `drive.file` combined with YouTube scopes
@@ -239,11 +239,13 @@ Run:
 python -m servers.google_auth
 ```
 
-On the first run, the script authorizes Workspace and YouTube sequentially in the browser. A temporary local server receives each authorization callback on an available port. Credentials are saved separately to `token.json` and `youtube_token.json`, then reused or refreshed independently on subsequent runs.
+Every run opens the browser and authorizes Workspace and YouTube sequentially, always issuing a new refresh token (an existing token is never silently reused). A temporary local server receives each authorization callback on an available port. Credentials are saved separately to `token.json` and `youtube_token.json` (mode 600, written atomically). `--service workspace` or `--service youtube` re-authorizes only one group.
+
+At runtime Alpha only reads and refreshes these files; it **never opens a browser**. If a token is missing, has the wrong scopes, or can no longer be refreshed (expired in testing mode, revoked, or the Google password changed while Gmail scopes are granted), the tool fails with "Google 授权…，本次没有执行。请在电脑上运行 .venv/bin/python -m servers.google_auth 重新授权。" Such failures are recorded as *failed*, not *unknown*: the request never reached Google. Credentials are re-read from disk on every tool call, so re-authorizing takes effect without restarting Alpha.
 
 Credentials belong to the account that grants authorization. This is a local, single-user setup; the Workspace account and the YouTube channel are selected separately.
 
-Names such as `My Tasks` in this script's output represent task lists, not individual tasks. The Calendar check uses `events().list()`; Tasks entries are not returned as Calendar events. The full `calendar` scope now also permits listing calendars. Running the module performs authorization only; its optional `main()` function contains the Tasks/Calendar read checks. If saved credentials lack the new scopes, the authorization flow opens again without manually deleting `token.json`.
+Names such as `My Tasks` in this script's output represent task lists, not individual tasks. The Calendar check uses `events().list()`; Tasks entries are not returned as Calendar events. The full `calendar` scope now also permits listing calendars. Running the module performs authorization only; its optional `main()` function contains the Tasks/Calendar read checks. If saved credentials lack the new scopes, tools report that authorization is needed; run the command above again.
 
 ## Test Tasks Tools with MCP Inspector
 

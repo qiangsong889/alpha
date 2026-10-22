@@ -7,7 +7,6 @@ import os
 import sys
 import time
 from contextlib import contextmanager
-from functools import cache
 from threading import RLock
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import re
@@ -20,7 +19,8 @@ from core.paths import ENV_FILE
 from core.settings import setting
 from opencc import OpenCC
 
-from servers.google_auth import get_credentials
+from google.auth.exceptions import RefreshError
+from servers.google_auth import GoogleAuthRequired, get_credentials
 from servers import weather
 from servers.google_tools import register_google_tools
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
@@ -52,15 +52,23 @@ def timed_step(name: str):
               file=sys.stderr, flush=True)
 
 
-@cache
+# (创建时的 access token, Tasks service)；调用方持有 _TASKS_LOCK。
+_TASKS_SERVICE: tuple[str | None, Any] | None = None
+
+
 def get_tasks_service() -> Any:
-    # 无参数缓存：第一次创建 service，以后复用同一对象和凭据，不在每次工具调用后关闭。
-    # 调用方持有 _TASKS_LOCK：串行使用非线程安全的 HTTP transport，
-    # 也确保首次并发请求不会重复创建 service。
+    """复用同一个 Tasks service；每次先从磁盘取凭据（必要时刷新，失败抛 GoogleAuthRequired）。
+
+    令牌换了（刷新或重新授权）才重建 service：重新授权后不用重启 Alpha，
+    写请求发出前令牌也一定有效。调用方持有 _TASKS_LOCK，串行使用非线程安全的 HTTP transport。
+    """
+    global _TASKS_SERVICE
     with timed_step("get_credentials"):
         creds = get_credentials()
-    with timed_step("build"):
-        return build("tasks", "v1", credentials=creds, cache_discovery=False)
+    if _TASKS_SERVICE is None or _TASKS_SERVICE[0] != creds.token:
+        with timed_step("build"):
+            _TASKS_SERVICE = (creds.token, build("tasks", "v1", credentials=creds, cache_discovery=False))
+    return _TASKS_SERVICE[1]
 
 
 def _find_list_id(tasks: Any, list_name: str) -> str:
@@ -186,6 +194,8 @@ def add_items(list_name: str, items: list[str], operation_id: str = "") -> CallT
                 task_id = created.get("id") if isinstance(created, dict) else None
                 if not isinstance(task_id, str) or not task_id.strip():
                     raise ValueError("Google 返回结果缺少新建任务 ID")
+            # 授权失败也按未知处理：前面的条目可能已经添加，不能整体报"没有执行"。
+            # get_tasks_service() 已在开始前刷新令牌，中途失效只会是授权恰好被撤销。
             except Exception as exc:
                 completed = "、".join(item["title"] for item in added) or "无"
                 text = (f'已确认添加到 {list_name}：{completed}。添加 "{title}" 的结果未知，'
@@ -218,6 +228,8 @@ def delete_task(list_id: str, task_id: str) -> CallToolResult:
         tasks = get_tasks_service()
         try:
             tasks.tasks().delete(tasklist=list_id, task=task_id).execute()
+        except RefreshError as exc:
+            raise GoogleAuthRequired("已失效") from exc  # 请求没有发出，或已被 401 拒绝：都没有执行
         except Exception as exc:
             return _task_result("删除结果未知，可能已经生效。不要重试，先查询核实。", {
                 "version": 1, "status": "unknown", "list_id": list_id,
@@ -298,6 +310,8 @@ def create_reminder(title: str, local_time: str, minutes_before: int = 0,
     with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
         try:
             created = calendar.events().insert(calendarId="primary", body=body).execute()
+        except RefreshError as exc:
+            raise GoogleAuthRequired("已失效") from exc  # 请求没有发出，或已被 401 拒绝：都没有执行
         except Exception as exc:
             return _task_result("创建提醒结果未知，可能已经生效，请先核实，不要重试。", {
                 "version": 1, "status": "unknown", "event_id": body.get("id"),
@@ -325,6 +339,8 @@ def delete_reminder(event_id: str) -> CallToolResult:
     with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
         try:
             calendar.events().delete(calendarId="primary", eventId=event_id).execute()
+        except RefreshError as exc:
+            raise GoogleAuthRequired("已失效") from exc  # 请求没有发出，或已被 401 拒绝：都没有执行
         except Exception as exc:
             return _task_result("删除提醒结果未知，请先查询核实，不要重试。", {
                 "version": 1, "status": "unknown", "event_id": event_id,
@@ -384,6 +400,8 @@ def restore_task(list_id: str, resource: dict) -> CallToolResult:
         try:
             created = service.tasks().insert(tasklist=list_id, body=body,
                                              **({"parent": resource["parent"]} if resource.get("parent") else {})).execute()
+        except RefreshError as exc:
+            raise GoogleAuthRequired("已失效") from exc  # 请求没有发出，或已被 401 拒绝：都没有执行
         except Exception as exc:
             return _task_result("恢复结果未知，可能已生效，不要重试", {
                 "status": "unknown", "error": f"{type(exc).__name__}: {exc}",
@@ -407,6 +425,8 @@ def restore_reminder(resource: dict) -> CallToolResult:
     with build("calendar", "v3", credentials=get_credentials(), cache_discovery=False) as calendar:
         try:
             created = calendar.events().insert(calendarId="primary", body=body).execute()
+        except RefreshError as exc:
+            raise GoogleAuthRequired("已失效") from exc  # 请求没有发出，或已被 401 拒绝：都没有执行
         except Exception as exc:
             return _task_result("恢复结果未知，可能已生效，不要重试", {
                 "status": "unknown", "error": f"{type(exc).__name__}: {exc}",
