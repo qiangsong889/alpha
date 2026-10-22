@@ -1,0 +1,852 @@
+
+2026-10-22 11:11:57,043 INFO alpha.costs [费用账本累计] ASR $0.038981 ｜ Claude $0.205025 ｜ Jev $0.003252 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.283801（不含 ASR参考估算）｜ 待核对 14 笔；非实际扣费
+2026-10-22 11:11:57,195 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00031991
+2026-10-22 11:11:57,196 INFO alpha.costs [费用账本累计] ASR $0.038981 ｜ Claude $0.205345 ｜ Jev $0.003252 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.284121（不含 ASR参考估算）｜ 待核对 13 笔；非实际扣费
+2026-10-22 11:11:57,196 INFO alpha.brain [缓存] Claude 第1次：cache_read=27189 tokens ｜ cache_write=65 tokens
+2026-10-22 11:11:57,197 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "Auto Light", "domain": ["input_boolean"]}
+2026-10-22 11:11:57,200 INFO alpha.qwen_alpha [批次 707a5242521c] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +1.134s
+2026-10-22 11:11:57,216 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:57,222 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:11:57,288 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:57,333 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:57,336 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Auto Light", "type": "
+2026-10-22 11:11:57,336 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:11:57,338 INFO alpha.qwen_alpha [批次 707a5242521c] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +1.270s ｜ 执行 0.136s
+2026-10-22 11:11:58,110 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:11:58,114 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00030549
+2026-10-22 11:11:58,115 INFO alpha.costs [费用账本累计] ASR $0.038981 ｜ Claude $0.205650 ｜ Jev $0.003252 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.284427（不含 ASR参考估算）｜ 待核对 13 笔；非实际扣费
+2026-10-22 11:11:58,115 INFO alpha.brain [缓存] Claude 第2次：cache_read=27254 tokens ｜ cache_write=162 tokens
+2026-10-22 11:11:58,115 INFO alpha.brain [工具] intent__HassTurnOff 参数：{}
+2026-10-22 11:11:58,119 INFO alpha.qwen_alpha [批次 707a5242521c] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +2.052s
+2026-10-22 11:11:58,132 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:58,139 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:11:58,175 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:58,179 INFO alpha.brain [结果] isError=True Error calling tool: Service handler cannot target all devices
+2026-10-22 11:11:58,180 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:11:58,183 INFO alpha.qwen_alpha [批次 707a5242521c] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +2.113s ｜ 执行 0.061s
+2026-10-22 11:11:58,653 INFO alpha.qwen_alpha [本地ASR] 开始 1f7dbd734027464c841c2bc8e37055e2
+2026-10-22 11:11:58,939 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:11:59,052 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00030711
+2026-10-22 11:11:59,053 INFO alpha.costs [费用账本累计] ASR $0.038981 ｜ Claude $0.205958 ｜ Jev $0.003252 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.284734（不含 ASR参考估算）｜ 待核对 13 笔；非实际扣费
+2026-10-22 11:11:59,053 INFO alpha.brain [缓存] Claude 第3次：cache_read=27416 tokens ｜ cache_write=62 tokens
+2026-10-22 11:11:59,053 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "Auto Light"}
+2026-10-22 11:11:59,056 INFO alpha.qwen_alpha [批次 707a5242521c] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +2.989s
+2026-10-22 11:11:59,069 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:59,075 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:11:59,121 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:59,142 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:11:59,146 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Auto Light", "type": "
+2026-10-22 11:11:59,146 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:11:59,148 INFO alpha.qwen_alpha [批次 707a5242521c] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +3.080s ｜ 执行 0.090s
+2026-10-22 11:11:59,517 INFO alpha.qwen_alpha [本地ASR] 结束 1f7dbd734027464c841c2bc8e37055e2 ｜ silence
+2026-10-22 11:11:59,519 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:11:59,739 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:11:59,864 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00031835
+2026-10-22 11:11:59,865 INFO alpha.costs [费用账本累计] ASR $0.038981 ｜ Claude $0.206276 ｜ Jev $0.003252 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.285052（不含 ASR参考估算）｜ 待核对 14 笔；非实际扣费
+2026-10-22 11:11:59,866 INFO alpha.brain [缓存] Claude 第4次：cache_read=27478 tokens ｜ cache_write=131 tokens
+2026-10-22 11:11:59,866 INFO alpha.brain [自动记忆] 主回答完成后等待提取 0.000s
+2026-10-22 11:11:59,867 INFO alpha.qwen_alpha [批次 707a5242521c] 大脑完成 3.802s ｜ 停说→大脑完成 5.50s
+2026-10-22 11:11:59,867 INFO alpha.qwen_alpha [大脑] 3.80s ｜ Auto Light 关了。
+2026-10-22 11:12:00,052 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00009000
+2026-10-22 11:12:00,052 INFO alpha.qwen_alpha [ASR转写] 1f7dbd734027464c841c2bc8e37055e2 ｜ 排队 0.000s ｜ commit→文字 0.53051595800207
+2026-10-22 11:12:00,052 INFO alpha.qwen_alpha [收集] 1 段，等待后续或完整性判断
+2026-10-22 11:12:00,052 INFO alpha.qwen_alpha 你：耶。
+2026-10-22 11:12:00,052 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+INFO:     127.0.0.1:63002 - "POST /interrupted HTTP/1.1" 200 OK
+2026-10-22 11:12:00,054 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/interrupted "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:63014 - "POST /delivered HTTP/1.1" 200 OK
+2026-10-22 11:12:00,055 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/delivered "HTTP/1.1 200 OK"
+2026-10-22 11:12:00,055 INFO alpha.qwen_alpha [播放结果] aa2d35c6 → not_played
+2026-10-22 11:12:00,092 INFO alpha.qwen_alpha [本地ASR] 开始 9ae0de3c17554024a2e0f95b7353ec5c
+2026-10-22 11:12:00,097 INFO alpha.costs [费用账本累计] ASR $0.039071 ｜ Claude $0.206276 ｜ Jev $0.003252 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.285142（不含 ASR参考估算）｜ 待核对 14 笔；非实际扣费
+2026-10-22 11:12:00,097 INFO alpha.jev [Jev] turn_complete route=unavailable confidence=— ｜ 45ms
+2026-10-22 11:12:01,374 INFO alpha.qwen_alpha [本地ASR] 结束 9ae0de3c17554024a2e0f95b7353ec5c ｜ silence
+2026-10-22 11:12:01,375 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:12:01,736 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00018000
+2026-10-22 11:12:01,737 INFO alpha.qwen_alpha [ASR转写] 9ae0de3c17554024a2e0f95b7353ec5c ｜ 排队 0.000s ｜ commit→文字 0.35854195899446495
+2026-10-22 11:12:01,737 INFO alpha.qwen_alpha [收集] 2 段，等待后续或完整性判断
+2026-10-22 11:12:01,737 INFO alpha.qwen_alpha 你：奥特莱也可以。
+2026-10-22 11:12:01,738 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:12:02,078 INFO alpha.qwen_alpha [本地ASR] 开始 b2f0c645ede640378ce15740b5c3f64a
+2026-10-22 11:12:02,080 INFO alpha.costs [费用账本累计] ASR $0.039251 ｜ Claude $0.206276 ｜ Jev $0.003252 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.285322（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:02,080 INFO alpha.jev [Jev] turn_complete route=unavailable confidence=— ｜ 343ms
+2026-10-22 11:12:03,355 INFO alpha.qwen_alpha [本地ASR] 结束 b2f0c645ede640378ce15740b5c3f64a ｜ silence
+2026-10-22 11:12:03,357 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:12:03,707 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00018000
+2026-10-22 11:12:03,707 INFO alpha.qwen_alpha [ASR转写] b2f0c645ede640378ce15740b5c3f64a ｜ 排队 0.000s ｜ commit→文字 0.346742624999024
+2026-10-22 11:12:03,708 INFO alpha.qwen_alpha [收集] 3 段，等待后续或完整性判断
+2026-10-22 11:12:03,708 INFO alpha.qwen_alpha 你：可以可以可以。
+2026-10-22 11:12:03,708 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:12:04,148 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:12:04,151 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003843
+2026-10-22 11:12:04,153 INFO alpha.costs [费用账本累计] ASR $0.039431 ｜ Claude $0.206276 ｜ Jev $0.003290 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.285541（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:04,154 INFO alpha.jev [Jev] turn_complete route=uncertain confidence=0.66 ｜ 446ms
+2026-10-22 11:12:04,154 INFO alpha.qwen_alpha [提交判断] Jev 不确定或不可用，回退 2s 窗口
+2026-10-22 11:12:05,709 INFO alpha.qwen_alpha [批次 da906c4ebd52] 停说事件→转写齐 0.35s ｜ 停说事件→提交 2.35s
+2026-10-22 11:12:05,709 INFO alpha.qwen_alpha [提交] 耶。；奥特莱也可以。；可以可以可以。
+2026-10-22 11:12:05,710 INFO alpha.qwen_alpha [批次 da906c4ebd52] 请求大脑 ｜ 排队 0.001s
+2026-10-22 11:12:05,718 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+INFO:     127.0.0.1:63020 - "POST /ask/stream HTTP/1.1" 200 OK
+2026-10-22 11:12:05,723 INFO alpha.costs [费用][Memory] 未计价：request_started_no_final_usage
+2026-10-22 11:12:05,723 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/ask/stream "HTTP/1.1 200 OK"
+2026-10-22 11:12:06,482 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:06,622 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00151888
+2026-10-22 11:12:06,624 INFO alpha.costs [费用账本累计] ASR $0.039431 ｜ Claude $0.207795 ｜ Jev $0.003290 ｜ Memory $0.006608 ｜ TTS $0.042276 ｜ 已知小计 $0.287059（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:06,624 INFO alpha.brain [缓存] Claude 第1次：cache_read=17435 tokens ｜ cache_write=10541 tokens
+2026-10-22 11:12:06,625 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"name": "Auto Light"}
+2026-10-22 11:12:06,629 INFO alpha.qwen_alpha [批次 da906c4ebd52] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +0.912s
+2026-10-22 11:12:06,644 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:06,650 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:06,658 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:06,660 INFO alpha.costs [费用][Memory] 估算/接口费用 $0.00021260
+2026-10-22 11:12:06,661 INFO alpha.costs [费用账本累计] ASR $0.039431 ｜ Claude $0.207795 ｜ Jev $0.003290 ｜ Memory $0.006821 ｜ TTS $0.042276 ｜ 已知小计 $0.287272（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:06,683 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:06,710 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:06,713 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Aut
+2026-10-22 11:12:06,715 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:06,719 INFO alpha.qwen_alpha [批次 da906c4ebd52] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +0.997s ｜ 执行 0.085s
+2026-10-22 11:12:07,509 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:07,588 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00032108
+2026-10-22 11:12:07,589 INFO alpha.costs [费用账本累计] ASR $0.039431 ｜ Claude $0.208116 ｜ Jev $0.003290 ｜ Memory $0.006821 ｜ TTS $0.042276 ｜ 已知小计 $0.287593（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:07,589 INFO alpha.brain [缓存] Claude 第2次：cache_read=27976 tokens ｜ cache_write=129 tokens
+2026-10-22 11:12:07,589 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "Auto Light"}
+2026-10-22 11:12:07,592 INFO alpha.qwen_alpha [批次 da906c4ebd52] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +1.875s
+2026-10-22 11:12:07,606 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:07,612 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:07,665 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:07,686 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:07,691 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Auto Light", "type": "
+2026-10-22 11:12:07,691 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:07,695 INFO alpha.qwen_alpha [批次 da906c4ebd52] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +1.974s ｜ 执行 0.099s
+2026-10-22 11:12:08,555 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:08,657 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00032662
+2026-10-22 11:12:08,658 INFO alpha.costs [费用账本累计] ASR $0.039431 ｜ Claude $0.208442 ｜ Jev $0.003290 ｜ Memory $0.006821 ｜ TTS $0.042276 ｜ 已知小计 $0.287920（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:08,658 INFO alpha.brain [缓存] Claude 第3次：cache_read=28105 tokens ｜ cache_write=131 tokens
+2026-10-22 11:12:08,658 INFO alpha.brain [自动记忆] 主回答完成后等待提取 0.000s
+2026-10-22 11:12:08,661 INFO alpha.qwen_alpha [批次 da906c4ebd52] 大脑完成 2.951s ｜ 停说→大脑完成 5.31s
+2026-10-22 11:12:08,661 INFO alpha.qwen_alpha [大脑] 2.95s ｜ Auto Light 已经是关着的。
+2026-10-22 11:12:08,661 INFO alpha.qwen_alpha [播报开始] 输入轮次=67
+2026-10-22 11:12:08,662 INFO alpha.costs [费用][TTS] 未计价：synthesis_started_no_final_usage
+2026-10-22 11:12:08,832 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens "HTTP/1.1 200 OK"
+2026-10-22 11:12:08,969 INFO alpha.qwen_alpha [TTS首包] Ethan 0.31s（含首次连接）
+2026-10-22 11:12:08,989 INFO alpha.qwen_alpha [批次 da906c4ebd52][reply] 停说事件→首帧播放（声卡估计）5.63s ｜ 首包→播放 0.020s
+2026-10-22 11:12:09,263 INFO alpha.qwen_alpha [TTS用量] {"characters": 24, "total_tokens": 34, "input_tokens": 10, "output_tokens": 24, "input_tokens_details": {"text_tokens": 10}, "output_tokens_details": {"text_tokens": 0, "audio_tokens": 24}}
+2026-10-22 11:12:09,265 INFO alpha.costs [费用][TTS] 估算/接口费用 $0.00031200
+2026-10-22 11:12:09,268 INFO alpha.costs [费用账本累计] ASR $0.039431 ｜ Claude $0.208442 ｜ Jev $0.003290 ｜ Memory $0.006821 ｜ TTS $0.042588 ｜ 已知小计 $0.288232（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:10,900 INFO alpha.qwen_alpha [播报结束] played=True ｜ TTS Ethan
+INFO:     127.0.0.1:63020 - "POST /delivered HTTP/1.1" 200 OK
+2026-10-22 11:12:10,906 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/delivered "HTTP/1.1 200 OK"
+2026-10-22 11:12:10,906 INFO alpha.qwen_alpha [播放结果] 741aa504 → played
+2026-10-22 11:12:11,651 INFO alpha.qwen_alpha [本地ASR] 开始 6c1abba8cb4847cbac582be07583139f
+2026-10-22 11:12:15,966 INFO alpha.qwen_alpha [本地ASR] 结束 6c1abba8cb4847cbac582be07583139f ｜ silence
+2026-10-22 11:12:15,970 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:12:16,650 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00045000
+2026-10-22 11:12:16,650 INFO alpha.qwen_alpha [ASR转写] 6c1abba8cb4847cbac582be07583139f ｜ 排队 0.000s ｜ commit→文字 0.6750066250024247
+2026-10-22 11:12:16,650 INFO alpha.qwen_alpha [收集] 1 段，等待后续或完整性判断
+2026-10-22 11:12:16,651 INFO alpha.qwen_alpha 你：把把那个餐厅的窗帘打开。
+2026-10-22 11:12:16,652 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:12:16,969 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:12:16,973 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003377
+2026-10-22 11:12:16,974 INFO alpha.costs [费用账本累计] ASR $0.039881 ｜ Claude $0.208442 ｜ Jev $0.003324 ｜ Memory $0.006821 ｜ TTS $0.042588 ｜ 已知小计 $0.288715（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:16,974 INFO alpha.jev [Jev] turn_complete route=complete confidence=0.88 ｜ 323ms
+2026-10-22 11:12:16,974 INFO alpha.qwen_alpha [提交判断] Jev 判断完整，立即提交，不等固定窗口
+2026-10-22 11:12:16,974 INFO alpha.qwen_alpha [批次 522230a13320] 停说事件→转写齐 0.68s ｜ 停说事件→提交 1.01s
+2026-10-22 11:12:16,974 INFO alpha.qwen_alpha [提交] 把把那个餐厅的窗帘打开。
+2026-10-22 11:12:16,974 INFO alpha.qwen_alpha [批次 522230a13320] 请求大脑 ｜ 排队 0.000s
+2026-10-22 11:12:16,980 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+INFO:     127.0.0.1:63027 - "POST /ask/stream HTTP/1.1" 200 OK
+2026-10-22 11:12:16,984 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/ask/stream "HTTP/1.1 200 OK"
+2026-10-22 11:12:16,984 INFO alpha.costs [费用][Memory] 未计价：request_started_no_final_usage
+2026-10-22 11:12:17,856 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:17,866 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:17,868 INFO alpha.costs [费用][Memory] 估算/接口费用 $0.00021210
+2026-10-22 11:12:17,871 INFO alpha.costs [费用账本累计] ASR $0.039881 ｜ Claude $0.208442 ｜ Jev $0.003324 ｜ Memory $0.007033 ｜ TTS $0.042588 ｜ 已知小计 $0.288928（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:18,063 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00038274
+2026-10-22 11:12:18,065 INFO alpha.costs [费用账本累计] ASR $0.039881 ｜ Claude $0.208825 ｜ Jev $0.003324 ｜ Memory $0.007033 ｜ TTS $0.042588 ｜ 已知小计 $0.289310（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:18,065 INFO alpha.brain [缓存] Claude 第1次：cache_read=27609 tokens ｜ cache_write=466 tokens
+2026-10-22 11:12:18,065 INFO alpha.brain [工具] intent__HassSetPosition 参数：{"position": 100, "area": "餐厅", "domain": ["cover"]}
+2026-10-22 11:12:18,070 INFO alpha.qwen_alpha [批次 522230a13320] 工具 intent__HassSetPosition 开始 ｜ 服务端请求内 +1.090s
+2026-10-22 11:12:18,084 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:18,090 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:18,134 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:18,137 INFO alpha.brain [结果] isError=True Error calling tool: The area does not exist (given area '餐厅', domains cover)
+2026-10-22 11:12:18,138 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:18,142 INFO alpha.qwen_alpha [批次 522230a13320] 工具 intent__HassSetPosition 结束 ｜ 服务端请求内 +1.158s ｜ 执行 0.068s
+2026-10-22 11:12:18,906 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:19,414 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00040245
+2026-10-22 11:12:19,415 INFO alpha.costs [费用账本累计] ASR $0.039881 ｜ Claude $0.209228 ｜ Jev $0.003324 ｜ Memory $0.007033 ｜ TTS $0.042588 ｜ 已知小计 $0.289713（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:19,415 INFO alpha.brain [缓存] Claude 第2次：cache_read=28075 tokens ｜ cache_write=144 tokens
+2026-10-22 11:12:19,415 INFO alpha.brain [工具] intent__HassSetPosition 参数：{"position": 100, "name": "餐厅左窗帘", "domain": ["cover"]}
+2026-10-22 11:12:19,418 INFO alpha.qwen_alpha [批次 522230a13320] 工具 intent__HassSetPosition 开始 ｜ 服务端请求内 +2.438s
+2026-10-22 11:12:19,427 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:19,432 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:19,717 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:19,742 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:19,747 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Blinds1", "type": "ent
+2026-10-22 11:12:19,747 INFO alpha.brain [工具] intent__HassSetPosition 参数：{"position": 100, "name": "餐厅右窗帘", "domain": ["cover"]}
+2026-10-22 11:12:19,750 INFO alpha.qwen_alpha [批次 522230a13320] 工具 intent__HassSetPosition 结束 ｜ 服务端请求内 +2.768s ｜ 执行 0.330s
+2026-10-22 11:12:19,751 INFO alpha.qwen_alpha [批次 522230a13320] 工具 intent__HassSetPosition 开始 ｜ 服务端请求内 +2.771s
+2026-10-22 11:12:19,763 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:19,770 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:20,125 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:20,153 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:20,157 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Blinds2", "type": "ent
+2026-10-22 11:12:20,158 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:20,161 INFO alpha.qwen_alpha [批次 522230a13320] 工具 intent__HassSetPosition 结束 ｜ 服务端请求内 +3.178s ｜ 执行 0.407s
+2026-10-22 11:12:20,945 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:21,050 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00036826
+2026-10-22 11:12:21,052 INFO alpha.costs [费用账本累计] ASR $0.039881 ｜ Claude $0.209596 ｜ Jev $0.003324 ｜ Memory $0.007033 ｜ TTS $0.042588 ｜ 已知小计 $0.290081（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:21,052 INFO alpha.brain [缓存] Claude 第3次：cache_read=28219 tokens ｜ cache_write=415 tokens
+2026-10-22 11:12:21,053 INFO alpha.brain [自动记忆] 主回答完成后等待提取 0.000s
+2026-10-22 11:12:21,055 INFO alpha.qwen_alpha [批次 522230a13320] 大脑完成 4.081s ｜ 停说→大脑完成 5.09s
+2026-10-22 11:12:21,055 INFO alpha.qwen_alpha [大脑] 4.08s ｜ 餐厅左窗帘和餐厅右窗帘打开了。
+2026-10-22 11:12:21,055 INFO alpha.qwen_alpha [播报开始] 输入轮次=68
+2026-10-22 11:12:21,056 INFO alpha.costs [费用][TTS] 未计价：synthesis_started_no_final_usage
+2026-10-22 11:12:21,377 INFO alpha.qwen_alpha [TTS首包] Ethan 0.32s（含首次连接）
+2026-10-22 11:12:21,400 INFO alpha.qwen_alpha [批次 522230a13320][reply] 停说事件→首帧播放（声卡估计）5.43s ｜ 首包→播放 0.022s
+2026-10-22 11:12:21,779 INFO alpha.qwen_alpha [TTS用量] {"characters": 29, "total_tokens": 42, "input_tokens": 9, "output_tokens": 33, "input_tokens_details": {"text_tokens": 9}, "output_tokens_details": {"text_tokens": 0, "audio_tokens": 33}}
+2026-10-22 11:12:21,780 INFO alpha.costs [费用][TTS] 估算/接口费用 $0.00037700
+2026-10-22 11:12:21,782 INFO alpha.costs [费用账本累计] ASR $0.039881 ｜ Claude $0.209596 ｜ Jev $0.003324 ｜ Memory $0.007033 ｜ TTS $0.042965 ｜ 已知小计 $0.290458（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:24,029 INFO alpha.qwen_alpha [播报结束] played=True ｜ TTS Ethan
+INFO:     127.0.0.1:63027 - "POST /delivered HTTP/1.1" 200 OK
+2026-10-22 11:12:24,036 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/delivered "HTTP/1.1 200 OK"
+2026-10-22 11:12:24,037 INFO alpha.qwen_alpha [播放结果] d4fe52eb → played
+2026-10-22 11:12:33,597 INFO alpha.qwen_alpha [本地ASR] 开始 4135351e103e4091912b9d237b1f9837
+2026-10-22 11:12:37,727 INFO alpha.qwen_alpha [本地ASR] 结束 4135351e103e4091912b9d237b1f9837 ｜ silence
+2026-10-22 11:12:37,729 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:12:38,472 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00045000
+2026-10-22 11:12:38,473 INFO alpha.qwen_alpha [ASR转写] 4135351e103e4091912b9d237b1f9837 ｜ 排队 0.000s ｜ commit→文字 0.739295041996229
+2026-10-22 11:12:38,473 INFO alpha.qwen_alpha [收集] 1 段，等待后续或完整性判断
+2026-10-22 11:12:38,473 INFO alpha.qwen_alpha 你：把餐厅灯打开啊，不，餐厅灯关掉，厨房灯打开。
+2026-10-22 11:12:38,474 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:12:38,812 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:12:38,816 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003339
+2026-10-22 11:12:38,819 INFO alpha.costs [费用账本累计] ASR $0.040331 ｜ Claude $0.209596 ｜ Jev $0.003357 ｜ Memory $0.007033 ｜ TTS $0.042965 ｜ 已知小计 $0.290941（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:38,819 INFO alpha.jev [Jev] turn_complete route=complete confidence=0.97 ｜ 346ms
+2026-10-22 11:12:38,819 INFO alpha.qwen_alpha [提交判断] Jev 判断完整，立即提交，不等固定窗口
+2026-10-22 11:12:38,819 INFO alpha.qwen_alpha [批次 716384015691] 停说事件→转写齐 0.75s ｜ 停说事件→提交 1.09s
+2026-10-22 11:12:38,819 INFO alpha.qwen_alpha [提交] 把餐厅灯打开啊，不，餐厅灯关掉，厨房灯打开。
+2026-10-22 11:12:38,820 INFO alpha.qwen_alpha [批次 716384015691] 请求大脑 ｜ 排队 0.000s
+2026-10-22 11:12:38,828 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+INFO:     127.0.0.1:63047 - "POST /ask/stream HTTP/1.1" 200 OK
+2026-10-22 11:12:38,834 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/ask/stream "HTTP/1.1 200 OK"
+2026-10-22 11:12:38,834 INFO alpha.costs [费用][Memory] 未计价：request_started_no_final_usage
+2026-10-22 11:12:39,648 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:39,954 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00037699
+2026-10-22 11:12:39,957 INFO alpha.costs [费用账本累计] ASR $0.040331 ｜ Claude $0.209973 ｜ Jev $0.003357 ｜ Memory $0.007033 ｜ TTS $0.042965 ｜ 已知小计 $0.291318（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:39,957 INFO alpha.brain [缓存] Claude 第1次：cache_read=28634 tokens ｜ cache_write=98 tokens
+2026-10-22 11:12:39,957 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "餐厅灯", "domain": ["light"]}
+2026-10-22 11:12:39,960 INFO alpha.qwen_alpha [批次 716384015691] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +1.134s
+2026-10-22 11:12:39,977 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:39,983 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:40,032 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:40,053 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:40,056 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room Light", "t
+2026-10-22 11:12:40,056 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"name": "厨房灯", "domain": ["light"]}
+2026-10-22 11:12:40,058 INFO alpha.qwen_alpha [批次 716384015691] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +1.231s ｜ 执行 0.096s
+2026-10-22 11:12:40,058 INFO alpha.qwen_alpha [批次 716384015691] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +1.233s
+2026-10-22 11:12:40,069 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:40,074 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:40,140 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:40,174 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:40,180 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Kitchen Light", "type"
+2026-10-22 11:12:40,180 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:40,183 INFO alpha.qwen_alpha [批次 716384015691] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +1.355s ｜ 执行 0.122s
+2026-10-22 11:12:40,700 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:40,703 INFO alpha.costs [费用][Memory] 估算/接口费用 $0.00021370
+2026-10-22 11:12:40,705 INFO alpha.costs [费用账本累计] ASR $0.040331 ｜ Claude $0.209973 ｜ Jev $0.003357 ｜ Memory $0.007247 ｜ TTS $0.042965 ｜ 已知小计 $0.291532（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:40,846 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:41,004 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00036514
+2026-10-22 11:12:41,006 INFO alpha.costs [费用账本累计] ASR $0.040331 ｜ Claude $0.210338 ｜ Jev $0.003357 ｜ Memory $0.007247 ｜ TTS $0.042965 ｜ 已知小计 $0.291897（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:41,006 INFO alpha.brain [缓存] Claude 第2次：cache_read=28732 tokens ｜ cache_write=373 tokens
+2026-10-22 11:12:41,006 INFO alpha.brain [自动记忆] 主回答完成后等待提取 0.000s
+2026-10-22 11:12:41,008 INFO alpha.qwen_alpha [批次 716384015691] 大脑完成 2.188s ｜ 停说→大脑完成 3.28s
+2026-10-22 11:12:41,008 INFO alpha.qwen_alpha [播报开始] 输入轮次=69
+2026-10-22 11:12:41,030 INFO alpha.qwen_alpha [批次 716384015691][tone] 停说事件→首帧播放（声卡估计）3.30s ｜ 提示音入队→播放 0.020s
+INFO:     127.0.0.1:63047 - "POST /delivered HTTP/1.1" 200 OK
+2026-10-22 11:12:41,144 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/delivered "HTTP/1.1 200 OK"
+2026-10-22 11:12:41,145 INFO alpha.qwen_alpha [播放结果] 10c6ba5a → played
+2026-10-22 11:12:43,518 INFO alpha.qwen_alpha [本地ASR] 开始 47f10bb424eb4e129336c6855f0660f9
+2026-10-22 11:12:45,855 INFO alpha.qwen_alpha [本地ASR] 结束 47f10bb424eb4e129336c6855f0660f9 ｜ silence
+2026-10-22 11:12:45,856 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:12:46,256 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00027000
+2026-10-22 11:12:46,257 INFO alpha.qwen_alpha [ASR转写] 47f10bb424eb4e129336c6855f0660f9 ｜ 排队 0.000s ｜ commit→文字 0.3964659999983269
+2026-10-22 11:12:46,257 INFO alpha.qwen_alpha [收集] 1 段，等待后续或完整性判断
+2026-10-22 11:12:46,258 INFO alpha.qwen_alpha 你：把楼下所有的灯都打开。
+2026-10-22 11:12:46,259 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:12:46,646 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:12:46,649 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003356
+2026-10-22 11:12:46,650 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.210338 ｜ Jev $0.003391 ｜ Memory $0.007247 ｜ TTS $0.042965 ｜ 已知小计 $0.292201（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:46,651 INFO alpha.jev [Jev] turn_complete route=complete confidence=0.97 ｜ 393ms
+2026-10-22 11:12:46,651 INFO alpha.qwen_alpha [提交判断] Jev 判断完整，立即提交，不等固定窗口
+2026-10-22 11:12:46,651 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 停说事件→转写齐 0.40s ｜ 停说事件→提交 0.80s
+2026-10-22 11:12:46,651 INFO alpha.qwen_alpha [提交] 把楼下所有的灯都打开。
+2026-10-22 11:12:46,651 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 请求大脑 ｜ 排队 0.000s
+2026-10-22 11:12:46,655 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+INFO:     127.0.0.1:63054 - "POST /ask/stream HTTP/1.1" 200 OK
+2026-10-22 11:12:46,658 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/ask/stream "HTTP/1.1 200 OK"
+2026-10-22 11:12:46,658 INFO alpha.costs [费用][Memory] 未计价：request_started_no_final_usage
+2026-10-22 11:12:47,550 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:47,730 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00033808
+2026-10-22 11:12:47,731 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.210676 ｜ Jev $0.003391 ｜ Memory $0.007247 ｜ TTS $0.042965 ｜ 已知小计 $0.292539（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:47,731 INFO alpha.brain [缓存] Claude 第1次：cache_read=29105 tokens ｜ cache_write=73 tokens
+2026-10-22 11:12:47,732 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"area": "Downstairs", "domain": ["light"]}
+2026-10-22 11:12:47,734 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +1.081s
+2026-10-22 11:12:47,749 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:47,755 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:47,790 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:47,793 INFO alpha.brain [结果] isError=True Error calling tool: No entities were in the area (given area 'Downstairs', domains light)
+2026-10-22 11:12:47,793 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:47,797 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +1.140s ｜ 执行 0.059s
+2026-10-22 11:12:48,083 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:48,085 INFO alpha.costs [费用][Memory] 估算/接口费用 $0.00021180
+2026-10-22 11:12:48,086 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.210676 ｜ Jev $0.003391 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.292751（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:48,370 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:48,516 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00034460
+2026-10-22 11:12:48,518 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.211021 ｜ Jev $0.003391 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.293095（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:48,518 INFO alpha.brain [缓存] Claude 第2次：cache_read=29178 tokens ｜ cache_write=125 tokens
+2026-10-22 11:12:48,518 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"area": "Living Room", "domain": ["light"]}
+2026-10-22 11:12:48,521 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +1.867s
+2026-10-22 11:12:48,531 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:48,536 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:48,595 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:48,619 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:48,628 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Living Room", "type": 
+2026-10-22 11:12:48,628 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:48,633 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +1.975s ｜ 执行 0.108s
+2026-10-22 11:12:49,255 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:49,617 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00039310
+2026-10-22 11:12:49,619 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.211414 ｜ Jev $0.003391 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.293488（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:49,619 INFO alpha.brain [缓存] Claude 第3次：cache_read=29303 tokens ｜ cache_write=179 tokens
+2026-10-22 11:12:49,619 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"area": "Dining Room", "domain": ["light"]}
+2026-10-22 11:12:49,622 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +2.968s
+2026-10-22 11:12:49,632 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:49,638 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:49,689 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:49,709 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:49,712 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room", "type": 
+2026-10-22 11:12:49,712 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"area": "Kitchen", "domain": ["light"]}
+2026-10-22 11:12:49,714 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +3.058s ｜ 执行 0.090s
+2026-10-22 11:12:49,714 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +3.060s
+2026-10-22 11:12:49,726 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:49,734 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:49,787 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:49,813 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:49,816 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Kitchen", "type": "are
+2026-10-22 11:12:49,817 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:49,820 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +3.163s ｜ 执行 0.103s
+2026-10-22 11:12:50,426 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:50,524 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00037477
+2026-10-22 11:12:50,526 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.211789 ｜ Jev $0.003391 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.293863（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:50,526 INFO alpha.brain [缓存] Claude 第4次：cache_read=29482 tokens ｜ cache_write=426 tokens
+2026-10-22 11:12:50,526 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:12:50,528 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +3.874s
+2026-10-22 11:12:50,540 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:50,545 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:50,595 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:50,622 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:50,626 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:12:50,626 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:50,629 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +3.972s ｜ 执行 0.098s
+2026-10-22 11:12:51,460 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:51,492 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00039816
+2026-10-22 11:12:51,494 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.212187 ｜ Jev $0.003391 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.294261（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:51,494 INFO alpha.brain [缓存] Claude 第5次：cache_read=29908 tokens ｜ cache_write=487 tokens
+2026-10-22 11:12:51,494 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "餐厅灯", "domain": ["light"]}
+2026-10-22 11:12:51,499 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +4.845s
+2026-10-22 11:12:51,511 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:51,522 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:51,578 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:51,607 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:51,612 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room Light", "t
+2026-10-22 11:12:51,613 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:51,617 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +4.959s ｜ 执行 0.114s
+2026-10-22 11:12:51,645 INFO alpha.qwen_alpha [本地ASR] 开始 8be22ac8b3e34f2cbc54b4019ec0246a
+2026-10-22 11:12:52,383 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:52,387 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00035040
+2026-10-22 11:12:52,388 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.212537 ｜ Jev $0.003391 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.294612（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:52,388 INFO alpha.brain [缓存] Claude 第6次：cache_read=30395 tokens ｜ cache_write=158 tokens
+2026-10-22 11:12:52,388 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:12:52,390 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +5.736s
+2026-10-22 11:12:52,401 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:52,406 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:52,453 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:52,483 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:52,492 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:12:52,493 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:52,495 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +5.839s ｜ 执行 0.103s
+2026-10-22 11:12:53,234 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:53,604 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00041261
+2026-10-22 11:12:53,606 INFO alpha.costs [费用账本累计] ASR $0.040601 ｜ Claude $0.212950 ｜ Jev $0.003391 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.295024（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:53,606 INFO alpha.brain [缓存] Claude 第7次：cache_read=30553 tokens ｜ cache_write=471 tokens
+2026-10-22 11:12:53,606 INFO alpha.brain [自动记忆] 主回答完成后等待提取 0.000s
+2026-10-22 11:12:53,612 INFO alpha.qwen_alpha [批次 9d307f52dfc1] 大脑完成 6.961s ｜ 停说→大脑完成 7.76s
+2026-10-22 11:12:53,612 INFO alpha.qwen_alpha [大脑] 6.96s ｜ 客厅灯和厨房灯开了，餐厅灯关了。楼下没有可按区域操作的灯，餐厅灯已单独关掉。
+2026-10-22 11:12:53,795 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens "HTTP/1.1 200 OK"
+2026-10-22 11:12:54,558 INFO alpha.qwen_alpha [本地ASR] 结束 8be22ac8b3e34f2cbc54b4019ec0246a ｜ silence
+2026-10-22 11:12:54,559 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:12:55,018 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00027000
+2026-10-22 11:12:55,018 INFO alpha.qwen_alpha [ASR转写] 8be22ac8b3e34f2cbc54b4019ec0246a ｜ 排队 0.000s ｜ commit→文字 0.45526104099553777
+2026-10-22 11:12:55,019 INFO alpha.qwen_alpha [收集] 1 段，等待后续或完整性判断
+2026-10-22 11:12:55,019 INFO alpha.qwen_alpha 你：哎，他怎么知道楼下是这些灯的？
+2026-10-22 11:12:55,021 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+INFO:     127.0.0.1:63054 - "POST /interrupted HTTP/1.1" 200 OK
+2026-10-22 11:12:55,024 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/interrupted "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:63066 - "POST /delivered HTTP/1.1" 200 OK
+2026-10-22 11:12:55,024 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/delivered "HTTP/1.1 200 OK"
+2026-10-22 11:12:55,025 INFO alpha.qwen_alpha [播放结果] 0849050b → not_played
+2026-10-22 11:12:55,345 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:12:55,347 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003402
+2026-10-22 11:12:55,350 INFO alpha.costs [费用账本累计] ASR $0.040871 ｜ Claude $0.212950 ｜ Jev $0.003425 ｜ Memory $0.007459 ｜ TTS $0.042965 ｜ 已知小计 $0.295328（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:55,350 INFO alpha.jev [Jev] turn_complete route=complete confidence=0.91 ｜ 331ms
+2026-10-22 11:12:55,350 INFO alpha.qwen_alpha [提交判断] Jev 判断完整，立即提交，不等固定窗口
+2026-10-22 11:12:55,350 INFO alpha.qwen_alpha [批次 0016db28f9fb] 停说事件→转写齐 0.46s ｜ 停说事件→提交 0.79s
+2026-10-22 11:12:55,350 INFO alpha.qwen_alpha [提交] 哎，他怎么知道楼下是这些灯的？
+2026-10-22 11:12:55,350 INFO alpha.qwen_alpha [批次 0016db28f9fb] 请求大脑 ｜ 排队 0.000s
+INFO:     127.0.0.1:63054 - "POST /ask/stream HTTP/1.1" 200 OK
+2026-10-22 11:12:55,354 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/ask/stream "HTTP/1.1 200 OK"
+2026-10-22 11:12:55,524 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens "HTTP/1.1 200 OK"
+2026-10-22 11:12:55,530 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:55,533 INFO alpha.costs [费用][Memory] 未计价：request_started_no_final_usage
+2026-10-22 11:12:56,413 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:56,416 INFO alpha.costs [费用][Memory] 估算/接口费用 $0.00021240
+2026-10-22 11:12:56,417 INFO alpha.costs [费用账本累计] ASR $0.040871 ｜ Claude $0.212950 ｜ Jev $0.003425 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.295541（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:56,716 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:56,727 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00193700
+2026-10-22 11:12:56,728 INFO alpha.costs [费用账本累计] ASR $0.040871 ｜ Claude $0.214887 ｜ Jev $0.003425 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.297478（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:56,728 INFO alpha.brain [缓存] Claude 第1次：cache_read=17435 tokens ｜ cache_write=13998 tokens
+2026-10-22 11:12:56,728 INFO alpha.brain [工具] intent__HassTurnOff 参数：{}
+2026-10-22 11:12:56,731 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +1.379s
+2026-10-22 11:12:56,740 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:56,745 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:56,788 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:56,791 INFO alpha.brain [结果] isError=True Error calling tool: Service handler cannot target all devices
+2026-10-22 11:12:56,791 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:56,796 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +1.439s ｜ 执行 0.060s
+2026-10-22 11:12:56,924 INFO alpha.qwen_alpha [本地ASR] 开始 2e6c9f42e65644369f19385eccc6947b
+2026-10-22 11:12:57,566 INFO alpha.qwen_alpha [本地ASR] 结束 2e6c9f42e65644369f19385eccc6947b ｜ silence
+2026-10-22 11:12:57,568 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:12:57,902 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00009000
+2026-10-22 11:12:57,902 INFO alpha.qwen_alpha [ASR转写] 2e6c9f42e65644369f19385eccc6947b ｜ 排队 0.000s ｜ commit→文字 0.329826207998849
+2026-10-22 11:12:57,903 INFO alpha.qwen_alpha [收集] 1 段，等待后续或完整性判断
+2026-10-22 11:12:57,903 INFO alpha.qwen_alpha 你：是。
+2026-10-22 11:12:57,904 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:12:57,939 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:58,121 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00036053
+2026-10-22 11:12:58,122 INFO alpha.costs [费用账本累计] ASR $0.040961 ｜ Claude $0.215247 ｜ Jev $0.003425 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.297928（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:12:58,122 INFO alpha.brain [缓存] Claude 第2次：cache_read=31433 tokens ｜ cache_write=64 tokens
+2026-10-22 11:12:58,123 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "餐厅灯", "domain": ["light"]}
+2026-10-22 11:12:58,126 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +2.774s
+2026-10-22 11:12:58,137 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:58,143 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:58,169 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:12:58,170 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003318
+2026-10-22 11:12:58,171 INFO alpha.costs [费用账本累计] ASR $0.040961 ｜ Claude $0.215247 ｜ Jev $0.003458 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.297961（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:58,172 INFO alpha.jev [Jev] turn_complete route=complete confidence=0.89 ｜ 268ms
+2026-10-22 11:12:58,172 INFO alpha.qwen_alpha [提交判断] Jev 判断完整，立即提交，不等固定窗口
+2026-10-22 11:12:58,172 INFO alpha.qwen_alpha [批次 9961efaad0ed] 停说事件→转写齐 0.34s ｜ 停说事件→提交 0.61s
+2026-10-22 11:12:58,172 INFO alpha.qwen_alpha [提交] 是。
+2026-10-22 11:12:58,297 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:58,326 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:58,331 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room Light", "t
+2026-10-22 11:12:58,331 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:58,336 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +2.979s ｜ 执行 0.205s
+2026-10-22 11:12:59,329 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:12:59,474 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00037242
+2026-10-22 11:12:59,476 INFO alpha.costs [费用账本累计] ASR $0.040961 ｜ Claude $0.215620 ｜ Jev $0.003458 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.298334（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:12:59,476 INFO alpha.brain [缓存] Claude 第3次：cache_read=31497 tokens ｜ cache_write=158 tokens
+2026-10-22 11:12:59,476 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "客厅灯", "domain": ["light"]}
+2026-10-22 11:12:59,479 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +4.127s
+2026-10-22 11:12:59,488 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:59,493 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:12:59,611 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:59,638 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:12:59,642 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "客厅灯", "type": "entity"
+2026-10-22 11:12:59,642 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:12:59,645 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +4.291s ｜ 执行 0.164s
+2026-10-22 11:13:01,496 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:01,582 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00037350
+2026-10-22 11:13:01,583 INFO alpha.costs [费用账本累计] ASR $0.040961 ｜ Claude $0.215993 ｜ Jev $0.003458 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.298707（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:13:01,583 INFO alpha.brain [缓存] Claude 第4次：cache_read=31655 tokens ｜ cache_write=154 tokens
+2026-10-22 11:13:01,583 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "厨房灯", "domain": ["light"]}
+2026-10-22 11:13:01,585 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +6.234s
+2026-10-22 11:13:01,594 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:01,602 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:01,714 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:01,747 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:01,752 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Kitchen Light", "type"
+2026-10-22 11:13:01,753 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:01,757 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +6.401s ｜ 执行 0.167s
+2026-10-22 11:13:03,038 INFO alpha.qwen_alpha [本地ASR] 开始 a8b046d8657647ddbc01d854fd9f5f32
+2026-10-22 11:13:03,269 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:03,371 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00036429
+2026-10-22 11:13:03,372 INFO alpha.costs [费用账本累计] ASR $0.040961 ｜ Claude $0.216357 ｜ Jev $0.003458 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.299072（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:13:03,372 INFO alpha.brain [缓存] Claude 第5次：cache_read=31809 tokens ｜ cache_write=156 tokens
+2026-10-22 11:13:03,372 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:03,375 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +8.023s
+2026-10-22 11:13:03,388 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:03,393 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:03,436 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:03,469 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:03,475 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:03,476 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:03,485 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +8.124s ｜ 执行 0.101s
+2026-10-22 11:13:04,532 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:04,614 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00041223
+2026-10-22 11:13:04,615 INFO alpha.costs [费用账本累计] ASR $0.040961 ｜ Claude $0.216770 ｜ Jev $0.003458 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.299484（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:13:04,615 INFO alpha.brain [缓存] Claude 第6次：cache_read=31965 tokens ｜ cache_write=439 tokens
+2026-10-22 11:13:04,615 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"name": "厨房灯", "domain": ["light"]}
+2026-10-22 11:13:04,618 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +9.266s
+2026-10-22 11:13:04,627 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:04,633 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:04,794 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:04,817 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:04,820 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Kitchen Light", "type"
+2026-10-22 11:13:04,820 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:04,824 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +9.469s ｜ 执行 0.203s
+2026-10-22 11:13:05,830 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:05,925 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00037024
+2026-10-22 11:13:05,927 INFO alpha.costs [费用账本累计] ASR $0.040961 ｜ Claude $0.217140 ｜ Jev $0.003458 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.299854（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:13:05,927 INFO alpha.brain [缓存] Claude 第7次：cache_read=32404 tokens ｜ cache_write=156 tokens
+2026-10-22 11:13:05,927 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:05,930 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +10.578s
+2026-10-22 11:13:05,943 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:05,948 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:05,988 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:06,027 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:06,032 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:06,033 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:06,037 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +10.681s ｜ 执行 0.102s
+2026-10-22 11:13:06,110 INFO alpha.qwen_alpha [本地ASR] 结束 a8b046d8657647ddbc01d854fd9f5f32 ｜ silence
+2026-10-22 11:13:06,112 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:13:06,572 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00036000
+2026-10-22 11:13:06,572 INFO alpha.qwen_alpha [ASR转写] a8b046d8657647ddbc01d854fd9f5f32 ｜ 排队 0.001s ｜ commit→文字 0.4531950410018908
+2026-10-22 11:13:06,573 INFO alpha.qwen_alpha [收集] 1 段，等待后续或完整性判断
+2026-10-22 11:13:06,573 INFO alpha.qwen_alpha 你：餐厅灯没有在楼下吗？呃不呃对。
+2026-10-22 11:13:06,574 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:13:06,869 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:13:06,871 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003364
+2026-10-22 11:13:06,874 INFO alpha.costs [费用账本累计] ASR $0.041321 ｜ Claude $0.217140 ｜ Jev $0.003492 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.300248（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:06,874 INFO alpha.jev [Jev] turn_complete route=uncertain confidence=0.56 ｜ 301ms
+2026-10-22 11:13:06,874 INFO alpha.qwen_alpha [提交判断] Jev 不确定或不可用，回退 2s 窗口
+2026-10-22 11:13:07,038 INFO alpha.qwen_alpha [本地ASR] 开始 c1ba4947637445ef971b58b81ece933b
+2026-10-22 11:13:07,127 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:07,199 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00042018
+2026-10-22 11:13:07,200 INFO alpha.costs [费用账本累计] ASR $0.041321 ｜ Claude $0.217560 ｜ Jev $0.003492 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.300668（不含 ASR参考估算）｜ 待核对 15 笔；非实际扣费
+2026-10-22 11:13:07,200 INFO alpha.brain [缓存] Claude 第8次：cache_read=32560 tokens ｜ cache_write=455 tokens
+2026-10-22 11:13:07,200 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"name": "客厅灯", "domain": ["light"]}
+2026-10-22 11:13:07,203 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +11.851s
+2026-10-22 11:13:07,217 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:07,226 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:07,285 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:07,308 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:07,311 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "客厅灯", "type": "entity"
+2026-10-22 11:13:07,311 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:07,314 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +11.960s ｜ 执行 0.108s
+2026-10-22 11:13:08,416 INFO alpha.qwen_alpha [本地ASR] 结束 c1ba4947637445ef971b58b81ece933b ｜ silence
+2026-10-22 11:13:08,418 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:13:08,788 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00018000
+2026-10-22 11:13:08,788 INFO alpha.qwen_alpha [ASR转写] c1ba4947637445ef971b58b81ece933b ｜ 排队 0.000s ｜ commit→文字 0.3662978749998729
+2026-10-22 11:13:08,788 INFO alpha.qwen_alpha [收集] 2 段，等待后续或完整性判断
+2026-10-22 11:13:08,788 INFO alpha.qwen_alpha 你：哎，那个又关了。
+2026-10-22 11:13:08,789 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:13:08,830 INFO alpha.qwen_alpha [本地ASR] 开始 560a94a3e48544c49922f6f5c13e8ea0
+2026-10-22 11:13:08,832 INFO alpha.costs [费用账本累计] ASR $0.041501 ｜ Claude $0.217560 ｜ Jev $0.003492 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.300848（不含 ASR参考估算）｜ 待核对 17 笔；非实际扣费
+2026-10-22 11:13:08,832 INFO alpha.jev [Jev] turn_complete route=unavailable confidence=— ｜ 44ms
+2026-10-22 11:13:10,205 INFO alpha.qwen_alpha [本地ASR] 结束 560a94a3e48544c49922f6f5c13e8ea0 ｜ silence
+2026-10-22 11:13:10,207 INFO alpha.costs [费用][ASR] 未计价：request_started_no_final_usage
+2026-10-22 11:13:10,237 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:10,333 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00037610
+2026-10-22 11:13:10,334 INFO alpha.costs [费用账本累计] ASR $0.041501 ｜ Claude $0.217936 ｜ Jev $0.003492 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.301224（不含 ASR参考估算）｜ 待核对 17 笔；非实际扣费
+2026-10-22 11:13:10,334 INFO alpha.brain [缓存] Claude 第9次：cache_read=33015 tokens ｜ cache_write=154 tokens
+2026-10-22 11:13:10,334 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:10,337 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +14.985s
+2026-10-22 11:13:10,347 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:10,352 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:10,393 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:10,422 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:10,424 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:10,424 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:10,428 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +15.073s ｜ 执行 0.088s
+2026-10-22 11:13:10,565 INFO alpha.costs [费用][ASR] 估算/接口费用 $0.00018000
+2026-10-22 11:13:10,565 INFO alpha.qwen_alpha [ASR转写] 560a94a3e48544c49922f6f5c13e8ea0 ｜ 排队 0.000s ｜ commit→文字 0.35459624999930384
+2026-10-22 11:13:10,566 INFO alpha.qwen_alpha [收集] 3 段，等待后续或完整性判断
+2026-10-22 11:13:10,566 INFO alpha.qwen_alpha 你：它在疯狂掉。
+2026-10-22 11:13:10,566 INFO alpha.costs [费用][Jev] 未计价：request_started_no_final_usage
+2026-10-22 11:13:10,987 INFO httpx2 HTTP Request: POST https://ai-gateway.vercel.sh/typesafe/v1/systemone "HTTP/1.1 200 OK"
+2026-10-22 11:13:10,990 INFO alpha.costs [费用][Jev] 估算/接口费用 $0.00003436
+2026-10-22 11:13:10,992 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.217936 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.301438（不含 ASR参考估算）｜ 待核对 17 笔；非实际扣费
+2026-10-22 11:13:10,992 INFO alpha.jev [Jev] turn_complete route=uncertain confidence=0.14 ｜ 426ms
+2026-10-22 11:13:10,992 INFO alpha.qwen_alpha [提交判断] Jev 不确定或不可用，回退 2s 窗口
+2026-10-22 11:13:12,005 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:12,171 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00042877
+2026-10-22 11:13:12,174 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.218365 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.301867（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:12,174 INFO alpha.brain [缓存] Claude 第10次：cache_read=33169 tokens ｜ cache_write=471 tokens
+2026-10-22 11:13:12,174 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "餐厅灯", "domain": ["light"]}
+2026-10-22 11:13:12,179 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +16.827s
+2026-10-22 11:13:12,195 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:12,203 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:12,254 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:12,293 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:12,296 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room Light", "t
+2026-10-22 11:13:12,296 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:12,300 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +16.945s ｜ 执行 0.118s
+2026-10-22 11:13:12,568 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 停说事件→转写齐 0.36s ｜ 停说事件→提交 2.36s
+2026-10-22 11:13:12,568 INFO alpha.qwen_alpha [提交] 餐厅灯没有在楼下吗？呃不呃对。；哎，那个又关了。；它在疯狂掉。
+2026-10-22 11:13:13,453 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:13,536 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00038285
+2026-10-22 11:13:13,537 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.218748 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.302250（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:13,538 INFO alpha.brain [缓存] Claude 第11次：cache_read=33640 tokens ｜ cache_write=158 tokens
+2026-10-22 11:13:13,538 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:13,541 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +18.189s
+2026-10-22 11:13:13,552 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:13,557 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:13,608 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:13,629 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:13,632 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:13,632 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:13,636 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +18.280s ｜ 执行 0.092s
+2026-10-22 11:13:15,538 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:15,670 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00043455
+2026-10-22 11:13:15,672 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.219182 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.302685（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:15,672 INFO alpha.brain [缓存] Claude 第12次：cache_read=33798 tokens ｜ cache_write=471 tokens
+2026-10-22 11:13:15,673 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "客厅灯", "domain": ["light"]}
+2026-10-22 11:13:15,675 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +20.323s
+2026-10-22 11:13:15,684 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:15,688 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:15,738 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:17,060 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:17,064 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "客厅灯", "type": "entity"
+2026-10-22 11:13:17,065 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:17,067 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +21.713s ｜ 执行 1.390s
+2026-10-22 11:13:18,516 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:18,613 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00038864
+2026-10-22 11:13:18,615 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.219571 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.303073（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:18,615 INFO alpha.brain [缓存] Claude 第13次：cache_read=34269 tokens ｜ cache_write=154 tokens
+2026-10-22 11:13:18,615 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:18,620 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +23.267s
+2026-10-22 11:13:18,630 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:18,638 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:18,695 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:18,724 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:18,730 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:18,731 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:18,735 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +23.379s ｜ 执行 0.111s
+2026-10-22 11:13:20,251 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:20,412 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00043881
+2026-10-22 11:13:20,415 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.220010 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.303512（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:20,415 INFO alpha.brain [缓存] Claude 第14次：cache_read=34423 tokens ｜ cache_write=455 tokens
+2026-10-22 11:13:20,415 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"name": "厨房灯", "domain": ["light"]}
+2026-10-22 11:13:20,417 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +25.065s
+2026-10-22 11:13:20,426 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:20,431 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:20,478 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:20,503 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:20,510 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Kitchen Light", "type"
+2026-10-22 11:13:20,511 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:20,516 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +25.158s ｜ 执行 0.093s
+2026-10-22 11:13:22,079 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:22,100 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00039498
+2026-10-22 11:13:22,101 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.220405 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.303907（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:22,101 INFO alpha.brain [缓存] Claude 第15次：cache_read=34878 tokens ｜ cache_write=156 tokens
+2026-10-22 11:13:22,101 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:22,103 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +26.751s
+2026-10-22 11:13:22,116 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:22,123 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:22,186 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:22,222 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:22,225 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:22,226 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:22,229 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +26.874s ｜ 执行 0.122s
+2026-10-22 11:13:23,305 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:23,433 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00044491
+2026-10-22 11:13:23,435 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.220850 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.304352（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:23,435 INFO alpha.brain [缓存] Claude 第16次：cache_read=35034 tokens ｜ cache_write=455 tokens
+2026-10-22 11:13:23,435 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"name": "客厅灯", "domain": ["light"]}
+2026-10-22 11:13:23,439 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +28.086s
+2026-10-22 11:13:23,448 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:23,457 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:23,500 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:23,524 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:23,526 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "客厅灯", "type": "entity"
+2026-10-22 11:13:23,526 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:23,529 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +28.175s ｜ 执行 0.088s
+2026-10-22 11:13:24,611 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:24,710 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00040084
+2026-10-22 11:13:24,710 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.221251 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.304753（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:24,710 INFO alpha.brain [缓存] Claude 第17次：cache_read=35489 tokens ｜ cache_write=154 tokens
+2026-10-22 11:13:24,711 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:24,713 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +29.361s
+2026-10-22 11:13:24,727 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:24,734 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:24,781 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:24,816 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:24,819 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:24,819 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:24,822 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +29.467s ｜ 执行 0.107s
+2026-10-22 11:13:26,537 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:26,580 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00042801
+2026-10-22 11:13:26,582 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.221679 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.305181（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:26,582 INFO alpha.brain [缓存] Claude 第18次：cache_read=35643 tokens ｜ cache_write=471 tokens
+2026-10-22 11:13:26,582 INFO alpha.brain [工具] intent__HassTurnOn 参数：{}
+2026-10-22 11:13:26,587 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +31.234s
+2026-10-22 11:13:26,604 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:26,610 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:26,653 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:26,655 INFO alpha.brain [结果] isError=True Error calling tool: Service handler cannot target all devices
+2026-10-22 11:13:26,656 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:26,660 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +31.303s ｜ 执行 0.069s
+2026-10-22 11:13:27,608 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:27,706 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00039559
+2026-10-22 11:13:27,707 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.222074 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.305576（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:27,707 INFO alpha.brain [缓存] Claude 第19次：cache_read=36114 tokens ｜ cache_write=62 tokens
+2026-10-22 11:13:27,707 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:27,710 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +32.358s
+2026-10-22 11:13:27,722 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:27,727 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:27,777 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:27,807 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:27,810 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:27,810 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:27,813 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +32.458s ｜ 执行 0.100s
+2026-10-22 11:13:29,143 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:29,283 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00045883
+2026-10-22 11:13:29,284 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.222533 ｜ Jev $0.003526 ｜ Memory $0.007671 ｜ TTS $0.042965 ｜ 已知小计 $0.306035（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:29,284 INFO alpha.brain [缓存] Claude 第20次：cache_read=36176 tokens ｜ cache_write=471 tokens
+2026-10-22 11:13:29,284 INFO alpha.brain [工具] intent__HassTurnOff 参数：{"name": "餐厅灯", "domain": ["light"]}
+2026-10-22 11:13:29,287 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 开始 ｜ 服务端请求内 +33.935s
+2026-10-22 11:13:29,296 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:29,303 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:29,365 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:29,385 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:29,389 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room Light", "t
+2026-10-22 11:13:29,390 ERROR alpha.brain_server brain.ask 流式处理失败
+Traceback (most recent call last):
+  File "/Users/shaynesong/randomshit/ai-course/alpha/brain/server.py", line 163, in produce
+    await brain.ask(body.text, on_text=emit, on_signal=signal,
+  File "/Users/shaynesong/randomshit/ai-course/alpha/brain/agent.py", line 595, in ask
+    answer = await self._agent_turn(timed_request, self.last_timings,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/shaynesong/randomshit/ai-course/alpha/brain/agent.py", line 1086, in _agent_turn
+    raise RuntimeError("达到最大调用次数，仍未生成最终回答")
+RuntimeError: 达到最大调用次数，仍未生成最终回答
+2026-10-22 11:13:29,393 INFO alpha.qwen_alpha [批次 0016db28f9fb] 工具 intent__HassTurnOff 结束 ｜ 服务端请求内 +34.037s ｜ 执行 0.103s
+2026-10-22 11:13:29,394 WARNING alpha.qwen_alpha [大脑] RuntimeError；不会自动重发
+2026-10-22 11:13:29,394 INFO alpha.qwen_alpha [播报跳过] 旧轮次结果已被新输入替代；操作结果仍保存在大脑
+2026-10-22 11:13:29,394 INFO alpha.qwen_alpha [批次 9961efaad0ed] 请求大脑 ｜ 排队 31.222s
+INFO:     127.0.0.1:63101 - "POST /delivered HTTP/1.1" 200 OK
+2026-10-22 11:13:29,399 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/delivered "HTTP/1.1 200 OK"
+2026-10-22 11:13:29,400 INFO alpha.qwen_alpha [播放结果] 302480b6 → not_played
+INFO:     127.0.0.1:63100 - "POST /ask/stream HTTP/1.1" 200 OK
+2026-10-22 11:13:29,404 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/ask/stream "HTTP/1.1 200 OK"
+2026-10-22 11:13:29,564 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens "HTTP/1.1 200 OK"
+2026-10-22 11:13:29,567 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:29,569 INFO alpha.costs [费用][Memory] 未计价：request_started_no_final_usage
+2026-10-22 11:13:30,452 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:30,458 INFO alpha.costs [费用][Memory] 估算/接口费用 $0.00021070
+2026-10-22 11:13:30,460 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.222533 ｜ Jev $0.003526 ｜ Memory $0.007882 ｜ TTS $0.042965 ｜ 已知小计 $0.306246（不含 ASR参考估算）｜ 待核对 17 笔；非实际扣费
+2026-10-22 11:13:30,480 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:30,569 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00194637
+2026-10-22 11:13:30,571 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.224479 ｜ Jev $0.003526 ｜ Memory $0.007882 ｜ TTS $0.042965 ｜ 已知小计 $0.308192（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:30,571 INFO alpha.brain [缓存] Claude 第1次：cache_read=17435 tokens ｜ cache_write=13981 tokens
+2026-10-22 11:13:30,571 INFO alpha.brain [自动记忆] 主回答完成后等待提取 0.000s
+2026-10-22 11:13:30,575 INFO alpha.qwen_alpha [批次 9961efaad0ed] 大脑完成 1.181s ｜ 停说→大脑完成 33.01s
+2026-10-22 11:13:30,575 INFO alpha.qwen_alpha [大脑] 1.18s ｜ 好的。
+2026-10-22 11:13:30,575 INFO alpha.qwen_alpha [播报跳过] 旧轮次结果已被新输入替代；操作结果仍保存在大脑
+2026-10-22 11:13:30,575 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 请求大脑 ｜ 排队 18.007s
+INFO:     127.0.0.1:63100 - "POST /interrupted HTTP/1.1" 200 OK
+2026-10-22 11:13:30,578 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/interrupted "HTTP/1.1 200 OK"
+INFO:     127.0.0.1:63101 - "POST /delivered HTTP/1.1" 200 OK
+2026-10-22 11:13:30,579 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/delivered "HTTP/1.1 200 OK"
+2026-10-22 11:13:30,579 INFO alpha.qwen_alpha [播放结果] e7b68f6d → not_played
+INFO:     127.0.0.1:63100 - "POST /ask/stream HTTP/1.1" 200 OK
+2026-10-22 11:13:30,585 INFO httpx2 HTTP Request: POST http://127.0.0.1:8765/ask/stream "HTTP/1.1 200 OK"
+2026-10-22 11:13:30,769 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens "HTTP/1.1 200 OK"
+2026-10-22 11:13:30,774 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:30,777 INFO alpha.costs [费用][Memory] 未计价：request_started_no_final_usage
+2026-10-22 11:13:31,727 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:31,730 INFO alpha.costs [费用][Memory] 估算/接口费用 $0.00021470
+2026-10-22 11:13:31,731 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.224479 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.308407（不含 ASR参考估算）｜ 待核对 17 笔；非实际扣费
+2026-10-22 11:13:31,959 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:32,057 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00196788
+2026-10-22 11:13:32,058 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.226447 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.310375（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:32,058 INFO alpha.brain [缓存] Claude 第1次：cache_read=17435 tokens ｜ cache_write=14133 tokens
+2026-10-22 11:13:32,058 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:32,061 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +1.480s
+2026-10-22 11:13:32,070 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:32,077 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:32,115 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:32,137 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:32,140 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:32,140 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:32,144 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +1.559s ｜ 执行 0.079s
+2026-10-22 11:13:33,087 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:33,198 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00041300
+2026-10-22 11:13:33,200 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.226860 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.310788（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:33,200 INFO alpha.brain [缓存] Claude 第2次：cache_read=31568 tokens ｜ cache_write=473 tokens
+2026-10-22 11:13:33,200 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"name": "餐厅灯", "domain": ["light"]}
+2026-10-22 11:13:33,203 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 intent__HassTurnOn 开始 ｜ 服务端请求内 +2.622s
+2026-10-22 11:13:33,215 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:33,221 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:33,273 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:33,299 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:33,303 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room Light", "t
+2026-10-22 11:13:33,303 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:33,308 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 intent__HassTurnOn 结束 ｜ 服务端请求内 +2.722s ｜ 执行 0.100s
+2026-10-22 11:13:34,776 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:34,848 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00036686
+2026-10-22 11:13:34,849 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.227227 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.311155（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:34,849 INFO alpha.brain [缓存] Claude 第3次：cache_read=32041 tokens ｜ cache_write=158 tokens
+2026-10-22 11:13:34,849 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:34,851 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +4.270s
+2026-10-22 11:13:34,861 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:34,866 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:34,911 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:34,937 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:34,940 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:34,940 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:34,943 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +4.360s ｜ 执行 0.089s
+2026-10-22 11:13:35,069 INFO alpha.qwen_alpha [本地ASR] 开始 0c4bc4ac0b484e868226a28534adad99
+2026-10-22 11:13:36,010 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:36,087 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00040957
+2026-10-22 11:13:36,088 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.227637 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.311564（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:36,088 INFO alpha.brain [缓存] Claude 第4次：cache_read=32199 tokens ｜ cache_write=487 tokens
+2026-10-22 11:13:36,089 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:36,094 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 homeassistant__GetLiveContext 开始 ｜ 服务端请求内 +5.512s
+2026-10-22 11:13:36,104 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:36,109 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:36,144 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:36,171 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:36,175 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:36,175 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:36,180 INFO alpha.qwen_alpha [批次 7a41dd79dd2b] 工具 homeassistant__GetLiveContext 结束 ｜ 服务端请求内 +5.594s ｜ 执行 0.082s
+^C[启动器] 正在关闭本次启动的进程，请稍等…
+2026-10-22 11:13:37,118 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:37,272 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00042594
+2026-10-22 11:13:37,273 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.228063 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.311990（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:37,273 INFO alpha.brain [缓存] Claude 第5次：cache_read=32686 tokens ｜ cache_write=487 tokens
+2026-10-22 11:13:37,273 INFO alpha.brain [工具] intent__HassTurnOn 参数：{"name": "餐厅灯", "domain": ["light"]}
+2026-10-22 11:13:37,294 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:37,301 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:37,350 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:37,374 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:37,377 INFO alpha.brain [结果] isError=False {"speech": {}, "response_type": "action_done", "data": {"success": [{"name": "Dining Room Light", "t
+2026-10-22 11:13:37,378 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:38,838 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:38,932 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00037818
+2026-10-22 11:13:38,933 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.228441 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.312368（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:38,933 INFO alpha.brain [缓存] Claude 第6次：cache_read=33173 tokens ｜ cache_write=158 tokens
+2026-10-22 11:13:38,933 INFO alpha.brain [工具] homeassistant__GetLiveContext 参数：{"domain": ["light"]}
+2026-10-22 11:13:38,945 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:38,955 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 202 Accepted"
+2026-10-22 11:13:39,022 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:39,054 INFO httpx2 HTTP Request: POST http://192.168.1.100:8123/api/mcp "HTTP/1.1 200 OK"
+2026-10-22 11:13:39,056 INFO alpha.brain [结果] isError=False {"result": "Live Context: An overview of the areas and the devices in this smart home:\n- names: Din
+2026-10-22 11:13:39,056 INFO alpha.costs [费用][Claude] 未计价：request_started_no_final_usage
+2026-10-22 11:13:40,098 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-10-22 11:13:40,416 INFO alpha.costs [费用][Claude] 估算/接口费用 $0.00043338
+2026-10-22 11:13:40,417 INFO alpha.costs [费用账本累计] ASR $0.041681 ｜ Claude $0.228874 ｜ Jev $0.003526 ｜ Memory $0.008096 ｜ TTS $0.042965 ｜ 已知小计 $0.312802（不含 ASR参考估算）｜ 待核对 16 笔；非实际扣费
+2026-10-22 11:13:40,418 INFO alpha.brain [缓存] Claude 第7次：cache_read=33331 tokens ｜ cache_write=487 tokens
+2026-10-22 11:13:40,418 INFO alpha.brain [自动记忆] 主回答完成后等待提取 0.000s
+2026-10-22 11:13:40,626 INFO httpx2 HTTP Request: POST https://api.anthropic.com/v1/messages/count_tokens "HTTP/1.1 200 OK"
+2026-10-22 11:13:40,633 INFO alpha.costs [费用][Context] 未计价：request_started_no_final_usage

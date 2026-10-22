@@ -424,7 +424,12 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(arguments_match({'confirmed': False}, {'confirmed': 0}, schema))
 
     def test_current_cases_and_any_rule(self):
-        self.assertEqual(len(self.cases), 39)
+        self.assertEqual(len(self.cases), 40)
+        # 议论/提问不能触发写操作；由工具规则判定，不用会误判的语义评分。
+        remark = self.cases['light-05']['turns'][1]
+        self.assertEqual(remark['expect_tools'], [])
+        self.assertLessEqual({'intent__HassTurnOn', 'intent__HassTurnOff', 'light__HassLightSet'}, set(remark['must_not']))
+        self.assertNotIn('reply_rubric', remark)
         case = self.cases['fail-01']
         self.assertNotIn('expect_reply_contains', case)
         self.assertEqual(case['expect_reply_contains_any'], ['没加上', '失败', '没能', '没有加', '没有成功'])

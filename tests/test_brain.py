@@ -612,6 +612,42 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         answer = await self.brain.ask("把灯关了")
         self.assertEqual(answer, "已关闭客厅灯和厨房灯。")
 
+    async def test_device_flip_flop_in_one_turn_never_reaches_home_assistant(self):
+        # 2026-10-22 事故：一句议论触发同一轮来回开关同一盏灯，直到 20 次请求上限。
+        self.ha[0].append({"name": "intent__HassTurnOff", "input_schema": {"type": "object"}})
+        self.executor.return_value = ExecutorResult(True, {"text": "完成", "structured_content": {
+            "response_type": "action_done", "data": {"success": [{"name": "餐厅灯", "type": "entity"}], "failed": []}}})
+        await self.brain.start()
+        dining = {"name": "餐厅灯", "domain": ["light"]}
+
+        def call(name, args, ident):
+            return reply([NS(type="tool_use", name=name, input=args, id=ident)], "tool_use")
+        self.client.messages.create.side_effect = [
+            call("intent__HassTurnOff", {}, "everything"),
+            call("intent__HassTurnOff", dining, "off"),
+            call("intent__HassTurnOn", dining, "on"),
+            call("intent__HassTurnOff", {"name": " 餐厅灯", "domain": ["light"]}, "off-again"),
+            reply([NS(type="text", text="餐厅灯关了。")]),
+        ]
+        await self.brain.ask("把餐厅灯关了")
+        self.executor.assert_awaited_once_with("intent__HassTurnOff", dining)
+        results = [request.kwargs["messages"][-1]["content"][0]
+                   for request in self.client.messages.create.call_args_list[1:]]
+        self.assertTrue(results[0]["is_error"])
+        self.assertIn("没有指定设备目标", results[0]["content"])
+        self.assertFalse(results[1]["is_error"])
+        for refused in [results[0], *results[2:4]]:
+            self.assertNotIn("可能已生效", refused["content"])  # 没有发出去，不能说可能已生效
+        for refused in results[2:4]:
+            self.assertTrue(refused["is_error"])
+            self.assertIn("本轮已经对这个目标操作过", refused["content"])
+        # 防护只管同一轮：用户下一次明确要求时照常执行。
+        self.client.messages.create.side_effect = [call("intent__HassTurnOn", dining, "next"),
+                                                   reply([NS(type="text", text="开了。")])]
+        await self.brain.ask("把餐厅灯打开")
+        self.assertEqual(self.executor.await_args.args, ("intent__HassTurnOn", dining))
+        self.assertEqual(self.executor.await_count, 2)
+
     async def test_email_preview_is_generated_by_code_and_only_next_turn_can_send(self):
         self.add_catalog_tools(*module.GOOGLE_WRITE_TOOLS)
         async def execute(name, args):
