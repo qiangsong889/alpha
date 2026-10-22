@@ -3,7 +3,7 @@ import asyncio
 import json
 from unittest import IsolatedAsyncioTestCase
 import httpx2
-from voice_pipeline.search_router import JevSearchRouter
+from voice.search_router import JevSearchRouter
 
 
 def answer(choice, confidence=.99):

@@ -1,7 +1,0 @@
-# 与本机实际安装并验证的版本保持一致；使用这里独立的 .venv。
-livekit-agents[console]==1.8.8
-livekit-plugins-openai==1.8.8
-livekit-plugins-silero==1.8.8
-livekit-plugins-turn-detector==1.8.8
-httpx==0.28.1
-python-dotenv==1.2.4

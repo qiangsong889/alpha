@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import numpy as np
 from voice.upload_gate import UploadGate, make_upload_gate
-from voice.qwen_realtime import send_microphone
+from voice.omni_transport import send_microphone
 
 SILENCE = bytes(640)
 VOICE = bytes([1]) * 640
@@ -151,7 +151,7 @@ class SendIntegrationTests(IsolatedAsyncioTestCase):
                 def __exit__(self, *args):
                     closed.set()
             return Stream()
-        with patch('voice.qwen_realtime.sd.InputStream', side_effect=factory):
+        with patch('voice.omni_transport.sd.InputStream', side_effect=factory):
             task = asyncio.create_task(send_microphone(ws, Mock(), on_sent=sent, upload_gate=g))
             try:
                 if expected_calls:

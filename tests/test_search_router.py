@@ -4,9 +4,9 @@ import asyncio
 import json
 import unittest
 
-import httpx
+import httpx2 as httpx
 
-from search_router import JevSearchRouter, JEV_URL
+from voice.search_router import JevSearchRouter, JEV_URL
 
 
 def answer(choice="web", confidence=0.95):
@@ -110,7 +110,7 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
                 requests.append(request)
                 return httpx.Response(status, text="sensitive response")
             async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as client:
-                with self.assertLogs("alpha.voice_pipeline", "INFO") as logs:
+                with self.assertLogs("alpha.jev", "INFO") as logs:
                     self.assertIsNone(await JevSearchRouter(client, api_key="fake-secret").classify("hi", []))
                 self.assertEqual(len(requests), 1)
                 self.assertNotIn("fake-secret", " ".join(logs.output))

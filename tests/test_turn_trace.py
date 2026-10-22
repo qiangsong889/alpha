@@ -330,6 +330,31 @@ class ServerTraceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(order, ['interruption', 'ask'])
         self.assertEqual(events[-1]['type'], 'done')
 
+    async def test_attached_notifications_without_turn_id_never_target_latest_answer(self):
+        # 两个HTTP入口都必须过滤缺失/null ID；合法的后续通知仍正常转交。
+        for streaming in (False, True):
+            with self.subTest(streaming=streaming):
+                mark = AsyncMock(return_value=True)
+                ask = AsyncMock(return_value='新回答')
+                fake = NS(mark_interrupted=mark, ask=ask, last_timings=[], session_id='d' * 32)
+                body = server.AskRequest(text='新问题', interruptions=[
+                    {'spoken': '缺少回答ID的通知'},
+                    {'turn_id': None, 'spoken': '也不能套到最新回答上'},
+                    {'turn_id': 'a' * 32, 'session_id': 'd' * 32,
+                     'spoken': '第一句。', 'uncertain_text': '第二句。'},
+                ])
+                with patch.object(server, 'brain', fake):
+                    if streaming:
+                        response = await server.ask_stream(body)
+                        events = [json.loads(line) async for line in response.body_iterator]
+                        self.assertEqual(events[-1]['type'], 'done')
+                    else:
+                        response = await server.ask(body)
+                        self.assertEqual(response.answer, '新回答')
+                mark.assert_awaited_once_with('第一句。', turn_id='a' * 32,
+                    session_id='d' * 32, uncertain_text='第二句。', delivery='interrupted')
+                ask.assert_awaited_once()
+
     async def test_delivered_validates_and_forwards(self):
         mark = AsyncMock(return_value=True)
         with patch.object(server, "brain", NS(mark_delivery=mark)):

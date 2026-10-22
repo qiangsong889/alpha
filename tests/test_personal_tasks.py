@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock, Mock, patch
 with patch("dotenv.load_dotenv"):
     from servers import personal_server as server
 
-from core.task_compensation import undo_add_items
 from integrations.mcp_client import merge_tools
 from integrations.operations import OperationStore
 from integrations.tool_executor import make_executor, format_for_model
@@ -58,8 +57,10 @@ class PersonalTaskTests(unittest.IsolatedAsyncioTestCase):
         text, data = format_for_model(saved)["text"].split("\n", 1)
         self.assertEqual(text, "已添加到 购物清单：牛奶")
         self.assertEqual(json.loads(data), saved.result["structured_content"])
-        request = undo_add_items(saved)[0]
-        undo = await gateway.submit("undo-turn", request.name, request.arguments)
+        receipt = saved.result["structured_content"]
+        undo = await gateway.submit("undo-turn", "delete_task", {
+            "list_id": receipt["list_id"], "task_id": receipt["created"][0]["task_id"],
+        })
         self.assertEqual(undo.status, "pending")  # 删除不会直接执行。
         self.resource.delete.assert_not_called()
         gateway.approve(undo.id)
@@ -87,8 +88,6 @@ class PersonalTaskTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["unattempted"], ["酱油"])
         self.assertEqual(self.resource.insert.call_count, 2)
         self.assertIn("不要重试", format_for_model(op)["text"])
-        with self.assertRaises(ValueError):
-            undo_add_items(op)
 
     async def test_missing_insert_id_is_unknown_not_success(self):
         self.resource.insert.return_value.execute.return_value = {}

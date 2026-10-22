@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock
 import httpx2
 
 from voice.qwen_alpha import BatchTiming, BrainBridge, Receiver, Report, TurnCollector, tts_sentences
-from voice.qwen_realtime import CostTracker
+from voice.omni_transport import CostTracker
 
 TURN = 'a' * 32
 
@@ -140,6 +140,29 @@ class BridgeTurnTests(IsolatedAsyncioTestCase):
         bridge.say('更旧的', epoch=0, turn_id='c' * 32)  # 迟到的旧批次结果直接作废
         self.assertEqual(seen, [(TURN, 'not_played'), ('c' * 32, 'not_played')])
 
+    async def test_unplayed_reports_notify_brain_with_empty_heard_prefix(self):
+        posted = []
+        def handle(request):
+            posted.append((request.url.path, json.loads(request.content)))
+            return httpx2.Response(200, json={'ok': True})
+
+        async with httpx2.AsyncClient(transport=httpx2.MockTransport(handle)) as client:
+            bridge = BrainBridge(client, 'http://brain')
+            bridge.say('排队但没播的回答', turn_id=TURN, session_id='d' * 32)
+            bridge.new_input()
+            bridge.say('晚到且没播的回答', epoch=0, turn_id='c' * 32, session_id='d' * 32)
+            await asyncio.gather(*bridge.delivery_tasks, *bridge.interruption_tasks)
+
+        notifications = [body for path, body in posted if path == '/interrupted']
+        self.assertCountEqual(notifications, [
+            {'turn_id': turn, 'session_id': 'd' * 32, 'spoken': '',
+             'uncertain_text': '', 'delivery': 'not_played'}
+            for turn in (TURN, 'c' * 32)
+        ])
+        self.assertCountEqual([body for path, body in posted if path == '/delivered'], [
+            {'turn_id': turn, 'delivery': 'not_played'} for turn in (TURN, 'c' * 32)
+        ])
+
 
 class ReceiverDeliveryTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -177,6 +200,21 @@ class ReceiverDeliveryTests(IsolatedAsyncioTestCase):
         self.bridge.say('好的', turn_id=TURN)
         await self.run_one(play)
         self.assertEqual(self.seen, [(TURN, 'interrupted')])
+
+    async def test_omni_interruption_never_claims_the_full_answer_was_heard(self):
+        report = Report('第一句。第二句。', 0, turn_id=TURN)
+        self.receiver.current_report = report
+        self.receiver.active = True
+        self.receiver.response_id = 'omni-response'
+        self.receiver.audio_items = {'received-audio'}  # 收到音频不代表文字已有精确对齐。
+        self.bridge.report_interruption = Mock()
+
+        await self.receiver.interrupt()
+
+        self.bridge.report_interruption.assert_called_once_with(report, '', report.text)
+        self.receiver.player.clear.assert_called_once()
+        self.assertTrue(self.receiver.cancelled)
+        self.assertEqual(json.loads(self.receiver.ws.send.call_args.args[0])['type'], 'response.cancel')
 
     async def test_failed_playback_without_interruption_is_not_played(self):
         self.bridge.say('好的', turn_id=TURN)

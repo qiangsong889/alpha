@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import httpx2
 from voice.qwen_alpha import BrainBridge, Receiver, TurnCollector, session_config
-from voice.qwen_realtime import CostTracker
+from voice.omni_transport import CostTracker
 from voice.qwen_alpha import Report
 from voice.batch_timing import BatchTiming
 

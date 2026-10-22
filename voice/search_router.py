@@ -1,23 +1,14 @@
 """Jev 判断搜索提示和播报期间的对话对象；不执行任何业务工具。"""
 
-# Direct `python agent.py` uses voice_pipeline as sys.path[0].
-if not __package__:
-    import sys
-    from pathlib import Path
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-from core.costs import record_cost, log_summary
 import asyncio
 import logging
 import math
 import time
 
-try:
-    import httpx  # type: ignore[import-not-found]
-except ModuleNotFoundError:
-    # Alpha 主环境使用 httpx2，LiveKit 环境使用 httpx；分类协议相同。
-    import httpx2 as httpx  # type: ignore[no-redef]
+import httpx2 as httpx
+from core.costs import record_cost, log_summary
 
-logger = logging.getLogger("alpha.voice_pipeline")
+logger = logging.getLogger("alpha.jev")
 JEV_URL = "https://api.typesafe.ai/v1/systemone"
 VERCEL_JEV_URL = "https://ai-gateway.vercel.sh/typesafe/v1/systemone"
 INSTRUCTIONS = (

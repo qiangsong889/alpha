@@ -10,7 +10,6 @@ from dataclasses import dataclass
 import json
 import logging
 import math
-import os
 import re
 import time
 
@@ -20,11 +19,11 @@ from websockets.asyncio.client import connect
 
 from core.paths import ENV_FILE
 from voice.audio import StreamingPlayer, SpeechActivity, is_meaningful
-from voice.qwen_realtime import (CostTracker, SessionEnded, QwenProtocolError, MODEL,
-    send_event, wait_for_event, send_microphone, session_config as old_config,
+from voice.omni_transport import (CostTracker, SessionEnded, QwenProtocolError, MODEL,
+    send_event, wait_for_event, send_microphone, session_config as base_config,
     verify_session, websocket_url, raise_api_error, reconnectable, rotate_session)
-from voice_pipeline.collection import EXECUTE, unfinished
-from voice_pipeline.search_router import JevSearchRouter
+from voice.collection_rules import EXECUTE, unfinished
+from voice.search_router import JevSearchRouter
 from voice.batch_timing import BatchTiming
 from voice.qwen_tts import QwenTTS
 from voice.upload_gate import make_upload_gate
@@ -39,7 +38,7 @@ SPEAKER_RULES = ('你是 Alpha 的中文语音播报器，没有执行任何操�
 
 
 def session_config(voice):
-    config = old_config(voice)
+    config = base_config(voice)
     config.update(instructions=SPEAKER_RULES, tools=[])
     return config
 

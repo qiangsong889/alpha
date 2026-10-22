@@ -8,7 +8,7 @@ from core.costs import CostLedger
 from voice.asr_client import AsrEvent, MODEL
 from voice.asr_input import AsrInput, SileroActivity
 from voice.qwen_alpha import Receiver, TurnCollector, input_mode, run_asr_connection
-from voice.qwen_realtime import CostTracker
+from voice.omni_transport import CostTracker
 from voice.segmenter import FRAME, Segmenter, SpeechStarted, SegmentReady
 
 

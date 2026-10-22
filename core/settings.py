@@ -57,7 +57,7 @@ def _s(name, group, description, kind='str', default=None, *, readers, choices=(
                    frozenset(readers), editable and kind != 'secret')
 
 
-def _legacy(name: str, description: str = '旧路径（LiveKit / 旧 Qwen / OpenAI 实时版）读取') -> Setting:
+def _legacy(name: str, description: str = '已移除入口的旧参数，仅保留识别；当前运行不读取') -> Setting:
     return _s(name, '旧路径', description, readers={LEGACY}, editable=False)
 
 
@@ -69,7 +69,7 @@ SETTINGS: tuple[Setting, ...] = (
     _s('DASHSCOPE_API_KEY', '密钥', '阿里云 DashScope 密钥（ASR / TTS / Omni）', 'secret', readers={VOICE}),
     _s('TYPESAFE_API_KEY', '密钥', 'Jev（TypeSafe 直连）密钥', 'secret', readers={VOICE}),
     _s('AI_GATEWAY_API_KEY', '密钥', 'Jev（Vercel 网关）密钥', 'secret', readers={VOICE}),
-    _s('OPENAI_API_KEY', '密钥', 'OpenAI 密钥（只有 LiveKit 备用版本使用）', 'secret', readers={LEGACY}),
+    _s('OPENAI_API_KEY', '密钥', '已移除的 LiveKit / OpenAI 实时入口密钥（仅识别旧配置）', 'secret', readers={LEGACY}),
     _s('QWEN_WORKSPACE_ID', '服务连接', 'DashScope 工作空间 ID', readers={VOICE}, editable=False),
     _s('QWEN_REGION', '服务连接', 'DashScope 区域', 'choice', 'singapore',
        choices=('singapore', 'beijing'), readers={VOICE}),
@@ -143,7 +143,7 @@ SETTINGS: tuple[Setting, ...] = (
        minimum=0, readers={BRAIN, VOICE}, editable=False),
     # ── 文字 CLI ──
     _s('ALPHA_VOICE', '文字 CLI', 'CLI 语音模式下 macOS say 的声音', default='Meijia', readers={CLI}),
-    # ── 旧路径：登记以免被误报为未识别，不在页面开放 ──
+    # ── 已退役参数：兼容识别现有.env，不再代表运行入口，不在页面开放 ──
     _legacy('INTERRUPT_MS'), _legacy('COLLECTION_WINDOW_S'), _legacy('COLLECTION_INCOMPLETE_S'),
     _legacy('OPENAI_REALTIME_MODEL'), _legacy('OPENAI_REALTIME_VOICE'), _legacy('RECAP_TTS_VOICE'),
     _legacy('SILENCE_MS', '旧的 Whisper 按键说话（voice/listen.py）读取'),

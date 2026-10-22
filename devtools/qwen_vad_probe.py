@@ -10,7 +10,7 @@ from websockets.asyncio.client import connect
 
 from core.paths import ENV_FILE
 from voice.audio import SpeechActivity
-from voice.qwen_realtime import (
+from voice.omni_transport import (
     send_event, send_microphone, session_config, verify_session, wait_for_event, websocket_url,
 )
 

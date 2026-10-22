@@ -1,8 +1,8 @@
-# Qwen voice + AlphaBrain trial
+# Qwen voice + AlphaBrain
 
 **Current dev default: Jev-driven submission.** Final transcripts are classified immediately; a complete result submits without the fixed two-second window. See the mode switch below to restore the previous behavior.
 
-This entry point is separate from `voice.qwen_realtime` and LiveKit. It uses the existing AlphaBrain HTTP server, so HA tools, Google services, weather, web search, persistent memory, email confirmation, operation records and unknown-result handling stay in the brain. No business tools are published to Qwen.
+The retired standalone Qwen tool agent and LiveKit entry point have been removed. Shared Omni protocol helpers live in `voice/omni_transport.py`, and Jev routing lives in `voice/search_router.py`. It uses the existing AlphaBrain HTTP server, so HA tools, Google services, weather, web search, persistent memory, email confirmation, operation records and unknown-result handling stay in the brain. No business tools are published to Qwen.
 
 ## Start
 

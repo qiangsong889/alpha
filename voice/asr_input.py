@@ -10,7 +10,7 @@ from core.costs import record_cost
 from voice.audio import audio_device
 from voice.asr_client import MODEL, PREFIX
 from voice.segmenter import FRAME, RATE, SpeechStarted
-from voice.qwen_realtime import SessionEnded
+from voice.omni_transport import SessionEnded
 
 logger = logging.getLogger('alpha.qwen_alpha')
 

@@ -978,7 +978,7 @@ import sounddevice as sd  # type: ignore[import-untyped]
 |---|---|
 | 录音、转写、朗读的终端流程 | [apps/cli.py](../apps/cli.py) |
 | Claude 对话与多工具路由 | [brain/agent.py](../brain/agent.py) |
-| Qwen 收发事件、打断、工具后续回答 | [voice/qwen_realtime.py](../voice/qwen_realtime.py) |
+| Qwen 语音事件与打断（工具由 AlphaBrain 执行） | [voice/qwen_alpha.py](../voice/qwen_alpha.py) |
 | 播放缓冲区、offset、callback | [voice/audio.py](../voice/audio.py) |
 | 队列、future、重连与取消 | [integrations/personal_worker.py](../integrations/personal_worker.py) |
 | MCP 目录发现、协议转换与 HA 调用 | [integrations/mcp_client.py](../integrations/mcp_client.py) |

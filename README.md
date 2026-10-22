@@ -309,8 +309,11 @@ alpha/
 ├─ voice/
 │  ├─ audio.py               Playback, device selection, local VAD, speech filtering
 │  ├─ listen.py              Push-to-talk recording + Whisper transcription (python -m voice.listen)
-│  ├─ qwen_realtime.py       Qwen Omni realtime voice layer                 (python -m voice.qwen_realtime)
-│  └─ openai_realtime.py     OpenAI Realtime version, kept for reference   (python -m voice.openai_realtime)
+│  ├─ qwen_alpha.py          Current voice entry point                     (./start-qwen)
+│  ├─ omni_transport.py      Optional Omni transport; no business tools
+│  ├─ asr_client.py          Dedicated Qwen ASR
+│  ├─ qwen_tts.py            Dedicated Qwen TTS
+│  └─ search_router.py       Jev completeness / interruption / search routing
 ├─ devtools/
 │  ├─ ha_client.py           Verify the HA MCP connection                   (python devtools/ha_client.py)
 │  └─ mcp_probe.py           Raw JSON-RPC probe for HA MCP                   (python devtools/mcp_probe.py)
@@ -378,110 +381,15 @@ Set `SILENCE_MS=1000` in `.env` to adjust VAD stopping. To compare 1300 ms, run 
 
 After 400 ms of silence (420 ms at 30 ms frame boundaries), a background transcription checks simple ending rules. One- or two-character text, trailing conjunctions, and incomplete “把…” fragments continue waiting; other text can end recording early once transcription finishes. Resumed speech invalidates the earlier preview. `SILENCE_MS=1500` is the fallback silence limit. Preview inference does not block VAD processing, but it adds inference work and may not finish before the fallback limit. Shared model inference is serialized; final transcription may wait for an unfinished preview.
 
-## Realtime Interruption Confirmation
+## Current voice path
 
-Run `python -m voice.openai_realtime` with `OPENAI_API_KEY` configured. The script uses streaming microphone input and output, with a two-stage interruption policy:
+Use `./start-qwen`: local Silero → Qwen ASR → Jev → AlphaBrain → Qwen TTS.
+Omni remains an explicit transport-only fallback via `QWEN_ALPHA_INPUT=omni`;
+it has no business tools. See [voice setup](voice/QWEN_ALPHA.md).
 
-- `speech_started` lowers output volume to 20% while playback continues.
-- At 400 ms of local VAD speech, playback pauses without consuming or clearing queued audio. Generation continues until transcription resolves the turn.
-- Meaningful transcription clears playback, cancels active generation, and truncates the unheard response. Noise such as “咳” resumes playback from the saved position; transcription failure also resumes the old response.
-- Short noise restores volume without cancelling the response. Local VAD is used because semantic VAD may delay its end-of-speech event.
-
-Set `INTERRUPT_MS` to an integer from 300 to 500 (default: 400). Local VAD processes 20 ms frames and tolerates gaps shorter than 100 ms. It is a heuristic, not a guarantee that every noise burst will be rejected. Input transcription uses `gpt-4o-mini-transcribe`; automatic response creation and interruption are disabled, so the client triggers responses only when audio is committed and transcription is meaningful. The latency log measures receipt of `speech_stopped` to the first returned audio chunk, rather than acoustic end-of-speech to audible playback.
-
-### Home Assistant Tools in Realtime
-
-`realtime.py` loads HA tools and the Assist prompt at startup using `HA_URL` and `HA_TOKEN`. It exposes only `intent__HassTurnOn`, `intent__HassTurnOff`, `light__HassLightSet`, and `homeassistant__GetLiveContext`. Tool schemas use Realtime's `type: function` and `parameters` format. If HA discovery fails, the conversation continues with no home tools.
-
-Completed `response.done` events containing function calls dispatch HA operations in a background task so audio events remain responsive. Calls are checked against both the allowlist and discovered tools. Results, including errors, are sent as `function_call_output` items tied to their `call_id`; one continuation response is requested after the batch. Cancelled responses are not executed, and repeated call IDs are not replayed. Already executed device operations are not undone by a voice interruption.
-
-## Qwen Omni Voice MVP
-
-`realtime_qwen.py` tests `qwen3.8-omni-flash-realtime` independently of the OpenAI conversation pipeline. Both scripts import playback, device selection, local VAD, and speech filtering from `audio.py`. Configure `.env`:
-
-```dotenv
-DASHSCOPE_API_KEY=your-regional-model-studio-key
-QWEN_WORKSPACE_ID=your-workspace-id
-QWEN_REGION=singapore
-QWEN_VOICE=Tina
-INTERRUPT_MS=400
-QWEN_SESSION_SECONDS=1800
-QWEN_VAD=server_vad
-QWEN_SILENCE_MS=800
-# Optional: reuse the same HA credentials as the CLI/OpenAI voice layer.
-HA_URL=http://your-home-assistant:8123
-HA_TOKEN=your-long-lived-access-token
-```
-
-The key and workspace must belong to the same selected region. `QWEN_REGION` accepts `singapore` or `beijing`. This model requires a workspace-specific WebSocket endpoint, which the script constructs. Existing `REALTIME_INPUT_DEVICE` and `REALTIME_OUTPUT_DEVICE` settings also apply.
-
-```bash
-python -m voice.qwen_realtime
-```
-
-Speak directly in Mandarin; press Ctrl+C to exit. Input is mono PCM16 at 16 kHz, output is 24 kHz. Wear headphones to reduce feedback.
-
-VAD defaults to `server_vad`, with `QWEN_SILENCE_MS=800` (allowed range 200–6000 ms).
-Set `QWEN_VAD=semantic_vad` to restore semantic detection; the silence setting is
-only sent for `server_vad`. Acoustic VAD avoids semantic backchannel filtering,
-but a pause around the configured silence duration may split a sentence. The
-client verifies the returned VAD configuration before opening the microphone.
-See the [official client events](https://help.aliyun.com/en/model-studio/client-events).
-
-For a 60-second microphone-only check without business tools:
-
-```bash
-QWEN_VAD=server_vad QWEN_SILENCE_MS=800 .venv/bin/python -u -m devtools.qwen_vad_probe
-```
-
-At startup it discovers `list_items`, `list_reminders`, `add_items`, `complete_items`, and `create_reminder` from the personal MCP server and starts a persistent `PersonalWorker`, stopped on exit. Google credentials use the same setup as the CLI. Qwen function definitions use the nested `function` object and `parameters` schema. Tool calls run in background tasks, so incoming voice events remain responsive. Each call returns a `function_call_output` with its original `call_id`, including errors. The model continues after all results in a completed response have arrived. Repeated function events are deduplicated to avoid executing a write twice.
-
-Qwen tool execution now goes through `ToolGateway` and the injected executor in `integrations/tool_executor.py`. A tool must be loaded and have a local policy. The gateway stores operations in `data/operations.db` (ignored by Git), shared across Qwen reconnects and closed on exit. At startup, leftover `executing` operations are changed to `unknown` and printed without retrying. A missing/closed personal worker or unavailable HA client is definitely not sent; HA connection/initialization failures are also classified as not sent. Once a tool call begins, transport failures and timeouts are unknown. HA device actions require a clean `action_done`; other tools use MCP `is_error`.
-
-**Automatic batches:** the Qwen entry point uses `SimpleCoordinator`. HA on/off/brightness commands execute immediately and successful device actions stay silent. Other personal mutations (including deletion, undo and restoration) collect in a two-second window. User instructions authorize execution: there is no separate “yes” step and no `confirmed` parameter. Ambiguous targets still require clarification.
-
-Code seals a batch after the response and all tool results have arrived and the silence window has elapsed. A batch executes sequentially, then receives one factual spoken report. Only after that report completes does the next queued batch start. New instructions can be interpreted and collected while an earlier batch executes. A larger number of tasks does not add confirmation. When a response contains only pending writes, no extra acknowledgment response is requested; the model resumes for the actual execution report. Reads and rejected tool calls can still request a normal continuation.
-
-New speech pauses collection; noise resumes it. Recognized unfinished expressions such as “等等”, “还有”, or “把” wait up to five seconds and then prompt for clarification. This is a local heuristic, not a general completeness detector. `COLLECTION_WINDOW_S=2` and `COLLECTION_INCOMPLETE_S=5` configure the delays, measured from speech end.
-
-Four local control tools are exposed:
-
-- `cancel_pending()`: cancel all unsent operations, including queued batches. A request already in flight is allowed to finish and is not described as cancelled.
-- `undo_recent(title=...)`: register an exact deletion of an item/reminder Alpha created during this program session. No extra confirmation is needed.
-- `delete_item(kind, item_id, list_id)`: register deletion of an exact existing resource, without asking for agreement again. IDs come from queries; unclear targets prompt for clarification.
-- `restore_recent(title=...)`: register restoration of a resource Alpha deleted during this program session, using the saved snapshot. No extra confirmation is needed. Restored resources get new Google IDs.
-
-`list_items` and `list_reminders` supply structured IDs, which should not be spoken. Immediately before deletion, code reads the original resource and persists its snapshot in SQLite, independently of the operation's final result. If a backup cannot be obtained, deletion is not sent. Task restoration retains title, notes, due date and completion data; ordinary calendar restoration retains title, description, location, timing and reminders. Automatic deletion rejects recurring/special calendar events and events with participants or conferencing because their original behavior cannot be faithfully restored by this implementation. Task IDs/order and externally linked task metadata are not restored exactly.
-
-Undo and restoration have separate operation records; original successes remain recorded. Repeated pending/executing/unknown/successful deletions or restorations are not blindly sent again. Unknown Google writes receive read-only verification where available; unproven results remain unknown. SQLite facts and deletion snapshots survive process restarts, but the voice `undo_recent`/`restore_recent` selectors currently cover this program session. WebSocket reconnect retains work and reports; unsent work remains paused with a spoken recovery prompt until a new mutation or explicit continuation. Shutdown cancels unsent operations and leaves interrupted in-flight requests unknown.
-
-Plans, dependency tools, required collection controls, recap comparisons and fallback TTS are absent from the production Qwen path. Earlier batch modules remain for regression tests. See [execution and undo](docs/task-batches.md) for the current flow.
-
-With `HA_URL` and `HA_TOKEN` configured, it also discovers `intent__HassTurnOn`, `intent__HassTurnOff`, `light__HassLightSet`, and `homeassistant__GetLiveContext`. The HA Assist prompt supplies the static device context. Both catalogs are checked for duplicate names before filtering, and tools are routed to the server they belong to. Personal tools use the worker; HA tools use `call_ha_tool`, with a fresh MCP session per call and a shared HTTP client. The same catalogs, Assist prompt, and HTTP client are reused after Qwen reconnection. Missing HA configuration or failed startup discovery leaves chat and personal tools available; rediscovering HA tools then requires restarting the script. Tool failures are returned to the model and are not automatically replayed.
-
-Successful on/off/brightness operations are silent when HA returns a clean `action_done`. Queries, errors, uncertain results and personal-task reports can receive a spoken answer. Pending-write acknowledgments and unsupported completion claims are held or suppressed locally; their generation can still incur cost. Final execution reports use actual operation states.
-
-Current time is injected as a separate `system` text item before response creation, including tool continuations, using `REMINDER_TIMEZONE` (default `America/Los_Angeles`). It no longer becomes the newest user message. This is an explicit compatibility attempt: the current Omni client reference does not document generic system messages or history insertion with `previous_item_id`; server acceptance still requires live verification. A role rejection is reported rather than silently falling back to a timestamp as a user message. Instructions remain static. Tool logs show the name, arguments, and first 100 characters of the result. A new meaningful user turn suppresses a stale tool continuation; already-running writes are not replayed automatically.
-
-At `response.done`, completion phrases such as “已经设好”, “已添加”, and “标记好了” are checked against successful write-tool calls for the same user request, including earlier tool responses in that request. Read-only calls cannot establish write success. The check waits for pending tools; unverified claims print `[⚠️ 疑似虚构]` and inject a system correction before one additional `response.create`. Corrections are capped at one per user request; failed or timed-out writes must be checked rather than blindly repeated. Final response text and streamed transcripts are both supported. This is a keyword heuristic, not proof that every detail of a statement matches the operation. It may miss paraphrases or flag benign descriptions of earlier actions; spoken audio may already have played before the check runs. System correction items share the same unverified Omni role compatibility as time items.
-
-Tool transitions may be silent or use one short conversational phrase such as “嗯，我看看”; instructions discourage repetitive narration. Shared playback queues consecutive audio items rather than clearing the previous item's unplayed tail when a fast tool result arrives. Item playback counters switch when the callback actually starts the next item. Confirmed user interruption still clears queued audio. Acoustic naturalness and echo-related false interruptions require microphone testing.
-
-The client disables automatic responses and interruption. Speech onset ducks playback to 20%; sustained local VAD (default 400 ms, configurable from 300 to 500) pauses playback without clearing it. Meaningless transcriptions resume the buffered answer and delete the noise item. Meaningful transcriptions clear playback, cancel an active response, and truncate its audio history to the estimated heard duration. A new response is requested only after meaningful transcription and audio commitment; cancellation completes before another response starts.
-
-Logs include transcripts, end-of-speech-to-first-audio latency, usage, per-response cost, and cumulative cost in USD. Prices use the official Qwen3.8 table checked on 2026-10-13: Singapore input text/audio $0.23/$0.93 and output text/audio $0.70/$1.87 per million tokens; Beijing $0.212/$0.848 and $0.636/$1.696. Both output text and audio are charged. Estimates exclude free quotas and discounts. Missing usage details are reported as unpriced, rather than treated as free.
-
-Closed connections, network failures, and session-expiration errors trigger reconnection and a fresh `session.update`. The script also deliberately rotates sessions every 1800 seconds by default; `QWEN_SESSION_SECONDS` controls this interval. New connections start fresh conversation history; cumulative cost survives reconnections. Invalid configuration/authentication errors are reported instead of retried indefinitely.
-
-`Turn queue overflow` also triggers reconnection without replaying device writes. This is recovery from a full server queue, not proof of its underlying cause. Numbered `response.create` logs distinguish normal replies from silent follow-ups; live event logs are needed to confirm whether repeated tool turns, background speech, or another server behavior caused accumulation.
-
-Compatibility needs live verification: the official server example includes `create_response` and `interrupt_response`, but the client parameter reference does not explicitly document these switches, `conversation.item.delete`, or `conversation.item.truncate`. Delete/truncate are compatibility attempts, not confirmed Qwen capabilities. The script checks that the server echoes both switches as false and reports rejected commands rather than silently claiming noise recovery/history truncation works. Offline tests verify the client state machine, not server support or microphone behavior.
-
-```bash
-.venv/bin/python -m unittest discover -s tests
-```
-
-Official references: [client events](https://www.alibabacloud.com/help/en/model-studio/client-events), [server events](https://www.alibabacloud.com/help/en/model-studio/server-events), [model and prices](https://www.alibabacloud.com/help/en/model-studio/qwen3-8-omni-flash-realtime).
+The retired standalone Qwen tool agent, LiveKit/OpenAI realtime entry points and
+old plan/batch coordination implementations have been removed. Their history
+remains in Git. Shared Jev routing and collection rules now live under `voice/`.
 
 ## Reusing AlphaBrain
 
@@ -718,7 +626,7 @@ After a successful change, Alpha reports the specific change in one sentence wit
 
 ### HA tool exposure
 
-All tools advertised by the connected Home Assistant MCP server are exposed to AlphaBrain and the realtime agents, with their original schemas and descriptions. No fixed list of HA tool names filters discovery or routing. HA still controls which services/entities it exposes.
+All tools advertised by the connected Home Assistant MCP server are exposed to AlphaBrain, with their original schemas and descriptions. No fixed list of HA tool names filters discovery or routing. HA still controls which services/entities it exposes.
 
 The gateway keeps operation records and resolves HA routes from that instance's discovered catalog. New HA tools run immediately; unless already classified, they are treated as potentially mutating and not safe to retry automatically. Personal-service policies, including email confirmation, remain in force. Names absent from both the loaded catalog and local policies are rejected.
 
@@ -726,13 +634,16 @@ The gateway keeps operation records and resolves HA routes from that instance's 
 
 Automatic extraction is **off by default**. To try it, set `ALPHA_AUTO_MEMORY=1` in `alpha/.env` and restart the brain. Remove it or set it to `0` to disable extraction; existing memories remain available.
 
-After an answer, a background Haiku request sees only the original user text and current memories. Turns that invoked `remember`, `update_memory`, or `forget` skip extraction entirely. The background task does not delay the answer; it does add an API request when enabled. New user turns invalidate late results. A database revision, maintained by insert/update/delete triggers, also prevents stale results from overwriting newer changes. Revision checking and a batch of writes share one SQLite transaction.
+Extraction runs alongside the main model, using only the user's original text and existing memories.
+Before the final answer is released, the brain waits for extraction, validates the memory-table revision,
+and checks memory wording against actual writes. Extraction can therefore add latency if it finishes later.
+Turns that use explicit memory tools skip automatic writes. Ordinary preferences can be saved with
+`source="auto"`; sensitive candidates require explicit agreement and remain unpersisted until then.
+The answer acknowledges actual saved content or asks about a pending sensitive candidate.
 
-Ordinary preferences may be saved automatically with `source="auto"`. The next answer begins with a code-generated notice describing the saved content, once. Sensitive candidates are not saved automatically: they appear in a separate JSON system block and a code-generated question at the end of the next answer. They expire after ten minutes or any memory change. The main model handles explicit consent with the existing local memory tools; it must not treat questions, refusals, or ambiguous replies as consent. This interpretation still depends on the model. Turning a candidate into explicit memory marks its source as `explicit`.
-
-Existing databases migrate automatically: old rows default to `source="explicit"`. Pending questions and unsent notices are process-local and are discarded on restart. Background tasks are cancelled before the database and API client close. Source content never becomes authority to override system rules. The store's existing 50-entry/2,000-character limits and secret checks apply to automatic writes too.
-
-See [extraction evaluation](eval/EXTRACTION.md) for the synthetic test set, metrics, and numeric normalization rules. Jev is not part of this extraction path.
+The local `.env` was enabled at the user's request on 2026-10-21; the repository default remains off.
+The latest auto-01–05 evaluation was **14/15**, not fully stable: auto-02 once incorrectly described
+this turn's new save as an existing memory. See [the recorded evaluation](eval/STABILITY.md).
 
 ## Qwen + AlphaBrain experiment
 

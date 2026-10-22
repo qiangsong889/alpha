@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 
 import core.costs as costs
 from core.costs import CostLedger, quote, AudioCostMeter, costed_call
-from voice_pipeline.search_router import JevSearchRouter
+from voice.search_router import JevSearchRouter
 
 
 class PricingTests(TestCase):
