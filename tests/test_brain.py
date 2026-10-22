@@ -204,6 +204,23 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(auto.receipts, [])
         self.assertEqual(self.brain.memory_store.list()[0].source, 'auto')
 
+    async def test_auto_memory_saved_paraphrase_appends_exact_notice_without_correction(self):
+        from brain.memory_extractor import Candidate
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[
+            Candidate('save', 'add', 'preference', '不吃香菜', '我不吃香菜')]))
+        self.brain._agent_turn = AsyncMock(return_value='好的，记住了，以后避开香菜。')
+        sink = AsyncMock()
+
+        answer = await self.brain.ask('我不吃香菜', on_text=sink)
+
+        self.assertEqual(answer, '好的，记住了，以后避开香菜。记下了：不吃香菜。')
+        self.client.messages.create.assert_not_awaited()
+        sink.assert_awaited_once_with(answer)
+        memories = self.brain.memory_store.list()
+        self.assertEqual([(m.content, m.source) for m in memories], [('不吃香菜', 'auto')])
+
     async def test_auto_memory_unsaved_claim_corrected_before_output(self):
         with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
             await self.brain.start()
@@ -216,6 +233,8 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.client.messages.create.assert_awaited_once()
         self.assertNotIn('tools', self.client.messages.create.call_args.kwargs)
         self.assertIn('没有保存任何记忆', str(self.client.messages.create.call_args.kwargs['system']))
+        self.assertIn('已有记忆列表不代表本轮发生了写入',
+                      str(self.client.messages.create.call_args.kwargs['system']))
 
     async def test_auto_memory_correction_repeated_claim_falls_back_once(self):
         with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):

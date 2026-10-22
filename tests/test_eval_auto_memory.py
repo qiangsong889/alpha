@@ -51,13 +51,22 @@ class AutoEvalTests(IsolatedAsyncioTestCase):
         self.assertEqual(judge.evaluate.call_args.kwargs['tool_records'], [])
 
     async def test_tool_free_memory_wording_correction_is_supported(self):
+        result, sdk = await self.run_fixture('chat-01',
+            [reply('记住了。'), reply('你好。')], [extraction()])
+        self.assertTrue(result['passed'], result)
+        self.assertEqual(len(sdk.main.requests), 2)
+        self.assertNotIn('tools', sdk.main.requests[1])
+        self.assertEqual(result['turns'][0]['answer'], '你好。')
+        self.assertEqual(result['turns'][0]['memories'], [])
+
+    async def test_saved_paraphrase_does_not_add_a_correction_request(self):
         result, sdk = await self.run_fixture('auto-02',
-            [reply('记住你的全部偏好了。'), reply('明白。'), reply('你好。'), reply('不错。')],
+            [reply('好的，记住了，以后避开香菜。'), reply('你好。'), reply('不错。')],
             [extraction(SAVE), extraction(), extraction()])
         self.assertTrue(result['passed'], result)
-        self.assertNotIn('tools', sdk.main.requests[1])
-        self.assertIn('记下了：不吃香菜', result['turns'][0]['answer'])
-        self.assertNotIn('记忆表述不准确', result['turns'][0]['answer'])
+        self.assertEqual(len(sdk.main.requests), 3)  # 三轮正常回答，没有第四次修正请求。
+        self.assertTrue(all('tools' in request for request in sdk.main.requests))
+        self.assertEqual(result['turns'][0]['answer'], '好的，记住了，以后避开香菜。记下了：不吃香菜。')
 
     def setUp(self):
         self.cases = {row['id']: row for row in load_cases(ROOT / 'eval/cases.jsonl')}

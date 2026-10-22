@@ -642,8 +642,10 @@ Turns that use explicit memory tools skip automatic writes. Ordinary preferences
 The answer acknowledges actual saved content or asks about a pending sensitive candidate.
 
 The local `.env` was enabled at the user's request on 2026-10-21; the repository default remains off.
-The latest auto-01–05 evaluation was **14/15**, not fully stable: auto-02 once incorrectly described
-this turn's new save as an existing memory. See [the recorded evaluation](eval/STABILITY.md).
+Before the wording fix, auto-01–05 scored **14/15**: auto-02 once incorrectly described
+this turn's new save as an existing memory. After the minimal correction-gate fix, a targeted
+auto-02 rerun passed **3/3**; the other cases were not rerun online in that check.
+See [the preserved evaluation history](eval/STABILITY.md).
 
 ## Qwen + AlphaBrain experiment
 

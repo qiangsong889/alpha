@@ -613,10 +613,9 @@ class AlphaBrain:
                             assert auto is not None
                             saved = auto.apply(candidates, turn_id, sequence, version)
                     if auto is not None:
-                        # 不能用“本轮有保存”替任何内容背书：声称保存时必须提到每条实际内容。
-                        if not self._turn_memory_saved and claims_memory_saved(answer):
-                            if not saved or not all(row.content in answer for row in saved):
-                                answer = await self._correct_memory_answer(answer, saved)
+                        # 没有实际保存才修正虚假的完成声明；已保存但没原样复述，由下面代码补齐。
+                        if not self._turn_memory_saved and not saved and claims_memory_saved(answer):
+                            answer = await self._correct_memory_answer(answer)
                         if saved and not (claims_memory_saved(answer)
                                           and all(row.content in answer for row in saved)):
                             answer = answer.rstrip() + ("。" if answer and answer[-1] not in "。！？!?" else "")
@@ -689,10 +688,9 @@ class AlphaBrain:
             logger.warning("[存档] 播放状态写入失败：%s", type(exc).__name__)
             return False
 
-    async def _correct_memory_answer(self, answer, saved):
-        """最多一次、无工具的措辞修正；不能重跑原任务或产生第二次副作用。"""
-        facts = ("本轮已保存的记忆仅有：" + json.dumps([row.content for row in saved], ensure_ascii=False)
-                 if saved else "这一轮没有保存任何记忆。")
+    async def _correct_memory_answer(self, answer):
+        """仅修正本轮未保存却声称保存的回答；最多一次、无工具，不能重跑原任务。"""
+        facts = "这一轮没有保存任何记忆，不得声称本轮已保存。已有记忆列表不代表本轮发生了写入。"
         logger.warning("[记忆核对] 回答与保存结果不符，修正一次")
         try:
             self._refresh_memory_system()
@@ -709,7 +707,7 @@ class AlphaBrain:
         except Exception as exc:
             logger.warning("[记忆核对] 修正失败：%s", type(exc).__name__)
         # 不重复请求，也不把未经核实的业务汇报重新编写成成功或失败。
-        return "刚才的记忆表述不准确。" + ("" if saved else "这次没有保存记忆。")
+        return "刚才的记忆表述不准确。这次没有保存记忆。"
 
     async def mark_interrupted(self, spoken: str = '', *, turn_id: str | None = None,
                                session_id: str | None = None, uncertain_text: str = '',
