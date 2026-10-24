@@ -484,6 +484,37 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         emit.assert_awaited_once_with('记住了，太太叫小林。')
         self.executor.assert_not_awaited()
 
+    async def test_forgetting_a_device_memory_does_not_operate_the_device(self):
+        # 2026-10-23：“忘掉。；餐厅灯开最亮的这条记忆。”删完记忆又开灯、调到 100%。
+        self.ha[0].append({"name": "light__HassLightSet", "input_schema": {"type": "object"}})
+        await self.brain.start()
+        ident = self.brain.memory_store.add('餐厅灯开最亮', 'preference', 'seed')
+        dining = {"name": "餐厅灯", "domain": ["light"]}
+        self.client.messages.create.side_effect = [
+            reply([NS(type="tool_use", name="forget", id="forget", input={"id": ident})], "tool_use"),
+            reply([NS(type="tool_use", name="intent__HassTurnOn", id="on", input=dining),
+                   NS(type="tool_use", name="light__HassLightSet", id="max", input={**dining, "brightness": 100})],
+                  "tool_use"),
+            reply([NS(type="text", text="已忘掉“餐厅灯开最亮”这条记忆。")]),
+        ]
+        await self.brain.ask("忘掉。；餐厅灯开最亮的这条记忆。")
+        self.assertEqual(self.brain.memory_store.list(), [])   # 记忆照常删除
+        self.executor.assert_not_awaited()                     # 灯没有被操作
+        refused = self.client.messages.create.call_args_list[2].kwargs["messages"][-1]["content"]
+        self.assertTrue(all(result["is_error"] and "记忆管理" in result["content"] for result in refused))
+
+    async def test_device_call_listed_before_forget_in_the_same_reply_is_also_refused(self):
+        await self.brain.start()
+        ident = self.brain.memory_store.add('餐厅灯开最亮', 'preference', 'seed')
+        self.client.messages.create.side_effect = [
+            reply([NS(type="tool_use", name="intent__HassTurnOn", id="on", input={"name": "餐厅灯"}),
+                   NS(type="tool_use", name="forget", id="forget", input={"id": ident})], "tool_use"),
+            reply([NS(type="text", text="已忘掉。")]),
+        ]
+        await self.brain.ask("忘掉餐厅灯开最亮这条记忆")
+        self.executor.assert_not_awaited()
+        self.assertEqual(self.brain.memory_store.list(), [])
+
     async def test_memory_update_and_forget_refresh_system_and_report_specific_change(self):
         await self.brain.start()
         ident = self.brain.memory_store.add('空调喜欢 26 度', 'preference', 'seed')
