@@ -48,7 +48,7 @@ class Socket:
         async def complete():
             if self.gate is not None:
                 await self.gate.wait()
-            event = {'type': PREFIX + 'completed', 'transcript': f'文字-{self.label}'}
+            event = {'type': PREFIX + 'completed', 'transcript': f'文字-{self.label}', 'language': 'en'}
             if self.behavior == 'cumulative':
                 self.completion_count = getattr(self, 'completion_count', 0) + 1
                 event['usage'] = {'duration': 39 + 2 * self.completion_count,
@@ -92,9 +92,18 @@ class AsrClientTests(unittest.IsolatedAsyncioTestCase):
         await client.submit(segment('one'))
         await asyncio.wait_for(client.queue.join(), 1)
         transcription = sockets[0].session['input_audio_transcription']
-        self.assertEqual(transcription['language'], 'zh')
         self.assertIn('Alpha', transcription['corpus']['text'])
         self.assertIsNone(sockets[0].session['turn_detection'])  # 仍然是手动提交
+        # 默认不指定语言：固定成 zh 时，真人说英文可能被写成中文。
+        self.assertNotIn('language', transcription)
+        self.assertEqual(results[0].language, 'en')  # ASR 判断出的语言传到转写结果，写进日志
+
+    async def test_language_can_still_be_fixed(self):
+        client, sockets, results, trace = await self.make_client([('ok', None)])
+        client.language = 'zh'
+        await client.submit(segment('one'))
+        await asyncio.wait_for(client.queue.join(), 1)
+        self.assertEqual(sockets[0].session['input_audio_transcription']['language'], 'zh')
 
     async def make_client(self, behaviors, timeout=.3):
         trace, sockets, results = [], [], []

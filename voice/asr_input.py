@@ -66,8 +66,8 @@ class AsrInput:
         if event.kind == 'failed':
             logger.warning('[ASR失败] %s：%s', event.seg_id, event.text)
         else:
-            logger.info('[ASR转写] %s ｜ 排队 %.3fs ｜ commit→文字 %s', event.seg_id,
-                        event.queue_s, event.commit_to_result_s)
+            logger.info('[ASR转写] %s ｜ 排队 %.3fs ｜ commit→文字 %s ｜ 语言 %s', event.seg_id,
+                        event.queue_s, event.commit_to_result_s, event.language or '未知')
         # 失败也必须关闭这段的 pending；下一段不受影响。
         await self.receiver.handle({'type': PREFIX + 'completed', 'item_id': event.seg_id,
                                    'transcript': event.text if event.kind == 'transcript' else ''})

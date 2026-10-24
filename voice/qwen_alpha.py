@@ -881,7 +881,8 @@ async def run_asr_connection(player, collector, bridge, costs, route=None):
     logger.info('[打断规则] %s', '播报中只接受“Alpha……”、“停”或提问后的简短回答'
                 if receiver.interrupt_mode == 'call' else 'Jev 判断是否对 Alpha 说话')
     adapter = AsrInput(receiver, segmenter, region=region, route=route)
-    client = AsrClient(url, key, adapter.result, notify=adapter.notify)
+    client = AsrClient(url, key, adapter.result, notify=adapter.notify,
+                       language=setting('QWEN_ASR_LANGUAGE') or None)
     adapter.client = client
     try:
         for name, service in (('ASR', client), ('TTS', tts)):

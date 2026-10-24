@@ -37,10 +37,11 @@ class AsrEvent:
     elapsed_s: float           # 从本段出队开始，包含连接及上传。
     commit_to_result_s: float | None = None
     queue_s: float = 0
+    language: str | None = None  # ASR 判断出的语言（en / zh ……）；只在成功转写时有
 
 
 class AsrClient:
-    def __init__(self, url, key, emit, *, timeout_s=5, queue_size=8, connector=connect, notify=None):
+    def __init__(self, url, key, emit, *, timeout_s=5, queue_size=8, connector=connect, notify=None, language=None):
         if not key or not math.isfinite(timeout_s) or timeout_s <= 0 or queue_size <= 0:
             raise ValueError('超时和队列容量必须大于零')
         self.url, self.key, self.emit = url, key, emit
@@ -48,6 +49,8 @@ class AsrClient:
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=queue_size)
         self.ws = self.reader = self.incoming = None
         self.notify = notify
+        # None：由 ASR 自动判断语言。固定成 zh 时，真人说英文可能被写成中文。
+        self.language = language
         self.usage_meter = CumulativeUsage()
 
     async def ready(self):
@@ -102,7 +105,8 @@ class AsrClient:
             self.reader = asyncio.create_task(self._read(self.ws, self.incoming), name='serial-asr-receiver')
             await self._wait('session.created')
             await self._send('session.update', session={'input_audio_format': 'pcm', 'sample_rate': 16000,
-                             'input_audio_transcription': {'language': 'zh', 'corpus': {'text': CORPUS}},
+                             'input_audio_transcription': {'corpus': {'text': CORPUS},
+                                                           **({'language': self.language} if self.language else {})},
                              'turn_detection': None})
             _, updated = await self._wait('session.updated')
             if updated.get('session', {}).get('turn_detection') is not None:
@@ -132,7 +136,7 @@ class AsrClient:
             text = event.get('transcript')
             if not isinstance(text, str) or not text.strip():
                 raise ValueError('ASR返回空转写')
-            return text, arrived - committed_at
+            return text, arrived - committed_at, event.get('language')
 
     async def run(self):
         try:
@@ -141,7 +145,7 @@ class AsrClient:
                 started = time.perf_counter()
                 queue_s = started - enqueued_at
                 try:
-                    text, latency = await self._transcribe(segment)
+                    text, latency, language = await self._transcribe(segment)
                 except asyncio.CancelledError:
                     await self.emit(AsrEvent('failed', segment.seg_id, '程序停止，本段未完成',
                                              time.perf_counter() - started, queue_s=queue_s))
@@ -154,7 +158,7 @@ class AsrClient:
                                              time.perf_counter() - started, queue_s=queue_s))
                 else:
                     await self.emit(AsrEvent('transcript', segment.seg_id, text,
-                                             time.perf_counter() - started, latency, queue_s))
+                                             time.perf_counter() - started, latency, queue_s, language))
                 finally:
                     self.queue.task_done()
         finally:

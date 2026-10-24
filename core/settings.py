@@ -96,6 +96,8 @@ SETTINGS: tuple[Setting, ...] = (
     _s('SILERO_MODEL_PATH', '收音', 'Silero VAD 模型文件（留空用内置路径）', default='', readers={VOICE},
        editable=False),
     _s('REALTIME_INPUT_DEVICE', '收音', '麦克风设备（编号或名字；留空用系统默认，并跟随系统切换）', default='', readers={VOICE}),
+    _s('QWEN_ASR_LANGUAGE', '收音', '语音识别的语言（留空自动判断，中英文都能识别；填 zh 固定中文）', 'choice', '',
+       choices=('zh', 'en', 'yue', 'ja', 'ko'), readers={VOICE}),
     _s('REALTIME_INPUT_CHANNEL', '收音', '用麦克风设备的第几个声道（从 1 开始；XVF3800 的语音识别波束是 2）', 'int', 1,
        minimum=1, maximum=16, readers={VOICE}),
     _s('QWEN_VAD', '收音', 'Omni 路径的服务端 VAD', 'choice', 'server_vad',

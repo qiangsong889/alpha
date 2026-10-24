@@ -243,16 +243,18 @@ class AsrInputTests(IsolatedAsyncioTestCase):
             await asyncio.Future()
         client.run = wait
         tts = NS(voice='Ethan', ready=AsyncMock(), close=AsyncMock())
-        with patch('voice.asr_client.AsrClient', return_value=client), \
+        with patch('voice.asr_client.AsrClient', return_value=client) as asr_class, \
              patch('voice.segmenter.SileroVAD', return_value=lambda frame: 0), \
              patch('voice.qwen_alpha.QwenTTS', return_value=tts), \
              patch('voice.asr_input.AsrInput.microphone', side_effect=mic), \
              patch('voice.qwen_alpha.connect') as omni, \
              patch('voice.qwen_alpha.make_upload_gate') as gate, \
-             patch.dict('os.environ', {'DASHSCOPE_API_KEY': 'fake', 'QWEN_WORKSPACE_ID': 'test'}):
+             patch.dict('os.environ', {'DASHSCOPE_API_KEY': 'fake', 'QWEN_WORKSPACE_ID': 'test',
+                                       'QWEN_ASR_LANGUAGE': ''}):
             with self.assertRaises(ExceptionGroup):
                 await run_asr_connection(self.player, self.collector, self.bridge, CostTracker('singapore'))
         self.assertEqual(trace, ['ready', 'mic'])
+        self.assertIsNone(asr_class.call_args.kwargs['language'])  # 留空 = 由 ASR 自动判断语言
         omni.assert_not_called()
         gate.assert_not_called()
         client.close.assert_awaited()
