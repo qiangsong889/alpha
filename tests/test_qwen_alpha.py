@@ -661,3 +661,20 @@ class InterruptionGateTests(IsolatedAsyncioTestCase):
             self.ws.send.side_effect = send
             await self.receiver._play_report('要创建文档吗？')
             self.assertEqual(self.receiver.question_deadline > 0, played)
+
+
+class SingleVoiceProcessTests(TestCase):
+    def test_a_second_voice_process_exits_before_opening_audio(self):
+        import tempfile
+        from pathlib import Path
+        from core.runtime import single_instance
+        import voice.qwen_alpha as qwen
+        with tempfile.TemporaryDirectory() as directory:
+            lock = Path(directory) / 'voice.lock'
+            main = Mock()
+            with patch.object(qwen, 'VOICE_LOCK', lock), patch.object(qwen, 'main', main), \
+                    single_instance(lock):
+                with self.assertRaises(SystemExit) as error:
+                    qwen.run()
+            main.assert_not_called()  # 没有打开麦克风、扬声器，也没有连接服务
+            self.assertIn('已有一个语音进程在运行', str(error.exception))

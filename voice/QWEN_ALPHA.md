@@ -268,3 +268,55 @@ remain quiet for ten seconds, then say “对” and a normal command. If it sti
 triggers in silence or misses words, use these measurements to adjust
 `QWEN_ALPHA_VAD_MIN_RMS` and `QWEN_ALPHA_VAD_ONSET_MS`. Raise the floor cautiously:
 a high floor can suppress the user too. Set `QWEN_ALPHA_VAD_DEBUG=0` after tuning.
+
+
+## 切换音频设备
+
+`REALTIME_INPUT_DEVICE` / `REALTIME_OUTPUT_DEVICE` 留空时，语音层跟随 macOS 的系统默认设备：
+在系统设置或菜单栏里切换输出（例如换成 AirPods），1～2 秒内 Alpha 就改用新设备，不用重启。
+
+PortAudio 只在初始化时读取设备列表，所以切换时要先关闭扬声器和麦克风的流，再重新初始化，
+再用新设备打开（`voice/audio_devices.py`）。正在播放的那句话会被打断；ASR、TTS 和大脑的连接都不断。
+
+- 在 `.env` 里指定了固定设备的那一边不跟随；
+- 旧的 Omni 收音路径（`QWEN_ALPHA_INPUT=omni`）不跟随：它的输入流没有接入协调，
+  流开着时重新初始化 PortAudio 可能让进程崩溃；
+- 如果有流在 3 秒内没有关闭，这次切换放弃（日志里有"这次不切换"），需要重启语音进程。
+
+## XVF3800 麦克风阵列（reSpeaker Flex，免戴耳机）
+
+板子：reSpeaker Flex XVF3800 Linear-4 with XIAO ESP32S3。出厂是 I2S 固件（给 XIAO 用，Mac 识别不到），
+接 Mac 要刷 USB 固件 `xmos_firmwares/usb/v1.0.4/respeaker_flex_usb_l16k2ch_v1.0.4.bin`
+（仓库 https://github.com/respeaker/reSpeaker_Flex；按住主板 BOOT 上电进入安全模式，
+用靠近 RST 的 USB-C 口，`dfu-util -R -e -a 1 -D <文件>`）。刷完是 16kHz、2 进 2 出的 USB 声卡
+"reSpeaker Flex XVF3800 L16K2Ch"。音箱接板子的 3.5mm 口：回声消除的参考信号就是 USB 送进板子的播放内容，
+声音从别的扬声器出来，板子就不知道放了什么。
+
+`.env`：
+
+```dotenv
+REALTIME_INPUT_DEVICE=reSpeaker Flex
+REALTIME_OUTPUT_DEVICE=reSpeaker Flex
+REALTIME_INPUT_CHANNEL=2
+```
+
+两个输入声道（出厂路由 `AUDIO_MGR_OP_L=[8,0]`、`AUDIO_MGR_OP_R=[7,3]`），2026-10-23 用
+`devtools/xvf_echo_probe.py` 实测（音箱较响，Mac 麦克风录到播放峰值约 -20 dBFS）：
+
+| 声道 | Alpha 自己的声音 | Alpha 说话时插话 |
+| --- | --- | --- |
+| 1（左，会议输出） | 完全压掉 | 你的声音也被压掉，没法打断 |
+| 2（右，语音识别波束） | 残留比底噪高约 15～20 dB | 完整保留：你的声音比残留回声响约 20 dB |
+
+对照：Mac 自带麦克风里回声比你的声音还响约 5 dB。所以用第 2 声道。
+
+注意：
+- 回声消除要听约 20 秒播放才收敛（`AEC_AECCONVERGED`）。板子重新上电、**调音箱音量**、挪音箱或板子后，
+  最开始几句回答的回声消不干净，Alpha 可能把自己的声音当成插话（Jev 判断会挡住大部分）。
+- 回声消除没收敛时，Alpha 自己的话会被转写出来，Jev 也会判成"对 Alpha 说话"（实测三次都是）。
+  所以播报期间先比对文字：转写里至少 85% 的字能在 Alpha 这一轮的回答里按顺序找到，就当作回声忽略
+  （`voice/collection_rules.py` 的 `is_echo`，日志 `[回声忽略]`）。少于 3 个字不比对；Alpha 说完后再说的话不比对。
+  代价：播报期间插话说了几乎和 Alpha 原话一样的句子，会被忽略，等它说完再说即可。
+- 音箱到麦克风的延迟实测 8 ms，`AUDIO_MGR_SYS_DELAY` 不用改。
+- 板子参数可以用仓库里的 `python_control/xvf_host.py` 读写（需要 pyusb 和 libusb）；
+  不执行 `SAVE_CONFIGURATION` 就不会写进 flash，重启即恢复。

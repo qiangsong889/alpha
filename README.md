@@ -36,7 +36,18 @@ Both processes run the same check at startup and refuse to start with a list of 
 The launcher starts AlphaBrain (`brain.server`, `http://127.0.0.1:8765`), waits until it is healthy,
 then starts the voice layer (`voice.qwen_alpha`: Silero segmenter → Qwen ASR → Jev → AlphaBrain → Qwen TTS).
 Press Ctrl+C once to stop both. If a healthy brain is already running, it is reused and left running.
-Wear headphones: there is no echo cancellation.
+Without an echo-cancelling microphone array, wear headphones (see the XVF3800 section in
+[voice/QWEN_ALPHA.md](voice/QWEN_ALPHA.md) for a hands-free setup).
+
+To keep a log file as well, use `tee -i` so that Ctrl+C does not kill `tee` before the launcher has
+stopped the brain and voice processes:
+
+```bash
+./start-qwen 2>&1 | tee -i -a data/voice.log
+```
+
+Only one voice process can run at a time (`data/run/voice.lock`); a second one exits immediately with the
+running process's PID. To check for leftovers: `ps aux | grep -E "voice.qwen_alpha|brain.server"`.
 
 To run the two processes separately (for example, to read each one's logs in its own terminal):
 

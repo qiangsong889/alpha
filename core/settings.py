@@ -95,7 +95,9 @@ SETTINGS: tuple[Setting, ...] = (
        'asr', choices=('asr', 'omni'), readers={VOICE}),
     _s('SILERO_MODEL_PATH', '收音', 'Silero VAD 模型文件（留空用内置路径）', default='', readers={VOICE},
        editable=False),
-    _s('REALTIME_INPUT_DEVICE', '收音', '麦克风设备（编号或名字，留空用系统默认）', default='', readers={VOICE}),
+    _s('REALTIME_INPUT_DEVICE', '收音', '麦克风设备（编号或名字；留空用系统默认，并跟随系统切换）', default='', readers={VOICE}),
+    _s('REALTIME_INPUT_CHANNEL', '收音', '用麦克风设备的第几个声道（从 1 开始；XVF3800 的语音识别波束是 2）', 'int', 1,
+       minimum=1, maximum=16, readers={VOICE}),
     _s('QWEN_VAD', '收音', 'Omni 路径的服务端 VAD', 'choice', 'server_vad',
        choices=('server_vad', 'semantic_vad'), readers={VOICE}),
     _s('QWEN_SILENCE_MS', '收音', 'Omni 路径：静音多少毫秒算说完', 'int', 800, minimum=200, maximum=6000,
@@ -135,7 +137,7 @@ SETTINGS: tuple[Setting, ...] = (
        choices=('tts', 'omni'), readers={VOICE}),
     _s('QWEN_TTS_VOICE', '播报', 'Qwen TTS 音色', default='Ethan', readers={VOICE}),
     _s('QWEN_VOICE', '播报', 'Omni 路径的音色', default='Tina', readers={VOICE}),
-    _s('REALTIME_OUTPUT_DEVICE', '播报', '扬声器设备（编号或名字，留空用系统默认）', default='', readers={VOICE}),
+    _s('REALTIME_OUTPUT_DEVICE', '播报', '扬声器设备（编号或名字；留空用系统默认，并跟随系统切换）', default='', readers={VOICE}),
     _s('QWEN_SESSION_SECONDS', '播报', 'Qwen 会话轮换周期（秒）', 'float', 1800.0, minimum=60, maximum=1800,
        readers={VOICE}, editable=False),
     # ── 费用 ──
@@ -243,6 +245,15 @@ def _omni_upload_gate(get, process):
         yield 'error', 'QWEN_ALPHA_LOCAL_VAD=1 需要 QWEN_VAD=server_vad'
 
 
+def _input_channel(get, process):
+    if process == VOICE and get('REALTIME_INPUT_CHANNEL') > 1:
+        if not get('REALTIME_INPUT_DEVICE'):
+            yield 'warning', ('REALTIME_INPUT_CHANNEL 大于 1 但没有固定 REALTIME_INPUT_DEVICE：'
+                              '跟随系统默认设备时，换成单声道麦克风会打不开')
+        if get('QWEN_ALPHA_INPUT') == 'omni':
+            yield 'warning', 'REALTIME_INPUT_CHANNEL 只对 asr 收音生效，omni 路径仍用第 1 个声道'
+
+
 def _legacy_paths(get, process):
     if process == VOICE:
         if get('QWEN_ALPHA_INPUT') == 'omni':
@@ -264,7 +275,7 @@ class _InvalidInput(Exception):
 
 
 RULES: tuple[Rule, ...] = (_context_limits, _required_credentials, _jev_credentials,
-                           _omni_upload_gate, _legacy_paths, _model_price)
+                           _omni_upload_gate, _input_channel, _legacy_paths, _model_price)
 
 
 @dataclass(frozen=True)

@@ -95,6 +95,40 @@ class AsrInputTests(IsolatedAsyncioTestCase):
         self.player.clear.assert_not_called()
         self.submit.assert_not_called()
 
+    async def test_alpha_hearing_itself_is_ignored_before_jev(self):
+        # 2026-10-23：回声消除还没收敛时，Alpha 自己的话被转写出来，Jev 判成“对 Alpha 说话”。
+        self.receiver.current_report = NS(text='购物清单还有牛奶、鸡蛋和水。您是指清单内容吗？')
+        await self.local_segment('echo')
+        with self.assertLogs('alpha.qwen_alpha', level='INFO') as logs:
+            await self.adapter.result(AsrEvent('transcript', 'echo', '购物清单还有您。', .2))
+            await asyncio.sleep(.03)
+        self.assertIn('[回声忽略]', '\n'.join(logs.output))
+        self.router.interruption_and_turn.assert_not_awaited()  # 不交给 Jev
+        self.assertFalse(self.collector.pending)
+        self.player.resume.assert_called()
+        self.player.clear.assert_not_called()
+        self.bridge.new_input.assert_not_called()
+        self.submit.assert_not_called()
+
+    async def test_a_real_interruption_during_playback_still_reaches_jev(self):
+        self.bridge.report_interruption = Mock()
+        report = NS(text='客厅灯开了，厨房灯也开了。', turn_id=None, kind='reply')
+        self.receiver.current_report = report
+        await self.local_segment('user')
+        await self.adapter.result(AsrEvent('transcript', 'user', '厨房灯关了', .2))
+        await asyncio.sleep(.03)
+        self.router.interruption_and_turn.assert_awaited()
+        self.bridge.new_input.assert_called_once()
+        self.player.clear.assert_called()  # 真的停下了旧播报
+
+    async def test_repeating_alpha_after_it_finished_is_not_treated_as_echo(self):
+        # 只在 Alpha 说话期间比对：说完之后复述它的话是正常输入。
+        self.receiver.current_report = None
+        await self.local_segment('after')
+        await self.adapter.result(AsrEvent('transcript', 'after', '可以听到。', .2))
+        await asyncio.sleep(.03)
+        self.assertTrue(self.collector.parts or self.submit.called)
+
     async def test_forced_split_cannot_submit_before_physical_silence(self):
         probability = [1.]
         self.adapter.segmenter = Segmenter(lambda frame: probability[0], max_s=.32)
@@ -180,3 +214,17 @@ class AsrInputTests(IsolatedAsyncioTestCase):
         gate.assert_not_called()
         client.close.assert_awaited()
         tts.close.assert_awaited()
+
+
+class EchoTextTests(TestCase):
+    def test_echo_ratio_on_real_transcripts(self):
+        from voice.collection_rules import echo_ratio, is_echo
+        said = '购物清单还有牛奶、鸡蛋和水。您是指清单内容吗？'
+        self.assertTrue(is_echo('可以听到。', '可以听到。'))
+        self.assertTrue(is_echo('购物清单还有您。', said))       # 86%
+        self.assertTrue(is_echo('还有牛奶鸡蛋。', said))         # 100%，忽略标点
+        self.assertFalse(is_echo('厨房灯关了', '客厅灯开了，厨房灯也开了'))  # 80%：真实插话
+        self.assertFalse(is_echo('看一下我的购物清单', said))
+        self.assertFalse(is_echo('停', '停一下'))                # 太短，不下结论
+        self.assertFalse(is_echo('购物清单', ''))
+        self.assertAlmostEqual(echo_ratio('ALPHA 你好', 'alpha，你好'), 1.0)

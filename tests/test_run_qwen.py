@@ -44,6 +44,25 @@ class LauncherTests(IsolatedAsyncioTestCase):
         self.assertEqual(brain.signals, [signal.SIGINT])
         self.assertEqual(voice.signals, [signal.SIGINT])
 
+    async def test_a_broken_output_pipe_does_not_stop_the_cleanup(self):
+        # 2026-10-23：`./start-qwen | tee` 按 Ctrl+C 时 tee 先退出，启动器一打印就抛 BrokenPipeError，
+        # 大脑和语音留在后台没人关，下次启动后两个语音进程同时回答。
+        brain, voice = Process(), Process()
+        stopping = asyncio.Event()
+
+        async def spawn(module, env):
+            if module == 'voice.qwen_alpha':
+                stopping.set()
+                return voice
+            return brain
+        with patch.object(launcher, 'healthy', AsyncMock(side_effect=[False, True])), \
+                patch.object(launcher, 'spawn', side_effect=spawn), \
+                patch('builtins.print', side_effect=BrokenPipeError()):
+            result = await launcher.run(None, url=launcher.DEFAULT_URL, env={}, stopping=stopping)
+        self.assertEqual(result, 0)
+        self.assertEqual(brain.signals, [signal.SIGINT])
+        self.assertEqual(voice.signals, [signal.SIGINT])
+
     async def test_existing_brain_is_reused_and_never_stopped(self):
         voice = Process(0)
         spawn = AsyncMock(return_value=voice)

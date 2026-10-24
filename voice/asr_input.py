@@ -4,10 +4,13 @@ import asyncio
 import logging
 from uuid import uuid4
 
+import numpy as np
 import sounddevice as sd  # type: ignore[import-untyped]
 
 from core.costs import record_cost
+from core.settings import setting
 from voice.audio import audio_device
+from voice.audio_devices import AudioRoute
 from voice.asr_client import MODEL, PREFIX
 from voice.segmenter import FRAME, RATE, SpeechStarted
 from voice.omni_transport import SessionEnded
@@ -25,9 +28,11 @@ class SileroActivity:
 
 
 class AsrInput:
-    def __init__(self, receiver, segmenter, *, region='singapore'):
+    def __init__(self, receiver, segmenter, *, region='singapore', route=None):
         self.receiver, self.segmenter = receiver, segmenter
         self.region = region
+        # 系统默认设备变化时由 route 协调关闭和重开麦克风；默认不跟随。
+        self.route = route if route is not None else AudioRoute(follow_input=False, follow_output=False)
         self.client = None
         self.hold_id = None
 
@@ -102,22 +107,40 @@ class AsrInput:
             else:
                 queue.put_nowait(pcm)
 
+        # 多声道设备只取指定的一个声道（例如 XVF3800 的语音识别波束），其余丢弃。
+        channel = setting('REALTIME_INPUT_CHANNEL')
+
         def callback(indata, frames, timing, status):
-            loop.call_soon_threadsafe(enqueue, bytes(indata), str(status) if status else '')
+            pcm = bytes(indata) if channel == 1 else \
+                np.frombuffer(indata, dtype='<i2').reshape(-1, channel)[:, channel - 1].tobytes()
+            loop.call_soon_threadsafe(enqueue, pcm, str(status) if status else '')
 
         try:
-            with sd.RawInputStream(samplerate=RATE, channels=1, dtype='int16', blocksize=FRAME,
-                                   device=audio_device('REALTIME_INPUT_DEVICE'), callback=callback) as stream:
-                while True:
-                    try:
-                        chunk = await asyncio.wait_for(queue.get(), .2)
-                    except TimeoutError:
-                        if not stream.active:
-                            raise SessionEnded('麦克风已断开')
-                        continue
-                    if isinstance(chunk, Exception):
-                        raise chunk
-                    await self.process(chunk)
+            while True:
+                # 切换设备进行中时先等它完成，不在重新初始化 PortAudio 前后打开流。
+                await self.route.wait_ready()
+                device = audio_device('REALTIME_INPUT_DEVICE')
+                info = sd.query_devices(device, 'input')
+                available = info['max_input_channels']
+                if channel > available:
+                    # 配置错误：不能悄悄改用别的声道，也不该当成断线反复重连。
+                    raise ValueError(f'REALTIME_INPUT_CHANNEL={channel}，但麦克风设备只有 {available} 个声道')
+                with self.route.stream(), sd.RawInputStream(
+                        samplerate=RATE, channels=channel, dtype='int16', blocksize=FRAME,
+                        device=device, callback=callback) as stream:
+                    logger.info('[麦克风] %s ｜ 第 %d 声道（共 %d）', info.get('name', device), channel, available)
+                    while not self.route.changed.is_set():
+                        try:
+                            chunk = await asyncio.wait_for(queue.get(), .2)
+                        except TimeoutError:
+                            if not stream.active:
+                                raise SessionEnded('麦克风已断开')
+                            continue
+                        if isinstance(chunk, Exception):
+                            raise chunk
+                        await self.process(chunk)
+                # 系统默认设备变了：上面正常关闭了流，回到开头用新设备重新打开，ASR 会话不断。
+                logger.info('[麦克风] 系统默认设备变化，重新打开')
         except sd.PortAudioError as exc:
             raise SessionEnded('麦克风不可用，请检查设备连接') from exc
         finally:

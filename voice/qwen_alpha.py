@@ -19,16 +19,17 @@ from websockets.asyncio.client import connect
 
 from core.paths import ENV_FILE
 from voice.audio import StreamingPlayer, SpeechActivity, is_meaningful
+from voice.audio_devices import AudioRoute
 from voice.omni_transport import (CostTracker, SessionEnded, QwenProtocolError, MODEL,
     send_event, wait_for_event, send_microphone, session_config as base_config,
     verify_session, websocket_url, raise_api_error, reconnectable, rotate_session)
-from voice.collection_rules import EXECUTE, unfinished
+from voice.collection_rules import EXECUTE, echo_ratio, is_echo, unfinished
 from voice.search_router import JevSearchRouter
 from voice.batch_timing import BatchTiming
 from voice.qwen_tts import QwenTTS
 from voice.upload_gate import make_upload_gate
 from core.costs import configure_costs, record_cost, log_summary, AudioCostMeter
-from core.runtime import VOICE_STATUS, StatusWriter
+from core.runtime import VOICE_LOCK, VOICE_STATUS, AlreadyRunning, StatusWriter, single_instance
 from core.settings import VOICE, SettingsError, require_settings, setting
 
 logger = logging.getLogger('alpha.qwen_alpha')
@@ -572,6 +573,13 @@ class Receiver:
                 self.restore_if_quiet()
                 logger.info('[恢复] 噪音或重复转写，继续播放')
                 return
+            if speech.overlapped and is_echo(text, speech.assistant_text):
+                # 回声消除还没收敛、音量刚调过时，Alpha 自己的话会被转写出来；Jev 分不出来。
+                self.collector.transcript(item_id, '')
+                self.restore_if_quiet()
+                logger.info('[回声忽略] 和 Alpha 正在说的话一致（%.0f%%）：%r，继续播放',
+                            echo_ratio(text, speech.assistant_text) * 100, text)
+                return
             self.collector.committed(item_id)  # 分类完成前，阻止收集器提交或开始下一段播报。
             self.resolving.add(item_id)
             if speech.overlapped and self.interruption_filter and not self.shortcut(text, speech):
@@ -799,6 +807,15 @@ def make_router(client):
                            min_confidence=setting('JEV_MIN_CONFIDENCE'))
 
 
+def audio_route(mode):
+    """没有在 .env 指定固定设备时，跟随系统默认设备的切换（见 voice/audio_devices.py）。
+
+    旧的 Omni 收音流没有接入协调，不能在它开着时重新初始化 PortAudio，所以那条路径不跟随。
+    """
+    return AudioRoute(follow_input=mode == 'asr' and not setting('REALTIME_INPUT_DEVICE'),
+                      follow_output=mode == 'asr' and not setting('REALTIME_OUTPUT_DEVICE'))
+
+
 def input_mode():
     mode = setting('QWEN_ALPHA_INPUT')
     if mode not in {'omni', 'asr'}:
@@ -806,7 +823,7 @@ def input_mode():
     return mode
 
 
-async def run_asr_connection(player, collector, bridge, costs):
+async def run_asr_connection(player, collector, bridge, costs, route=None):
     """独立 ASR + 专用 TTS；此路径完全不建立 Omni 连接、不启用上传门控。"""
     from voice.asr_client import AsrClient, websocket_url as asr_url
     from voice.asr_input import AsrInput, SileroActivity
@@ -821,7 +838,7 @@ async def run_asr_connection(player, collector, bridge, costs):
     receiver = Receiver(None, player, collector, bridge, costs, 'local-asr', SileroActivity(),
         interruption_filter=setting('QWEN_ALPHA_JEV_INTERRUPTIONS'),
         uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'), tts=tts)
-    adapter = AsrInput(receiver, segmenter, region=region)
+    adapter = AsrInput(receiver, segmenter, region=region, route=route)
     client = AsrClient(url, key, adapter.result, notify=adapter.notify)
     adapter.client = client
     try:
@@ -944,7 +961,8 @@ async def main():
     runtime = {'input': mode, 'speaker': setting('QWEN_ALPHA_SPEAKER'),
                'brain_url': setting('ALPHA_BRAIN_URL'), 'connection': 'starting', 'last_error': None}
     status_writer = StatusWriter(VOICE_STATUS, settings_report, lambda: runtime)
-    player = StreamingPlayer()
+    route = audio_route(mode)
+    player = StreamingPlayer(route)
     costs = CostTracker(setting('QWEN_REGION'))
     async with httpx.AsyncClient() as client:
         base_url = setting('ALPHA_BRAIN_URL')
@@ -964,7 +982,7 @@ async def main():
                 runtime['connection'] = 'connected'
                 try:
                     if mode == 'asr':
-                        await run_asr_connection(player, collector, bridge, costs)
+                        await run_asr_connection(player, collector, bridge, costs, route)
                     else:
                         async with connect(url, additional_headers={'Authorization': f'Bearer {key}'},
                                            open_timeout=30, max_size=16 * 1024 * 1024) as ws:
@@ -981,6 +999,7 @@ async def main():
         try:
             async with asyncio.TaskGroup() as tasks:
                 tasks.create_task(player.run())
+                tasks.create_task(route.watch())
                 tasks.create_task(bridge.run())
                 tasks.create_task(reconnect())
                 tasks.create_task(status_writer.run())  # 退出（包括 Ctrl+C）时会写一次 stopped
@@ -992,9 +1011,18 @@ async def main():
             log_summary()
 
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
+def run() -> None:
+    """命令行入口。同一时间只允许一个语音进程：两个进程会同时听、同时回答，一句话说两遍。"""
     try:
-        asyncio.run(main())
+        with single_instance(VOICE_LOCK):
+            asyncio.run(main())
+    except AlreadyRunning as exc:
+        raise SystemExit(f'已有一个语音进程在运行（pid {exc}），先停掉它再启动。'
+                         '查看：ps aux | grep voice.qwen_alpha') from None
     except KeyboardInterrupt:
         print('已退出')
+
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s %(message)s')
+    run()

@@ -8,13 +8,15 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import contextmanager
 from dataclasses import dataclass
+import fcntl
 import json
 import logging
 import os
 from pathlib import Path
 import time
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from core.paths import PROJECT_ROOT
 from core.settings import REGISTRY, SettingsReport, check_settings
@@ -23,6 +25,7 @@ logger = logging.getLogger('alpha.runtime')
 
 RUN_DIR = PROJECT_ROOT / 'data' / 'run'
 VOICE_STATUS = RUN_DIR / 'voice.json'
+VOICE_LOCK = RUN_DIR / 'voice.lock'
 HEARTBEAT_S = 5.0
 STALE_AFTER_S = 3 * HEARTBEAT_S
 SCHEMA = 1
@@ -53,6 +56,33 @@ def write_status(path: Path, data: Mapping[str, Any]) -> None:
         json.dump(data, handle, ensure_ascii=False, default=str)
     os.chmod(temporary, 0o600)
     os.replace(temporary, path)
+
+
+class AlreadyRunning(RuntimeError):
+    """已经有另一个进程持有这把锁。"""
+
+
+@contextmanager
+def single_instance(path: Path) -> Iterator[None]:
+    """同一时间只允许一个进程运行（例如语音层：两个进程会同时听、同时回答）。
+
+    用 flock：进程不管正常退出还是被强制结束，操作系统都会释放锁，不会留下"死锁文件"。
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle = open(path, 'a+', encoding='utf-8')
+    try:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.seek(0)
+            raise AlreadyRunning(handle.read().strip() or '未知') from None
+        handle.seek(0)
+        handle.truncate()
+        handle.write(str(os.getpid()))
+        handle.flush()
+        yield
+    finally:
+        handle.close()
 
 
 class StatusWriter:

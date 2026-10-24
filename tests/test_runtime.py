@@ -5,13 +5,15 @@ import json
 import os
 from pathlib import Path
 import stat
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 
 import brain.agent as agent
 from brain import server
-from core.runtime import (STALE_AFTER_S, StatusWriter, compare_settings, effective_settings,
+from core.runtime import (STALE_AFTER_S, AlreadyRunning, single_instance, StatusWriter, compare_settings, effective_settings,
                           read_status_file, saved_report, snapshot, write_status)
 from core.settings import BRAIN, VOICE, check_settings
 
@@ -108,6 +110,40 @@ class CompareTests(unittest.TestCase):
         self.assertEqual(rows['QWEN_ALPHA_COLLECTION_SECONDS'].state, 'applied')  # 2.0 和 JSON 里的 2.0
         stopped = read_status_file(Path(self.directory.name) / 'missing.json', now=1)
         self.assertTrue(all(row.state == 'unknown' for row in compare_settings(saved, stopped)))
+
+
+class SingleInstanceTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.lock = Path(self.directory.name) / 'run' / 'voice.lock'
+
+    def test_second_holder_is_refused_with_the_owner_pid_and_lock_is_released_on_exit(self):
+        with single_instance(self.lock):
+            with self.assertRaises(AlreadyRunning) as error:
+                with single_instance(self.lock):
+                    self.fail('不应该拿到锁')
+            self.assertEqual(str(error.exception), str(os.getpid()))
+        with single_instance(self.lock):  # 正常退出后可以再拿到
+            pass
+
+    def test_lock_is_released_when_the_holder_is_killed(self):
+        # 被 kill -9 的进程来不及做任何清理，锁也必须自动释放。
+        holder = subprocess.Popen([sys.executable, '-c', (
+            'import sys, time; from pathlib import Path; from core.runtime import single_instance\n'
+            'with single_instance(Path(sys.argv[1])):\n'
+            '    print("held", flush=True); time.sleep(60)'), str(self.lock)],
+            stdout=subprocess.PIPE, text=True, cwd=Path(__file__).resolve().parent.parent)
+        self.addCleanup(holder.kill)
+        self.assertEqual(holder.stdout.readline().strip(), 'held')
+        with self.assertRaises(AlreadyRunning) as error:
+            with single_instance(self.lock):
+                pass
+        self.assertEqual(str(error.exception), str(holder.pid))
+        holder.kill()
+        holder.wait(5)
+        with single_instance(self.lock):
+            pass
 
 
 class BrainStatusTests(unittest.IsolatedAsyncioTestCase):

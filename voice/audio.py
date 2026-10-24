@@ -13,6 +13,7 @@ import sounddevice as sd  # type: ignore[import-untyped]
 import webrtcvad  # type: ignore[import-untyped]
 
 from core.settings import setting
+from voice.audio_devices import AudioRoute
 
 def audio_device(env_name: str) -> int | str | None:
     # 环境变量既可以填设备编号（如 2），也可以填设备名；没填就让音频库使用默认设备。
@@ -114,7 +115,9 @@ class _ItemPlayback:
 
 class StreamingPlayer:
     """持续打开输出流，回调从缓冲区取音频；打断时清空缓冲区。"""
-    def __init__(self):
+    def __init__(self, route: AudioRoute | None = None):
+        # 系统默认设备变化时由 route 协调关闭和重开；默认不跟随（测试、CLI 等）。
+        self.route = route if route is not None else AudioRoute(follow_input=False, follow_output=False)
         # 接收模型音频的代码和 sounddevice 播放回调不在同一个线程。
         # 两边访问同一份缓冲区，所以用线程 Lock 保护，避免同时修改队列或播放位置。
         self.lock = Lock()
@@ -405,34 +408,43 @@ class StreamingPlayer:
         # 这是播放器的长期任务：打开设备 → 维持输出流 → 设备出错后等待并重试。
         # 实际音频搬运由 callback 完成，这里不逐块播放模型返回的数据。
         while True:
-            stream = None
+            switched = False
             try:
-                device = audio_device("REALTIME_OUTPUT_DEVICE")
-                info = sd.query_devices(device, "output")
-                self.rate = int(info["default_samplerate"])
-                # 使用播放设备自己的采样率；append 会把模型的 24kHz 音频转换过来。
-                stream = sd.OutputStream(
-                    samplerate=self.rate, channels=1, dtype="float32",
-                    device=device, blocksize=max(1, self.rate // 100),
-                    latency="low", callback=self.callback,
-                )
-                with stream:
-                    # 普通 with 负责同步打开/关闭本地设备；内部仍然可以使用 await。
-                    self.latency = float(stream.latency)
-                    self.ready = True
-                    print(f"[流式播放] {info['name']} ｜ {self.rate}Hz")
-                    while stream.active:
-                        # 只暂停当前 run 任务 0.1 秒，让录音、收网络消息等任务继续执行。
-                        # 扬声器由音频线程持续处理，不是每隔 0.1 秒才播放一次。
-                        await asyncio.sleep(0.1)
-                    raise sd.PortAudioError("输出流已停止")
+                # 切换设备进行中时先等它完成，不在重新初始化 PortAudio 前后打开流。
+                await self.route.wait_ready()
+                with self.route.stream():
+                    device = audio_device("REALTIME_OUTPUT_DEVICE")
+                    info = sd.query_devices(device, "output")
+                    self.rate = int(info["default_samplerate"])
+                    # 使用播放设备自己的采样率；append 会把模型的 24kHz 音频转换过来。
+                    stream = sd.OutputStream(
+                        samplerate=self.rate, channels=1, dtype="float32",
+                        device=device, blocksize=max(1, self.rate // 100),
+                        latency="low", callback=self.callback,
+                    )
+                    with stream:
+                        # 普通 with 负责同步打开/关闭本地设备；内部仍然可以使用 await。
+                        self.latency = float(stream.latency)
+                        self.ready = True
+                        print(f"[流式播放] {info['name']} ｜ {self.rate}Hz")
+                        while stream.active:
+                            if self.route.changed.is_set():
+                                # 系统默认设备变了：正常关闭，随后用新设备重新打开。
+                                switched = True
+                                break
+                            # 只暂停当前 run 任务 0.1 秒，让录音、收网络消息等任务继续执行。
+                            # 扬声器由音频线程持续处理，不是每隔 0.1 秒才播放一次。
+                            await asyncio.sleep(0.1)
+                        else:
+                            raise sd.PortAudioError("输出流已停止")
             except (sd.PortAudioError, ValueError) as exc:
                 print(f"[播放设备不可用] {exc}。1 秒后重试。")
             finally:
-                # 正常退出、设备报错或任务被取消都会经过这里，清掉过时音频。
+                # 正常退出、切换设备、设备报错或任务被取消都会经过这里，清掉过时音频。
                 self.ready = False
                 self.clear()
-            await asyncio.sleep(1)
+            if not switched:
+                await asyncio.sleep(1)
 
 
 def is_meaningful(text: str) -> bool:

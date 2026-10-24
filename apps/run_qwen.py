@@ -15,6 +15,17 @@ from core.settings import REGISTRY, setting
 DEFAULT_URL = REGISTRY['ALPHA_BRAIN_URL'].default  # 默认值只写在参数清单里
 
 
+def say(message):
+    """打印启动器提示；输出管道断了（例如 `| tee` 先被 Ctrl+C 结束）也不能中断收尾。
+
+    以前这里一打印就抛 BrokenPipeError，启动器直接退出，大脑和语音留在后台没人关。
+    """
+    try:
+        print(message, flush=True)
+    except OSError:
+        pass
+
+
 async def healthy(client, url):
     try:
         response = await client.get(url + '/health', timeout=.7)
@@ -42,7 +53,7 @@ async def stop_process(process):
         await asyncio.wait_for(process.wait(), 15)
         return
     except TimeoutError:
-        print('[启动器] 清理仍未结束，停止该进程组。', flush=True)
+        say('[启动器] 清理仍未结束，停止该进程组。')
     for sig, timeout in ((signal.SIGTERM, 5), (signal.SIGKILL, 3)):
         try:
             os.killpg(process.pid, sig)
@@ -60,13 +71,13 @@ async def run(client, *, url, env, stopping, startup_timeout=60):
     monitors = []
     try:
         if await healthy(client, url):
-            print('[启动器] AlphaBrain 已在运行，复用现有服务；退出时不会关闭它。', flush=True)
+            say('[启动器] AlphaBrain 已在运行，复用现有服务；退出时不会关闭它。')
         else:
             parsed = urlsplit(url)
             if (parsed.scheme != 'http' or parsed.hostname not in {'127.0.0.1', 'localhost'}
                     or parsed.port != 8765 or parsed.path not in {'', '/'}):
                 raise RuntimeError('配置的大脑地址不可用；自动启动只支持 http://127.0.0.1:8765')
-            print('[启动器] 正在启动 AlphaBrain…', flush=True)
+            say('[启动器] 正在启动 AlphaBrain…')
             brain = await spawn('brain.server', env)
             deadline = time.monotonic() + startup_timeout
             while not await healthy(client, url):
@@ -82,7 +93,7 @@ async def run(client, *, url, env, stopping, startup_timeout=60):
                     pass
         if stopping.is_set():
             return 0
-        print('[启动器] 大脑已就绪，启动 Qwen；按一次 Ctrl+C 退出。', flush=True)
+        say('[启动器] 大脑已就绪，启动 Qwen；按一次 Ctrl+C 退出。')
         voice = await spawn('voice.qwen_alpha', env)
         stopped = asyncio.create_task(stopping.wait())
         voice_exit = asyncio.create_task(voice.wait())
@@ -101,7 +112,7 @@ async def run(client, *, url, env, stopping, startup_timeout=60):
             task.cancel()
         await asyncio.gather(*monitors, return_exceptions=True)
         if brain is not None or voice is not None:
-            print('[启动器] 正在关闭本次启动的进程，请稍等…', flush=True)
+            say('[启动器] 正在关闭本次启动的进程，请稍等…')
         await stop_process(voice)
         await stop_process(brain)
 
@@ -124,7 +135,7 @@ async def main():
             return await run(client, url=url, env=env, stopping=stopping,
                              startup_timeout=args.startup_timeout)
     except (RuntimeError, OSError, ValueError) as exc:
-        print(f'[启动器] {exc}', flush=True)
+        say(f'[启动器] {exc}')
         return 1
     finally:
         for sig in (signal.SIGINT, signal.SIGTERM):
