@@ -132,6 +132,35 @@ class OperationStore:
         row = self._db.execute("SELECT * FROM operations WHERE id = ?", (op_id,)).fetchone()
         return self._from_row(row) if row is not None else None
 
+    def between(self, since: float | None = None, until: float | None = None) -> list[Operation]:
+        """按创建时间取操作记录（对话记忆用），从新到旧；类型和关键词由调用方筛选。"""
+        where, params = [], []
+        if since is not None:
+            where.append("created_at >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("created_at < ?")
+            params.append(until)
+        rows = self._db.execute(
+            f"SELECT * FROM operations {'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY created_at DESC",
+            params).fetchall()
+        return [self._from_row(row) for row in rows]
+
+    def earliest(self) -> float | None:
+        """最早一条操作记录的时间；没有记录返回 None。"""
+        return self._db.execute("SELECT MIN(created_at) FROM operations").fetchone()[0]
+
+    def for_turns(self, turn_ids: list[str]) -> dict[str, list[Operation]]:
+        """这些轮次各自执行过的操作，按执行顺序。"""
+        if not turn_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in turn_ids)
+        grouped: dict[str, list[Operation]] = {}
+        for row in self._db.execute(
+                f"SELECT * FROM operations WHERE turn_id IN ({placeholders}) ORDER BY created_at", turn_ids):
+            grouped.setdefault(row["turn_id"], []).append(self._from_row(row))
+        return grouped
+
     def set_tool_schemas(self, schemas: dict[str, dict[str, Any]]) -> None:
         """使用当前加载的目录比较新旧记录，不修改历史参数或真实调用。"""
         self._tool_schemas = deepcopy(schemas)

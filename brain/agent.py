@@ -1005,7 +1005,7 @@ class AlphaBrain:
                         # 只读查询本地存档，不经过网关，也不算业务操作。
                         if not isinstance(block.input, dict):
                             raise ValueError("查询参数必须是对象")
-                        text = search_history(self.archive, block.input, self.reminder_tz)
+                        text = search_history(self.archive, block.input, self.reminder_tz, self.store)
                         results.append({"type": "tool_result", "tool_use_id": block.id,
                                         "content": text, "is_error": False})
                         turn_action_replies.append(None)

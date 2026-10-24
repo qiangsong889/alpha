@@ -621,7 +621,9 @@ def score_turn(expected, observed, schemas, context):
 
 def seed_operations(store, context):
     for row in context.get('operations', []):
-        op = store.create('seed-' + uuid4().hex, row['name'], row['arguments'])
+        # archive_turn：挂到 context.archive 的第几轮（和 seed_archive 的 turn_id 一致），对话记忆按轮次附上操作。
+        turn_id = f"{row['archive_turn']:032x}" if 'archive_turn' in row else 'seed-' + uuid4().hex
+        op = store.create(turn_id, row['name'], row['arguments'])
         status = row['status']
         path = {'pending': [], 'approved': ['approved'], 'cancelled': ['cancelled'],
                 'executing': ['approved', 'executing'],
