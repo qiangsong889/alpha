@@ -34,6 +34,13 @@ def echo_ratio(heard: str, said: str) -> float:
     return sum(block.size for block in blocks) / len(heard)
 
 
-def is_echo(heard: str, said: str) -> bool:
-    # 太短的转写（一两个字）匹配不可靠，交给后面的判断。
-    return len(_NOT_TEXT.sub("", heard)) >= 3 and echo_ratio(heard, said) >= ECHO_RATIO
+# 播报结束后不久开始的声音，也可能是回声的尾巴（房间混响、设备延迟）：实测结束后 118ms
+# 转写出“资料。”，正是刚说完那句话的最后两个字。人听完再开口通常要几百毫秒，所以窗口很短，
+# 只和刚说完那句话的结尾比对。
+ECHO_TAIL_S = 0.5
+ECHO_TAIL_CHARS = 20
+
+
+def is_echo(heard: str, said: str, *, min_chars: int = 3) -> bool:
+    # 太短的转写匹配不可靠，交给后面的判断；回声尾巴只和句尾比对，所以允许两个字。
+    return len(_NOT_TEXT.sub("", heard)) >= min_chars and echo_ratio(heard, said) >= ECHO_RATIO

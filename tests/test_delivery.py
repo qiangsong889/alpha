@@ -192,6 +192,7 @@ class ReceiverDeliveryTests(IsolatedAsyncioTestCase):
         self.bridge.say('好的', turn_id=TURN)
         await self.run_one(AsyncMock(return_value=True))
         self.assertEqual(self.seen, [(TURN, 'played')])
+        self.assertEqual(self.receiver.finished_report[0], '好的')  # 用于识别紧接着的回声尾巴
 
     async def test_cancelled_playback_is_interrupted(self):
         async def play(text):
@@ -200,6 +201,7 @@ class ReceiverDeliveryTests(IsolatedAsyncioTestCase):
         self.bridge.say('好的', turn_id=TURN)
         await self.run_one(play)
         self.assertEqual(self.seen, [(TURN, 'interrupted')])
+        self.assertIsNone(self.receiver.finished_report)  # 被打断时你正在说话，不能把你的话当成回声
 
     async def test_omni_interruption_never_claims_the_full_answer_was_heard(self):
         report = Report('第一句。第二句。', 0, turn_id=TURN)

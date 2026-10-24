@@ -129,6 +129,49 @@ class AsrInputTests(IsolatedAsyncioTestCase):
         await asyncio.sleep(.03)
         self.assertTrue(self.collector.parts or self.submit.called)
 
+    async def test_echo_tail_right_after_playback_is_ignored(self):
+        # 2026-10-23：介绍完自己 118ms 后转写出“资料。”，正是最后两个字，被当成新请求。
+        import time
+        self.receiver.current_report = None
+        self.receiver.finished_report = ('……查找和读取文档与邮件，也能联网搜索资料。', time.perf_counter())
+        await self.local_segment('tail')
+        with self.assertLogs('alpha.qwen_alpha', level='INFO') as logs:
+            await self.adapter.result(AsrEvent('transcript', 'tail', '资料。', .2))
+            await asyncio.sleep(.03)
+        self.assertIn('刚说完', '\n'.join(logs.output))
+        self.assertFalse(self.collector.parts)
+        self.submit.assert_not_called()
+
+    async def test_speech_starting_later_than_the_tail_window_is_normal_input(self):
+        import time
+        from voice.collection_rules import ECHO_TAIL_S
+        self.receiver.current_report = None
+        self.receiver.finished_report = ('……也能联网搜索资料。', time.perf_counter() - ECHO_TAIL_S - .1)
+        await self.local_segment('later')
+        await self.adapter.result(AsrEvent('transcript', 'later', '资料。', .2))
+        await asyncio.sleep(.03)
+        self.assertTrue(self.collector.parts or self.submit.called)
+
+    async def test_a_quick_reply_that_is_not_alpha_s_words_is_kept(self):
+        import time
+        self.receiver.current_report = None
+        self.receiver.finished_report = ('要我把客厅灯打开吗？', time.perf_counter())
+        await self.local_segment('reply')
+        await self.adapter.result(AsrEvent('transcript', 'reply', '好的谢谢', .2))
+        await asyncio.sleep(.03)
+        self.assertTrue(self.collector.parts or self.submit.called)
+
+    async def test_tail_window_only_compares_with_the_end_of_the_sentence(self):
+        # 回声尾巴只会是最后几个字；句子前面出现过的词，快速说出来仍然是你的输入。
+        import time
+        said = '购物清单上有牛奶、鸡蛋和水，另外明天早上八点半有一个会议，需要提前准备好材料。'
+        self.receiver.current_report = None
+        self.receiver.finished_report = (said, time.perf_counter())
+        await self.local_segment('early')
+        await self.adapter.result(AsrEvent('transcript', 'early', '牛奶鸡蛋', .2))
+        await asyncio.sleep(.03)
+        self.assertTrue(self.collector.parts or self.submit.called)
+
     async def test_forced_split_cannot_submit_before_physical_silence(self):
         probability = [1.]
         self.adapter.segmenter = Segmenter(lambda frame: probability[0], max_s=.32)

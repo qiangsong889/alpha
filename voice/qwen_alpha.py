@@ -23,7 +23,7 @@ from voice.audio_devices import AudioRoute
 from voice.omni_transport import (CostTracker, SessionEnded, QwenProtocolError, MODEL,
     send_event, wait_for_event, send_microphone, session_config as base_config,
     verify_session, websocket_url, raise_api_error, reconnectable, rotate_session)
-from voice.collection_rules import EXECUTE, echo_ratio, is_echo, unfinished
+from voice.collection_rules import ECHO_TAIL_CHARS, ECHO_TAIL_S, EXECUTE, echo_ratio, is_echo, unfinished
 from voice.search_router import JevSearchRouter
 from voice.batch_timing import BatchTiming
 from voice.qwen_tts import QwenTTS
@@ -260,6 +260,9 @@ class SpeechInput:
     report: Report | None
     assistant_text: str
     transcribed_at: float | None = None
+    # 转写要和哪段话比对回声：播报中是整段回答；刚说完 ECHO_TAIL_S 秒内是那句话的结尾。
+    echo_text: str = ''
+    echo_min_chars: int = 3
 
 
 class BrainBridge:
@@ -435,6 +438,7 @@ class Receiver:
         self.activity = activity
         self.paused = False
         self.current_report = None
+        self.finished_report: tuple[str, float] | None = None  # 刚播完的回答和结束时间，用于识别回声尾巴
         self.tts_segments = []
         self.playback_tasks = set()
         self.interruption_filter = interruption_filter
@@ -449,9 +453,14 @@ class Receiver:
         self.question_deadline = 0.0
 
     def speech_input(self):
-        report = self.current_report
-        return SpeechInput(time.perf_counter(), report is not None or self.active, report,
-                           (report.text or '') if report is not None else '')
+        report, now = self.current_report, time.perf_counter()
+        overlapped = report is not None or self.active
+        assistant_text = (report.text or '') if report is not None else ''
+        echo_text, echo_min_chars = assistant_text, 3
+        if not overlapped and self.finished_report is not None and now - self.finished_report[1] <= ECHO_TAIL_S:
+            echo_text, echo_min_chars = self.finished_report[0][-ECHO_TAIL_CHARS:], 2
+        return SpeechInput(now, overlapped, report, assistant_text,
+                           echo_text=echo_text, echo_min_chars=echo_min_chars)
 
     @staticmethod
     def meaningful(text):
@@ -573,12 +582,12 @@ class Receiver:
                 self.restore_if_quiet()
                 logger.info('[恢复] 噪音或重复转写，继续播放')
                 return
-            if speech.overlapped and is_echo(text, speech.assistant_text):
+            if speech.echo_text and is_echo(text, speech.echo_text, min_chars=speech.echo_min_chars):
                 # 回声消除还没收敛、音量刚调过时，Alpha 自己的话会被转写出来；Jev 分不出来。
                 self.collector.transcript(item_id, '')
                 self.restore_if_quiet()
-                logger.info('[回声忽略] 和 Alpha 正在说的话一致（%.0f%%）：%r，继续播放',
-                            echo_ratio(text, speech.assistant_text) * 100, text)
+                logger.info('[回声忽略] 和 Alpha %s的话一致（%.0f%%）：%r，继续播放',
+                            '正在说' if speech.overlapped else '刚说完', echo_ratio(text, speech.echo_text) * 100, text)
                 return
             self.collector.committed(item_id)  # 分类完成前，阻止收集器提交或开始下一段播报。
             self.resolving.add(item_id)
@@ -699,6 +708,8 @@ class Receiver:
                 played = await self._play_report(report.text)
                 self.bridge.report_delivery(report, 'played' if played else
                                             'interrupted' if self.cancelled else 'not_played')
+                if played and report.text:
+                    self.finished_report = (report.text, time.perf_counter())
             except BaseException:
                 # 仅未被新输入作废的当前报告可以在重连后恢复。
                 if not self.cancelled and report.epoch == self.bridge.epoch:
