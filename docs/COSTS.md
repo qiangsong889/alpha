@@ -99,6 +99,8 @@ Claude cache writes: 1.25x input price for five minutes, 2x for one hour.
 Unsupported models are flagged, not silently priced as Sonnet.
 Qwen3 TTS Flash Realtime: Singapore $0.13 / 10,000 characters;
 Beijing $0.143353 / 10,000 characters.
+Qwen-Audio 3.1 TTS (Singapore): flash $0.23 input / $1.87 output per 1M tokens;
+plus $0.3 / 10,000 characters. Other regions are flagged as unpriced.
 Omni Singapore input text/audio and output text/audio: $0.23 / $0.93 / $0.70 /
 $1.87 per million tokens; Beijing $0.212 / $0.848 / $0.636 / $1.696.
 

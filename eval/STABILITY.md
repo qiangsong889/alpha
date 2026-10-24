@@ -872,3 +872,9 @@ hist-01～06 各 1 次 6/6（`results/20261023-223124-b717ff.jsonl`）：hist-06
 语音念的邮箱 ASR 转不准（“强颂八八九 at yahoo”“两个亿”），以前要念三四遍。send_email 的 to 写 me，
 prepare_email 换成 OWNER_EMAIL（留空用 Gmail 账号），草稿预览显示实际地址。新增 email-04（记忆里有转写错的邮箱作干扰）。
 email-01～04 各 1 次 4/4（`results/20261023-230530-2ed598.jsonl`），email-04 再 2 次 2/2：to 都是 me。
+
+## 2026-10-24 搜索换成基础版 web_search_20250305
+
+动态过滤版（20260209）会先写代码再搜，“我查一下”被拖晚（已改为 code_execution 开始即播报），
+且来回执行代码很慢：探针“最近有什么好看的韩剧”16.3 秒 → 基础版 4.5 秒，“黎明杀机是付费的吗”5.3 → 4.3 秒。
+工具定义约 6k → 2.8k token。search-02、weather-03、chat-01～03 各 1 次 5/5（`results/20261024-091424-0e54ee.jsonl`）。

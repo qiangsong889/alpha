@@ -6,9 +6,9 @@ from types import SimpleNamespace as NS
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, Mock, patch
 
-from voice.qwen_tts import QwenTTS
+from voice.qwen_tts import QwenAudioTTS, QwenTTS, make_tts
 from voice.qwen_alpha import Receiver
-from core.costs import CostLedger
+from core.costs import CostLedger, quote
 
 
 class TTSTests(IsolatedAsyncioTestCase):
@@ -128,3 +128,90 @@ class TTSTests(IsolatedAsyncioTestCase):
         self.assertTrue(closed.is_set())
         ws.send.assert_not_awaited()
         player.clear.assert_called_once()
+
+
+class FakeAudioSocket:
+    """按顺序回放服务端消息；收到 continue-task 之前不会给出音频，和真实服务一致。"""
+
+    def __init__(self, tasks):
+        self.tasks, self.sent, self.close = list(tasks), [], AsyncMock()
+        self.queue = asyncio.Queue()
+
+    async def send(self, raw):
+        message = json.loads(raw)
+        self.sent.append(message)
+        task_id, action = message['header']['task_id'], message['header']['action']
+        if action == 'run-task':
+            await self.queue.put(json.dumps({'header': {'event': 'task-started', 'task_id': task_id}}))
+        elif action == 'finish-task':
+            for item in self.tasks.pop(0):
+                await self.queue.put(item if isinstance(item, bytes) else json.dumps(
+                    {**item, 'header': {**item['header'], 'task_id': item['header'].get('task_id', task_id)}}))
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        return await self.queue.get()
+
+
+def finished(usage):
+    return {'header': {'event': 'task-finished'}, 'payload': {'output': {}, 'usage': usage}}
+
+
+class QwenAudioTTSTests(IsolatedAsyncioTestCase):
+    def service(self):
+        return QwenAudioTTS('fake-key', 'workspace', voice='longanlingxin_v3.1')
+
+    async def test_one_task_per_sentence_on_one_connection_with_exact_text_and_per_task_usage(self):
+        usage = {'input_tokens': 11, 'output_tokens': 26, 'characters': 20}
+        ws = FakeAudioSocket([[b'pcm1', b'pcm2', finished(usage)], [b'pcm3', finished(usage)]])
+        service = self.service()
+        ledger = CostLedger(':memory:')
+        self.addCleanup(ledger.close)
+        with patch('core.costs._ledger', ledger),              patch('voice.qwen_tts.connect', AsyncMock(return_value=ws)) as connect:
+            self.assertEqual([c async for c in service.stream('没有发送邮件。')], [b'pcm1', b'pcm2'])
+            self.assertEqual([c async for c in service.stream('第二句')], [b'pcm3'])
+        self.assertEqual(connect.await_count, 1)
+        self.assertEqual(connect.call_args.kwargs['close_timeout'], 1)
+        runs = [m for m in ws.sent if m['header']['action'] == 'run-task']
+        self.assertEqual([r['payload']['parameters']['voice'] for r in runs], ['longanlingxin_v3.1'] * 2)
+        self.assertEqual({r['payload']['parameters']['format'] for r in runs}, {'pcm'})
+        self.assertEqual([m['payload']['input']['text'] for m in ws.sent
+                          if m['header']['action'] == 'continue-task'], ['没有发送邮件。', '第二句'])
+        self.assertNotEqual(runs[0]['header']['task_id'], runs[1]['header']['task_id'])
+        # 每个任务的 usage 原样计费，不做累计差分。
+        usages = [json.loads(row[0]) for row in ledger.db.execute('SELECT usage FROM cost_events ORDER BY rowid')]
+        self.assertEqual([u['output_tokens'] for u in usages], [26, 26])
+        ws.close.assert_not_awaited()
+
+    async def test_task_failed_raises_and_closes_connection(self):
+        ws = FakeAudioSocket([[{'header': {'event': 'task-failed', 'error_code': 'InvalidParameter',
+                                           'error_message': 'voice not match'}}]])
+        service = self.service()
+        with patch('voice.qwen_tts.connect', AsyncMock(return_value=ws)):
+            with self.assertRaisesRegex(RuntimeError, 'InvalidParameter'):
+                async for _ in service.stream('test'):
+                    pass
+        ws.close.assert_awaited_once()
+        self.assertIsNone(service.ws)
+
+    async def test_stopping_mid_sentence_closes_so_late_audio_cannot_leak_into_the_next(self):
+        ws = FakeAudioSocket([[b'a', b'b', finished({})]])
+        service = self.service()
+        with patch('voice.qwen_tts.connect', AsyncMock(return_value=ws)):
+            stream = service.stream('长句子')
+            self.assertEqual(await anext(stream), b'a')
+            await stream.aclose()
+        ws.close.assert_awaited_once()
+        self.assertIsNone(service.ws)
+
+    def test_factory_and_pricing(self):
+        self.assertIsInstance(make_tts('k', 'w', 'singapore', 'Ethan'), QwenTTS)
+        audio = make_tts('k', 'w', 'singapore', 'longanlingxin_v3.1', 'qwen-audio-3.1-tts-flash')
+        self.assertIsInstance(audio, QwenAudioTTS)
+        self.assertEqual(audio.model, 'qwen-audio-3.1-tts-flash')
+        usd, reason = quote('TTS', 'qwen-audio-3.1-tts-flash', {'input_tokens': 1_000_000, 'output_tokens': 1_000_000})
+        self.assertEqual((usd, reason), (Decimal('2.10'), ''))
+        self.assertEqual(quote('TTS', 'qwen-audio-3.1-tts-plus', {'characters': 10000}), (Decimal('0.3'), ''))
+        self.assertEqual(quote('TTS', 'qwen-audio-3.1-tts-flash', {'characters': 20})[1], 'missing_token_usage')

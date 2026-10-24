@@ -131,6 +131,17 @@ def quote(component, model, usage, region='singapore'):
                 raise ValueError('invalid rate')
             return Decimal(n)*rate/MILLION, ''
         if component == 'TTS':
+            if model == 'qwen-audio-3.1-tts-flash' and region == 'singapore':
+                # 按 token 计价（2026-10 新加坡价目表）：输入 $0.23/M，输出 $1.87/M。
+                tokens = count(u.get('input_tokens')), count(u.get('output_tokens'))
+                if None in tokens:
+                    return Decimal(0), 'missing_token_usage'
+                return (Decimal(tokens[0]) * Decimal('.23') + Decimal(tokens[1]) * Decimal('1.87')) / MILLION, ''
+            if model == 'qwen-audio-3.1-tts-plus' and region == 'singapore':
+                n = count(u.get('characters'))
+                if n is None:
+                    return Decimal(0), 'missing_billed_characters'
+                return Decimal(n) * Decimal('.3') / 10000, ''
             if not (model == 'qwen3-tts-flash-realtime' or model.startswith('qwen3-tts-flash-realtime-20')):
                 return Decimal(0), 'unknown_model_price'
             n = count(u.get('characters'))

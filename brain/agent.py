@@ -83,10 +83,17 @@ def search_answer(answer: str, found: bool) -> str:
     return "查到了，" + answer.lstrip()
 
 
+# 搜索开始的标志。基础版只有 web_search；保留 code_execution：换回动态过滤版（web_search_20260209）时
+# 模型先写代码，代码里的 web_search 块要等代码执行才出现（实测晚 4 秒）。没有单独开放代码执行工具。
+SEARCH_BLOCKS = frozenset({"web_search", "code_execution"})
+# 用基础版：动态过滤要来回写代码，“最近有什么好看的韩剧”实测 16 秒；工具定义也从约 6k token 降到约 2.8k。
+WEB_SEARCH_TYPE = "web_search_20250305"
+
+
 def web_search_tool(timezone: str) -> ToolUnionParam:
     """在 .env 加载后构建搜索工具；城市可选，不把空值传给 API。"""
     tool: dict[str, object] = {
-        "type": "web_search_20260209", "name": "web_search", "max_uses": 5,
+        "type": WEB_SEARCH_TYPE, "name": "web_search", "max_uses": 5,
     }
     city = setting("HOME_CITY")
     if city:
@@ -793,7 +800,7 @@ class AlphaBrain:
             async for event in stream:
                 if (event.type == "content_block_start"
                         and event.content_block.type == "server_tool_use"
-                        and event.content_block.name == "web_search"
+                        and event.content_block.name in SEARCH_BLOCKS
                         and on_search is not None):
                     # 只提前输出固定的进度提示，不提前朗读模型尚未核实的回答。
                     # 搜索在 Anthropic 端运行；这里收到开始事件就送 TTS，与搜索并行。

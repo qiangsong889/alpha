@@ -245,7 +245,7 @@ class AsrInputTests(IsolatedAsyncioTestCase):
         tts = NS(voice='Ethan', ready=AsyncMock(), close=AsyncMock())
         with patch('voice.asr_client.AsrClient', return_value=client) as asr_class, \
              patch('voice.segmenter.SileroVAD', return_value=lambda frame: 0), \
-             patch('voice.qwen_alpha.QwenTTS', return_value=tts), \
+             patch('voice.qwen_alpha.make_tts', return_value=tts), \
              patch('voice.asr_input.AsrInput.microphone', side_effect=mic), \
              patch('voice.qwen_alpha.connect') as omni, \
              patch('voice.qwen_alpha.make_upload_gate') as gate, \

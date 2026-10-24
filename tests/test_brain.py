@@ -905,6 +905,25 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.brain.messages[-1]["content"], "查到了。")
         self.executor.assert_not_awaited()
 
+    async def test_dynamic_search_announces_when_code_starts_not_when_inner_search_appears(self):
+        # 2026-10-24：动态过滤先写代码，代码里的 web_search 块晚 4 秒才出现，“我查一下”拖到回答前才说。
+        await self.brain.start()
+        code = NS(type="server_tool_use", id="code1", name="code_execution", input={"code": "search"})
+        result = NS(type="code_execution_tool_result", tool_use_id="code1", content={})
+        gate, arrived = asyncio.Event(), asyncio.Event()
+        voice = NS(type="tool_use", name=module.VOICE_REPLY, id="final", input={"answer": "查到了。"})
+        self.client.messages.stream = Mock(return_value=self.fake_stream(
+            reply([code, result, *self.search_blocks(), voice], "tool_use"),
+            [NS(type="content_block_start", content_block=code)], gate, arrived))
+        emit = AsyncMock()
+        task = asyncio.create_task(self.brain.ask("最近有什么好看的韩剧", on_text=emit))
+        try:
+            await asyncio.wait_for(arrived.wait(), 1)
+            emit.assert_awaited_once_with("我查一下。")
+        finally:
+            gate.set()
+            self.assertEqual(await task, "查到了。")
+
     def search_blocks(self):
         return [NS(type="server_tool_use", id="srv1", name="web_search", input={"query": "官方新闻"}),
                 NS(type="web_search_tool_result", tool_use_id="srv1", content=[
@@ -913,7 +932,7 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_web_search_enabled_in_text_and_stream_requests(self):
         await self.brain.start()
-        self.assertEqual(self.brain.web_search["type"], "web_search_20260209")
+        self.assertEqual(self.brain.web_search["type"], "web_search_20250305")
         self.client.messages.create.return_value = reply([NS(type="text", text="你好")])
         await self.brain.ask("你好")
         self.assertIn(self.brain.web_search, self.client.messages.create.call_args.kwargs["tools"])

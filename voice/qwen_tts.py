@@ -88,3 +88,81 @@ class QwenTTS:
         ws, self.ws = self.ws, None
         if ws is not None:
             await ws.close()
+
+
+class QwenAudioTTS:
+    """Qwen-Audio-TTS（qwen-audio-3.1-tts-flash/plus）：接口和 QwenTTS 一样，协议不同。
+
+    走 /api-ws/v1/inference 的 run-task → continue-task → finish-task，音频是二进制帧。
+    一句一个任务，任务结束连接保留给下一句；usage 每个任务单独给出，不是累计值。
+    """
+
+    def __init__(self, key, workspace, region='singapore', voice='longanlingxin_v3.1',
+                 model='qwen-audio-3.1-tts-flash'):
+        regions = {'singapore': 'ap-southeast-1', 'beijing': 'cn-beijing'}
+        if region not in regions or not workspace or not all(c.isalnum() or c == '-' for c in workspace):
+            raise ValueError('TTS 需要有效的 QWEN_REGION 和 QWEN_WORKSPACE_ID')
+        self.url = f'wss://{workspace}.{regions[region]}.maas.aliyuncs.com/api-ws/v1/inference'
+        self.key, self.voice, self.model, self.region, self.ws = key, voice, model, region, None
+
+    async def ready(self):
+        if self.ws is None:
+            # 服务端不及时回关闭帧，默认关闭要等 10 秒；连接只用来合成，不用等它确认。
+            self.ws = await connect(self.url, additional_headers={'Authorization': f'Bearer {self.key}'},
+                                    open_timeout=15, close_timeout=1, max_size=16 * 1024 * 1024)
+
+    async def send(self, action, task_id, payload):
+        await self.ws.send(json.dumps({'header': {'action': action, 'task_id': task_id, 'streaming': 'duplex'},
+                                       'payload': payload}))
+
+    async def stream(self, text, *, turn_id=None):
+        """按原文合成 PCM16 24kHz。失败不自动重播；取消或出错时关闭连接，免得旧任务的音频串到下一句。"""
+        completed = False
+        cost_id = None
+        try:
+            await self.ready()
+            cost_id = record_cost('TTS', self.model, region=self.region,
+                                  reason='synthesis_started_no_final_usage', turn_id=turn_id)
+            task_id = uuid4().hex
+            await self.send('run-task', task_id, {
+                'task_group': 'audio', 'task': 'tts', 'function': 'SpeechSynthesizer', 'model': self.model,
+                'parameters': {'text_type': 'PlainText', 'voice': self.voice, 'format': 'pcm', 'sample_rate': 24000},
+                'input': {}})
+            async with asyncio.timeout(90):
+                async for message in self.ws:
+                    if isinstance(message, bytes):
+                        yield message
+                        continue
+                    event = json.loads(message)
+                    header = event.get('header', {})
+                    if header.get('task_id') not in {None, task_id}:
+                        continue
+                    kind = header.get('event')
+                    if kind == 'task-started':
+                        await self.send('continue-task', task_id, {'input': {'text': text}})
+                        await self.send('finish-task', task_id, {'input': {}})
+                    elif kind == 'task-finished':
+                        usage = event.get('payload', {}).get('usage') or {}
+                        logger.info('[TTS用量] %s', json.dumps(usage, ensure_ascii=False))
+                        record_cost('TTS', self.model, usage, event_id=cost_id, region=self.region, turn_id=turn_id)
+                        log_summary()
+                        completed = True
+                        return
+                    elif kind == 'task-failed':
+                        raise RuntimeError(f"TTS {header.get('error_code', '')}: {header.get('error_message', '服务错误')}")
+                raise RuntimeError('TTS 连接意外关闭')
+        finally:
+            if not completed:
+                await self.close()
+
+    async def close(self):
+        ws, self.ws = self.ws, None
+        if ws is not None:
+            await ws.close()
+
+
+def make_tts(key, workspace, region, voice, model='qwen3-tts-flash-realtime'):
+    """按 QWEN_TTS_MODEL 选客户端；两种模型的音色不通用，配错时服务端会报 InvalidParameter。"""
+    if model == 'qwen3-tts-flash-realtime':
+        return QwenTTS(key, workspace, region, voice)
+    return QwenAudioTTS(key, workspace, region, voice, model)

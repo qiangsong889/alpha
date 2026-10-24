@@ -27,7 +27,7 @@ from voice.collection_rules import (ECHO_TAIL_CHARS, ECHO_TAIL_S, EXECUTE, WAKE,
                                     playback_command, unfinished)
 from voice.search_router import JevSearchRouter
 from voice.batch_timing import BatchTiming
-from voice.qwen_tts import QwenTTS
+from voice.qwen_tts import make_tts
 from voice.upload_gate import make_upload_gate
 from core.costs import configure_costs, record_cost, log_summary, AudioCostMeter
 from core.runtime import VOICE_LOCK, VOICE_STATUS, AlreadyRunning, StatusWriter, single_instance
@@ -862,7 +862,19 @@ def input_mode():
     return mode
 
 
-async def run_asr_connection(player, collector, bridge, costs, route=None):
+def make_satellite(mode):
+    """ALPHA_SATELLITE_HOST 填了就用 ESPHome 卫星收音；只接到 asr 路径（Omni 路径自己管麦克风）。"""
+    host = setting('ALPHA_SATELLITE_HOST')
+    if not host:
+        return None
+    if mode != 'asr':
+        raise ValueError('ALPHA_SATELLITE_HOST 只支持 QWEN_ALPHA_INPUT=asr')
+    from voice.satellite import SatelliteLink
+    return SatelliteLink(host, noise_psk=setting('ALPHA_SATELLITE_KEY') or None,
+                         listen_s=setting('ALPHA_SATELLITE_LISTEN_SECONDS'))
+
+
+async def run_asr_connection(player, collector, bridge, costs, route=None, satellite=None):
     """独立 ASR + 专用 TTS；此路径完全不建立 Omni 连接、不启用上传门控。"""
     from voice.asr_client import AsrClient, websocket_url as asr_url
     from voice.asr_input import AsrInput, SileroActivity
@@ -873,7 +885,7 @@ async def run_asr_connection(player, collector, bridge, costs, route=None):
     url = asr_url(workspace, region)
     detector = await asyncio.to_thread(SileroVAD, setting('SILERO_MODEL_PATH') or DEFAULT_MODEL)
     segmenter = Segmenter(detector)
-    tts = QwenTTS(key, workspace, region, setting('QWEN_TTS_VOICE'))
+    tts = make_tts(key, workspace, region, setting('QWEN_TTS_VOICE'), setting('QWEN_TTS_MODEL'))
     receiver = Receiver(None, player, collector, bridge, costs, 'local-asr', SileroActivity(),
         interruption_filter=setting('QWEN_ALPHA_JEV_INTERRUPTIONS'),
         uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'),
@@ -891,13 +903,15 @@ async def run_asr_connection(player, collector, bridge, costs, route=None):
             except Exception as exc:
                 await service.close()
                 logger.warning('[%s预连接失败] %s；首次使用时重连', name, type(exc).__name__)
-        logger.info('[输入路径] asr ｜ Silero ONNX / 静音600ms / 最长15秒 ｜ 串行手动ASR')
+        logger.info('[输入路径] asr ｜ Silero ONNX / 静音600ms / 最长15秒 ｜ 串行手动ASR ｜ %s',
+                    f'卫星 {satellite.host}' if satellite is not None else 'Mac 麦克风')
         logger.info('[播报引擎] Qwen TTS / %s（ASR模式不使用Omni播报）', tts.voice)
         if collector.parts:
             bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
         async with asyncio.TaskGroup() as tasks:
             tasks.create_task(client.run())
-            tasks.create_task(adapter.microphone())
+            # 卫星模式：音频来自设备（唤醒后才有），不打开 Mac 麦克风。
+            tasks.create_task(satellite.feed(adapter) if satellite is not None else adapter.microphone())
             tasks.create_task(receiver.confirm_speech())
             tasks.create_task(receiver.speak())
     finally:
@@ -928,8 +942,8 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     if speaker not in {'omni', 'tts'}:
         raise ValueError('QWEN_ALPHA_SPEAKER 必须是 omni 或 tts')
     # 选择 tts 时创建专用 TTS 客户端（凭据、工作空间、区域、音色）；否则为 None，由 Omni 播报。
-    tts = (QwenTTS(setting('DASHSCOPE_API_KEY'), setting('QWEN_WORKSPACE_ID'),
-                   setting('QWEN_REGION'), setting('QWEN_TTS_VOICE'))
+    tts = (make_tts(setting('DASHSCOPE_API_KEY'), setting('QWEN_WORKSPACE_ID'),
+                    setting('QWEN_REGION'), setting('QWEN_TTS_VOICE'), setting('QWEN_TTS_MODEL'))
            if speaker == 'tts' else None)
     # 启动日志写明本次实际使用哪个播报引擎和音色，方便确认没有走到 Omni 的后备路径。
     logger.info('[播报引擎] %s', 'Qwen TTS / ' + tts.voice if tts else 'Omni / ' + voice)
@@ -1016,7 +1030,15 @@ async def main():
         except httpx.HTTPError as exc:
             raise SystemExit('请先启动 .venv/bin/python -m brain.server') from exc
         bridge = BrainBridge(client, base_url)
-        collector = TurnCollector(lambda text: bridge.submit(text, collector.last_submission), bridge.say, make_router(client),
+        satellite = make_satellite(mode)
+
+        def submit(text):
+            if satellite is not None:
+                # 提交给大脑就结束这一轮：Alpha 播报时设备不推流，听不到自己的声音。
+                satellite.end_run('submitted')
+            bridge.submit(text, collector.last_submission)
+
+        collector = TurnCollector(submit, bridge.say, make_router(client),
             window_s=setting('QWEN_ALPHA_COLLECTION_SECONDS'),
             continuation_s=setting('QWEN_ALPHA_CONTINUATION_SECONDS'),
             mode=setting('QWEN_ALPHA_SUBMIT_MODE'))
@@ -1027,7 +1049,7 @@ async def main():
                 runtime['connection'] = 'connected'
                 try:
                     if mode == 'asr':
-                        await run_asr_connection(player, collector, bridge, costs, route)
+                        await run_asr_connection(player, collector, bridge, costs, route, satellite)
                     else:
                         async with connect(url, additional_headers={'Authorization': f'Bearer {key}'},
                                            open_timeout=30, max_size=16 * 1024 * 1024) as ws:
@@ -1047,6 +1069,8 @@ async def main():
                 tasks.create_task(route.watch())
                 tasks.create_task(bridge.run())
                 tasks.create_task(reconnect())
+                if satellite is not None:
+                    tasks.create_task(satellite.run())  # API 连接跨 ASR 重连保留
                 tasks.create_task(status_writer.run())  # 退出（包括 Ctrl+C）时会写一次 stopped
         finally:
             await collector.close()

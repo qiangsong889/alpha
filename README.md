@@ -88,9 +88,11 @@ The eval in `eval/` calls real models and costs money; run only the cases affect
 ### Home Assistant Agent
 
 - Calls Claude using `AsyncAnthropic` and responds briefly in Chinese.
-- Enables Anthropic's server-side `web_search_20260209` tool with its default
-  dynamic filtering for current information and
-  explicit search requests (up to five searches per API request). No additional
+- Enables Anthropic's server-side basic `web_search_20250305` tool for current
+  information and
+  explicit search requests (up to five searches per API request). The dynamic-filtering
+  `web_search_20260209` was dropped on 2026-10-24: it writes and runs code between
+  searches (one measured request took 16 s) and its definition costs ~6k vs ~2.8k tokens. No additional
   MCP server or search API key is needed. Search queries, errors and cited sources
   appear in brain logs; text answers include source links, while voice answers
   stay brief and do not read URLs. For explicit requests such as “帮我搜一下”,

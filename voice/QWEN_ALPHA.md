@@ -168,6 +168,20 @@ Startup preconnects TTS; interrupted synthesis closes its connection so late aud
 cannot enter the next report. Errors do not automatically replay reports with Omni.
 TTS usage is logged separately from Omni costs (no estimated TTS price is added).
 
+### Qwen-Audio-TTS (`QWEN_TTS_MODEL`)
+
+`QWEN_TTS_MODEL=qwen-audio-3.1-tts-flash` (or `-plus`) switches to `QwenAudioTTS`:
+`/api-ws/v1/inference` with `run-task` → `continue-task` → `finish-task`, audio as
+binary frames, one task per sentence on a kept connection, per-task usage (not
+cumulative). Voices differ between models; in Singapore the 3.1 Chinese voices are
+`longanlingxin_v3.1`, `longanhuan_v3.1`, `longanfengyue_v3.1` (female) and
+`xunanchuan_v3.1` (male). The server is slow to answer the close handshake, so the
+client uses `close_timeout=1`. `devtools/tts_compare.py` writes side-by-side WAVs.
+
+2026-10-23 comparison (first audio after the text was sent, connection excluded):
+qwen3-tts Ethan 0.53–0.59 s, 3.1 flash 0.56–0.79 s, 3.1 plus 0.71–1.13 s. Price for a
+20-character sentence: qwen3-tts ≈ $0.00026, 3.1 flash ≈ $0.00005 (token-priced).
+
 Start the trial: `./start-qwen`.
 Restore the previous Omni speaker for one run:
 
@@ -354,3 +368,40 @@ REALTIME_INPUT_CHANNEL=2
 用户反馈真人说英文会被写成中文。2026-10-23 用 TTS 合成的句子对照：标准英文在固定 zh 时也原样输出英文，
 没有复现“翻译”；不指定语言时中文结果不变，英文识别为 en。所以真人场景（口音、回声、噪音）下的原因
 还要看日志里的语言字段确认。需要固定中文时填 `zh`。
+
+## ESPHome 语音卫星（J9，`ALPHA_SATELLITE_HOST`）
+
+设备本地听唤醒词，唤醒后才把音频推给 Alpha；Mac 不再开麦克风。
+
+```
+XVF3800（降噪/回声消除/波束）→ I2S → XIAO ESP32S3（ESPHome，microWakeWord）
+   唤醒 → API 连接推 16 kHz PCM → voice/satellite.py → AsrInput.process（Silero → ASR → Jev → 大脑）
+```
+
+**设备**
+- XVF3800 刷 I2S 固件 `respeaker_flex_i2s_l16k2ch_v1.0.4.bin`（和 USB 固件同样的 dfu-util 安全模式刷法；刷回
+  `respeaker_flex_usb_l16k2ch_v1.0.4.bin` 就恢复 USB 声卡）。XVF3800 提供 I2S 时钟，XIAO 是 secondary。
+- XIAO 刷 `esp-alpha/esphome/alpha-xvf.yaml`（引脚 WS 7、BCK 8、DIN 43、DOUT 44，与 formatBCE 的 4-Mic 配置一致）。
+  左声道带 AGC、音量正常，右声道内容相同但只有约 3%，所以麦克风取左声道。
+- XIAO ESP32S3 必须接上外置天线，否则 Wi-Fi 只有 -91 dBm。
+- 通路先用 `esp-alpha/xvf_udp_probe`（Arduino）+ `devtools/udp_audio_receiver.py` 验证过：20 秒 2502 包、丢包 0。
+
+**一轮的生命周期**（`SatelliteLink`）
+1. 设备听到唤醒词发 start 请求；Alpha 回端口 0（音频走 API 连接），发 RUN_START/STT_START。
+2. 音频直接喂进断句器，后面的 ASR、Jev、大脑、TTS 都不变。
+3. 结束：这句话提交给大脑；或超过 `ALPHA_SATELLITE_LISTEN_SECONDS`（默认 8 秒）没有人声；或设备要求停止。
+   结束时发 RUN_END，设备停麦、恢复听唤醒词，并补 0.7 秒静音让断句器收尾。
+4. Alpha 播报时设备不推流，所以听不到自己的声音；播报中再次唤醒就是打断。
+
+API 连接在 `main()` 里常驻，跨 ASR 重连保留；断线 5 秒后重连。`ALPHA_SATELLITE_KEY` 是设备
+`api.encryption.key`（留空表示不加密，只适合测试）。
+
+**试用**（回答暂时用 Mac 扬声器；XVF3800 是 I2S 模式时 Mac 看不到 USB 声卡，两个设备名要留空）：
+```bash
+ALPHA_SATELLITE_HOST=192.168.1.115 REALTIME_INPUT_DEVICE= REALTIME_OUTPUT_DEVICE= ./start-qwen 2>&1 | tee -i -a data/voice.log
+```
+
+2026-10-24 实测：唤醒词 "Hey Jarvis" 4 次认到 3 次（置信度 0.98–0.99，无误触发）；基本对话、8 秒超时、
+唤醒打断播报、不唤醒不响应都正常。
+
+待做：设备播放 TTS（AIC3104，回声消除才有参考信号）、API 加密、训练 "Alpha" 唤醒词、提示音/LED。
