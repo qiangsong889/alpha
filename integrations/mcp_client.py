@@ -184,9 +184,25 @@ async def load_system(session: ClientSession) -> list[TextBlockParam]:
     )
     return [{
         "type": "text",
-        "text": ALPHA_RULES + "\nHome Assistant Assist prompt：\n" + assist_text,
+        "text": ALPHA_RULES + "\nHome Assistant 设备：\n" + condense_assist(assist_text),
         "cache_control": {"type": "ephemeral"},
     }]
+
+
+def condense_assist(text: str) -> str:
+    """只保留 HA 的设备列表，HA 自带的说明换成一句中文。
+
+    HA 的说明里有“用户要打开某类全部设备时先问哪个区域”，和 Alpha 的“把灯关了就关所有灯”冲突；
+    门锁、定时器的说明与这个家无关。HA 升级后格式变了、找不到设备列表时原样保留，不能把设备弄丢。
+    """
+    start = text.find("Static Context:")
+    if start < 0:
+        return text
+    end = text.find("\nWhen controlling Home Assistant", start)
+    devices = (text[start:end] if end > start else text[start:]).strip()
+    # “用户问到时”这个条件不能省：省掉后模型开完灯都会再查一次状态（eval light-01 0/5）。
+    return ("用户问到设备当前的状态（开关、温度、模式等）时用 GetLiveContext 查，不要猜；执行操作后不用再查。"
+            "有没有某个设备、是什么类型，按下面的静态列表回答。\n" + devices)
 
 
 def format_error(exc: BaseException) -> str:

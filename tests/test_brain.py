@@ -710,7 +710,7 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
             self.client.messages.create.side_effect = [call, reply([NS(type="text", text="好。")])]
             await self.brain.ask("把客厅灯打开")
             result = self.client.messages.create.call_args.kwargs["messages"][-1]["content"][0]["content"]
-            self.assertEqual("回答里不要提这项" in result, annotated, success)
+            self.assertEqual("回答里不提这项" in result, annotated, success)
 
     async def test_search_history_is_offered_only_with_the_archive_and_never_reaches_the_gateway(self):
         await self.brain.start()  # 默认不开存档：测试和 eval 不写也不读真实对话
@@ -846,8 +846,9 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(module.os.environ, {"HOME_CITY": ""}):
             await self.brain.start()
         prompt = self.brain.system[0]["text"]
-        self.assertIn("不要求用户家里有天气传感器", prompt)
-        self.assertIn("优先用 get_weather，不用 web_search", prompt)
+        self.assertIn("不需要家里有天气传感器", prompt)
+        self.assertIn("用 get_weather", prompt)
+        self.assertIn("不用 web_search", prompt)
         self.assertNotIn("\n用户配置的默认查询地点：", prompt)
         with patch.dict(module.os.environ, {"HOME_CITY": "Seattle", "HOME_REGION": "WA", "HOME_COUNTRY": "US"}):
             self.brain._prepare_catalog()
@@ -1309,9 +1310,9 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
     async def test_success_query_and_verbatim_email_rules_are_in_system(self):
         await self.brain.start()
         rules = self.brain.system[0]['text']
-        self.assertIn('不要额外调用查询工具确认', rules)
-        self.assertIn('不必先用 list_items', rules)
-        self.assertIn('邮件正文默认使用用户指定的原话，不扩写', rules)
+        self.assertIn('写操作明确成功后不再查询确认', rules)
+        self.assertIn('complete_items 直接用 item_titles', rules)
+        self.assertIn('正文用用户的原话，不扩写', rules)
 
     async def test_explicit_duplicate_control_is_removed_before_executor(self):
         self.add_catalog_tools("create_reminder")
