@@ -80,6 +80,9 @@ SETTINGS: tuple[Setting, ...] = (
     _s('ALPHA_AUTO_MEMORY', '大脑', '自动记忆（后台提取对话中的偏好）', 'bool', False, readers={BRAIN}),
     _s('REMINDER_TIMEZONE', '位置与时区', '提醒、日程和时间注入使用的时区', 'timezone',
        'America/Los_Angeles', readers={BRAIN, PERSONAL}),
+    # 不允许从控制台改：改了等于改变“发给我自己”的邮件去向。
+    _s('OWNER_EMAIL', '大脑', '“发给我自己”的邮箱（留空用 Gmail 登录账号）', default='', readers={PERSONAL},
+       editable=False),
     _s('HOME_CITY', '位置与时区', '网页搜索的城市（留空则不带位置）', default='', readers={BRAIN}),
     _s('HOME_REGION', '位置与时区', '网页搜索的州/省', default='', readers={BRAIN}),
     _s('HOME_COUNTRY', '位置与时区', '网页搜索的国家代码', default='', readers={BRAIN}),

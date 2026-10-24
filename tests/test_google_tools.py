@@ -275,6 +275,42 @@ class GoogleToolsTests(unittest.IsolatedAsyncioTestCase):
             tools.send_email(**args, confirmed=True, confirmation_token=token)
         self.assertEqual(messages.send.call_count, 1)
 
+    def sent_to(self, messages):
+        raw = messages.send.call_args.kwargs["body"]["raw"]
+        return str(BytesParser(policy=policy.default).parsebytes(base64.urlsafe_b64decode(raw))["To"])
+
+    def test_me_resolves_to_owner_email_or_gmail_account_and_preview_shows_it(self):
+        # 语音念不准邮箱：“发给我自己”由代码填地址，确认时听到的是实际地址。
+        messages = self.setup_send()
+        for owner, expected in (("", "owner@example.com"), ("me@yahoo.example", "me@yahoo.example")):
+            with self.subTest(owner=owner), patch.dict("os.environ", {"OWNER_EMAIL": owner}):
+                args = {"to": "me", "subject": "测试", "body": "正文"}
+                prepared = tools.prepare_email("send_email", args)
+                self.assertEqual(prepared.structured_content["preview"]["to"], expected)
+                tools.send_email(**args, confirmed=True,
+                                 confirmation_token=prepared.structured_content["confirmation_token"])
+                self.assertEqual(self.sent_to(messages), expected)
+
+    def test_me_can_be_mixed_with_other_recipients(self):
+        self.setup_send()
+        with patch.dict("os.environ", {"OWNER_EMAIL": ""}):
+            prepared = tools.prepare_email("send_email", {"to": "张三 <z@example.com>, ME", "subject": "s", "body": "b"})
+        self.assertEqual(prepared.structured_content["preview"]["to"], "张三 <z@example.com>, owner@example.com")
+
+    def test_reply_address_me_is_not_treated_as_the_owner(self):
+        # 回复地址来自原邮件，外人写 Reply-To: me 不能变成发给用户自己（也不是有效地址）。
+        messages = self.setup_send()
+        execute_result(messages, "get", {"threadId": "t", "payload": {"headers": [
+            {"name": "Reply-To", "value": "me"}, {"name": "Subject", "value": "s"},
+            {"name": "Message-ID", "value": "<x@example.com>"}]}})
+        with self.assertRaises(ToolError):
+            tools.prepare_email("reply_email", {"message_id": "m", "body": "收到"})
+
+    def test_invalid_owner_email_is_rejected(self):
+        self.setup_send()
+        with patch.dict("os.environ", {"OWNER_EMAIL": "强颂八八九"}), self.assertRaises(ToolError):
+            tools.prepare_email("send_email", {"to": "me", "subject": "s", "body": "b"})
+
     def test_send_rejects_missing_address_and_header_injection_before_api(self):
         for to, subject in [("小王", "Hi"), ("a@example.com\nBcc: victim@example.com", "Hi"),
                             ("a@example.com", "Hi\r\nBcc: victim@example.com")]:

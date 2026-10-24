@@ -541,6 +541,12 @@ without a code-owned confirmation token.
    (a read-only operation recorded by the gateway). It resolves the account sender,
    actual recipient and, for replies, subject/thread/reply headers. It does not
    create a Gmail draft or send a message. The server freezes the MIME bytes.
+   For "send it to myself" the model writes `to="me"` instead of spelling an
+   address (speech recognition garbles dictated addresses); `prepare_email`
+   replaces it with `OWNER_EMAIL` from `.env`, or the Gmail account address when
+   that is empty, so the preview shows the real address. Reply addresses come from
+   the original message and never resolve `me`. `OWNER_EMAIL` cannot be edited from
+   the console.
 2. Code directly outputs the actual recipient, subject, complete body and
    `确认发送吗？`, without letting the model shorten or rewrite this preview.
 3. Only after another nonempty user request can the model call the original tool

@@ -279,6 +279,9 @@ class FakeServices:
                 raise ToolNotSent('eval 尚未实现回复邮件的草稿模拟')
             token = uuid4().hex
             preview = {key: values[key] for key in ('to', 'subject', 'body')}
+            # 和真实 prepare_email 一样把 me 换成用户本人的地址。
+            preview['to'] = ', '.join('owner@example.com' if part.strip().lower() == 'me' else part.strip()
+                                      for part in preview['to'].split(','))
             self.drafts[token] = {'arguments': deepcopy(values), 'used': False, 'tool': tool}
             return {'text': '草稿已准备，尚未发送', 'structured_content': {
                 'preview': preview, 'confirmation_token': token}}

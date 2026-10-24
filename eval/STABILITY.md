@@ -866,3 +866,9 @@ light-01 开灯后又调用 GetLiveContext 查状态。各 5 次复测：0/5。
 `search_history` 同时查 `operations.db` 的写操作并附状态。新增 hist-05（存档开始前只有操作记录的
 “上周往购物清单加过什么”）、hist-06（邮件草稿 send_email 已取消，问“发出去了吗”）。
 hist-01～06 各 1 次 6/6（`results/20261023-223124-b717ff.jsonl`）：hist-06 回答“没有发出……记录为已取消”。
+
+## 2026-10-23 “发给我自己”：收件人 me 由代码解析
+
+语音念的邮箱 ASR 转不准（“强颂八八九 at yahoo”“两个亿”），以前要念三四遍。send_email 的 to 写 me，
+prepare_email 换成 OWNER_EMAIL（留空用 Gmail 账号），草稿预览显示实际地址。新增 email-04（记忆里有转写错的邮箱作干扰）。
+email-01～04 各 1 次 4/4（`results/20261023-230530-2ed598.jsonl`），email-04 再 2 次 2/2：to 都是 me。
