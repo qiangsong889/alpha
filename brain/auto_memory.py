@@ -12,6 +12,11 @@ from core.memory import MemoryStore
 
 logger = logging.getLogger('alpha.auto_memory')
 
+# 本轮操作了设备时，候选原话里要有这类“长期”的说法才保存；否则当作一次性操作（“餐厅灯开最亮”）。
+# 不含“都”：“把所有的灯都关掉”也是一次性操作。
+LONG_TERM = re.compile(r'以后|今后|往后|每次|每天|每晚|每早|总是|一直|平时|平常|通常|一般|习惯|喜欢|讨厌|偏好|默认|永远|'
+                       r'不要再|别再|记住|记得')
+
 
 @dataclass
 class PendingMemory:
@@ -134,9 +139,16 @@ class AutoMemory:
         task.add_done_callback(self.tasks.discard)
         return version, task
 
-    def apply(self, candidates, turn_id, sequence, version):
+    def apply(self, candidates, turn_id, sequence, version, *, device_changed=False):
         if self.closed or sequence != self.turn:
             return []
+        if device_changed:
+            # 2026-10-23：“餐厅灯开最亮”被存成偏好。同一句话在空记忆库时 0/5 被提取，
+            # 带上已有的 9 条无关记忆时 10/10 被提取：提示词规则靠不住，由代码兜底。
+            kept = [c for c in candidates if LONG_TERM.search(c.evidence)]
+            if len(kept) < len(candidates):
+                logger.info('[自动记忆] 本轮操作了设备，丢弃 %d 条没有长期含义的候选', len(candidates) - len(kept))
+            candidates = kept
         try:
             saved = self.store.apply_auto(version, [c.to_dict() for c in candidates if c.decision == 'save'], turn_id)
         except Exception as exc:

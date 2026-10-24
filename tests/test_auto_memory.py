@@ -37,6 +37,26 @@ class AutoMemoryTests(unittest.IsolatedAsyncioTestCase):
         self.auto.ack_notice()
         self.assertEqual(self.auto.notice(), '')
 
+    def test_turn_that_changed_a_device_keeps_only_long_term_statements(self):
+        # 2026-10-23：“餐厅灯开最亮”是一次操作，却被存成偏好。
+        cases = [candidate(content='餐厅灯开最亮'),
+                 candidate(content='餐厅灯以后都开最亮', evidence='以后餐厅灯都开最亮'),
+                 candidate(content='客厅灯开暖光', evidence='我喜欢客厅灯开暖光'),
+                 candidate(content='把所有的灯都关掉')]  # “都”不算长期
+        seq = self.auto.begin_turn()
+        version, _ = self.store.snapshot()
+        with self.assertLogs('alpha.auto_memory', level='INFO') as logs:
+            saved = self.auto.apply(cases, 'turn', seq, version, device_changed=True)
+        self.assertEqual({row.content for row in saved}, {'餐厅灯以后都开最亮', '客厅灯开暖光'})
+        self.assertIn('丢弃 2 条', '\n'.join(logs.output))
+        self.assertNotIn('餐厅灯开最亮', '\n'.join(logs.output))  # 日志不记录内容
+
+    def test_turn_without_device_changes_is_unaffected(self):
+        seq = self.auto.begin_turn()
+        version, _ = self.store.snapshot()
+        saved = self.auto.apply([candidate(content='餐厅灯开最亮')], 'turn', seq, version)
+        self.assertEqual([row.content for row in saved], ['餐厅灯开最亮'])
+
     async def test_changes_during_extraction_discard_saves_and_questions(self):
         started, release = asyncio.Event(), asyncio.Event()
         async def blocked(*args):

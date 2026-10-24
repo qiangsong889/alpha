@@ -217,6 +217,7 @@ class AlphaBrain:
         self.auto_memory: AutoMemory | None = None
         self._turn_memory_calls: list[str] = []
         self._turn_memory_saved = False
+        self._turn_device_guard: DeviceTurnGuard | None = None
         self._raw_request = ""
         self.gateway: ToolGateway | None = None
         self.email_confirmation: EmailConfirmation | None = None
@@ -586,6 +587,7 @@ class AlphaBrain:
                 CURRENT_TURN.set(turn_id)
                 self._turn_memory_calls = []
                 self._turn_memory_saved = False
+                self._turn_device_guard = None
                 self._raw_request = request
                 auto = self.auto_memory
                 sequence = auto.begin_turn() if auto is not None else 0
@@ -619,7 +621,9 @@ class AlphaBrain:
                         logger.info("[自动记忆] 主回答完成后等待提取 %.3fs", wait_s)
                         if not self._turn_memory_calls and not self.last_response_fallback:
                             assert auto is not None
-                            saved = auto.apply(candidates, turn_id, sequence, version)
+                            guard = self._turn_device_guard
+                            saved = auto.apply(candidates, turn_id, sequence, version,
+                                               device_changed=guard is not None and guard.writes > 0)
                     if auto is not None:
                         # 没有实际保存才修正虚假的完成声明；已保存但没原样复述，由下面代码补齐。
                         if not self._turn_memory_saved and not saved and claims_memory_saved(answer):
@@ -822,6 +826,7 @@ class AlphaBrain:
         turn_ha_successes: list[bool] = []
         turn_action_replies: list[str | None] = []
         device_guard = DeviceTurnGuard()
+        self._turn_device_guard = device_guard  # 自动记忆据此判断本轮是否操作了设备
         searched = False
         search_found = False
         empty_retry_used = False

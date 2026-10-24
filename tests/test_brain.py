@@ -221,6 +221,25 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         memories = self.brain.memory_store.list()
         self.assertEqual([(m.content, m.source) for m in memories], [('不吃香菜', 'auto')])
 
+    async def test_auto_memory_does_not_store_a_one_off_device_command(self):
+        from brain.memory_extractor import Candidate
+        self.ha[0].append({"name": "light__HassLightSet", "input_schema": {"type": "object"}})
+        self.executor.return_value = ExecutorResult(True, {"text": "完成", "structured_content": {
+            "response_type": "action_done", "data": {"success": [{"name": "餐厅灯", "type": "entity"}], "failed": []}}})
+        with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
+            await self.brain.start()
+        self.brain.auto_memory.extractor_factory = lambda _: NS(extract=AsyncMock(return_value=[
+            Candidate('save', 'add', 'preference', '餐厅灯开最亮', '餐厅灯开最亮')]))
+        self.client.messages.create.side_effect = [
+            reply([NS(type="tool_use", name="light__HassLightSet", id="max",
+                      input={"name": "餐厅灯", "brightness": 100})], "tool_use"),
+            reply([NS(type="text", text="餐厅灯已调到最亮。")]),
+        ]
+        answer = await self.brain.ask("餐厅灯开最亮")
+        self.assertEqual(self.brain.memory_store.list(), [])
+        self.assertNotIn("记下了", answer)
+        self.executor.assert_awaited_once()  # 操作照常执行
+
     async def test_auto_memory_unsaved_claim_corrected_before_output(self):
         with patch.dict(module.os.environ, {'ALPHA_AUTO_MEMORY': '1'}):
             await self.brain.start()
