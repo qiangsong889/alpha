@@ -698,6 +698,47 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.executor.await_args.args, ("intent__HassTurnOn", dining))
         self.assertEqual(self.executor.await_count, 2)
 
+    async def test_successful_device_result_tells_the_model_not_to_report_it(self):
+        # 只写在提示词开头时，“关灯并加清单”2/3 仍汇报了灯（eval mix-01）。
+        await self.brain.start()
+        call = reply([NS(type="tool_use", name="intent__HassTurnOn", input={"name": "客厅灯"}, id="on")], "tool_use")
+        for success, annotated in ((True, True), (False, False)):
+            self.executor.return_value = ExecutorResult(success, {"text": "完成" if success else "设备无响应",
+                "structured_content": {"response_type": "action_done", "data": {
+                    "success": [{"name": "客厅灯", "type": "entity"}] if success else [],
+                    "failed": [] if success else [{"name": "客厅灯", "type": "entity"}]}}})
+            self.client.messages.create.side_effect = [call, reply([NS(type="text", text="好。")])]
+            await self.brain.ask("把客厅灯打开")
+            result = self.client.messages.create.call_args.kwargs["messages"][-1]["content"][0]["content"]
+            self.assertEqual("回答里不要提这项" in result, annotated, success)
+
+    async def test_search_history_is_offered_only_with_the_archive_and_never_reaches_the_gateway(self):
+        await self.brain.start()  # 默认不开存档：测试和 eval 不写也不读真实对话
+        self.assertNotIn("search_history", [tool["name"] for tool in self.brain.tools])
+        with tempfile.TemporaryDirectory() as directory:
+            brain = module.AlphaBrain(archive_path=Path(directory) / "archive.db")
+            self.addAsyncCleanup(brain.close)
+            await brain.start()
+            self.assertIn("search_history", [tool["name"] for tool in brain.tools])
+            self.assertIn("search_history", brain.system[0]["text"])
+            brain.archive.record_turn(turn_id="a" * 32, session_id="s" * 32, user_text="附近有什么好吃的川菜馆",
+                                      answer_text="查到了：蜀香园。", status="ok", model="m", brain_ms=1)
+            self.client.messages.create.side_effect = [
+                reply([NS(type="tool_use", name="search_history", id="h", input={"keywords": ["川菜"]})], "tool_use"),
+                reply([NS(type="tool_use", name="search_history", id="bad", input={"keywords": []})], "tool_use"),
+                reply([NS(type="text", text="那家叫蜀香园。")]),
+            ]
+            answer = await brain.ask("上次那家川菜馆叫什么？")
+            self.assertEqual(answer, "那家叫蜀香园。")
+            first = self.client.messages.create.call_args_list[1].kwargs["messages"][-1]["content"][0]
+            self.assertFalse(first["is_error"])
+            self.assertIn("蜀香园", first["content"])
+            second = self.client.messages.create.call_args_list[2].kwargs["messages"][-1]["content"][0]
+            self.assertTrue(second["is_error"])
+            self.assertIn("查询存档失败", second["content"])
+            self.assertNotIn("可能已生效", second["content"])  # 只读查询，不能暗示有副作用
+            self.executor.assert_not_awaited()
+
     async def test_email_preview_is_generated_by_code_and_only_next_turn_can_send(self):
         self.add_catalog_tools(*module.GOOGLE_WRITE_TOOLS)
         async def execute(name, args):

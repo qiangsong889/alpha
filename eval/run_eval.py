@@ -385,6 +385,18 @@ class FakeServices:
         return await self.call(name, arguments)
 
 
+def seed_archive(turns, tz):
+    """context.archive：[{"at": "2026-10-16T19:30:00", "user": "...", "answer": "..."}]，at 是用例时区的本地时间。"""
+    from core.archive import ArchiveStore
+    archive = ArchiveStore(':memory:')
+    for index, turn in enumerate(turns):
+        moment = datetime.fromisoformat(turn['at']).replace(tzinfo=tz)
+        archive.record_turn(turn_id=f'{index:032x}', session_id=moment.strftime('%Y%m%d').ljust(32, '0'),
+                            user_text=turn['user'], answer_text=turn['answer'], status='ok',
+                            model='eval-seed', brain_ms=0, created_at=moment.timestamp())
+    return archive
+
+
 class EvalBrain(agent.AlphaBrain):
     """只替换启动依赖；ask 和完整 agent 循环保持原样。"""
 
@@ -409,6 +421,9 @@ class EvalBrain(agent.AlphaBrain):
         self.ha_catalog = ha_catalog(self.services.devices)
         self.store = operations.OperationStore(self.db_path)
         self.memory_store = agent.MemoryStore(self.db_path)
+        if self.context.get('archive') is not None:
+            # 对话记忆：预先放入的历史对话；存档要在准备工具目录之前打开，search_history 才会出现。
+            self.archive = seed_archive(self.context['archive'], self.reminder_tz)
         self.worker = self.services
         self.ha_url = 'https://ha.invalid/api/mcp'
         mcp_executor = make_executor(ha_url=self.ha_url, http_client=self.http_client, worker=self.worker, ha_tools=self.ha_tools)

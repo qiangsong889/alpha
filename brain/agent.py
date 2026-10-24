@@ -30,6 +30,7 @@ from core.runtime import snapshot
 from core.trace import CURRENT_SESSION, CURRENT_TURN
 from brain.auto_memory import AutoMemory
 from brain.device_guard import DeviceRefused, DeviceTurnGuard
+from brain.history_tools import HISTORY_RULES, HISTORY_TOOL, SEARCH_HISTORY, search_history
 from brain.memory_tools import MEMORY_NAMES, MEMORY_RULES, MEMORY_TOOLS
 from core.paths import ENV_FILE, OPERATIONS_DB, PROJECT_ROOT, VENV_PYTHON
 from mcp import StdioServerParameters
@@ -59,18 +60,13 @@ def claims_memory_saved(text: str) -> bool:
 
 
 VOICE_RULES = (
-    "回答会被朗读出来：默认只说一句极简短的口语；不要用 Markdown、列表、符号或表情；"
-    "时间和数字用口语说（例如明天早上八点、百分之三十）；不要念出任何 ID。"
-    "任务执行汇报用短促、直接的结果句，不写成客服式完整说明。"
-    "单项成功通常只说四到八个字，例如‘加好了。’‘删掉了。’‘提醒已设。’‘已标完成。’"
-    "多项按清单、提醒、家居等类别合并，一类只提一次，例如‘清单已更新，提醒已设。’"
-    "避免‘已经帮你把……成功……了’‘你的……现在已经……’‘相关操作均已完成’这类长句。"
-    "除非用户明确要求核对，不逐条复述条目、设备、日期、时间或操作过程。"
-    "有失败、未执行或结果未知时，必须简短指出对应类别及状态，不能笼统说全部成功；"
-    "例如‘清单已更新，提醒失败。’‘提醒结果未知，先核实。’必要的失败原因只补一个短语。"
-    "查询直接说核心结果，例如‘只有牛奶。’‘客厅灯开着。’不用复述问题或补充建议。"
-    "用户明确要求详情、解释或搜索资料时，可以按需要展开，不为缩短而漏掉关键事实。"
-    "不加开场白、重复确认或‘还需要我帮忙吗’等结尾。"
+    "回答会被朗读出来：默认一句；日程、邮件、任务这类汇总最多三句。"
+    "时间和数字用口语说（例如明天早上八点、百分之三十），不念任何 ID。"
+    "执行汇报用短促的结果句，例如‘已加入清单。’‘提醒已设。’‘已标记完成。’"
+    "多项按清单、提醒等类别合并，一类只提一次，例如‘清单已更新，提醒已设。’"
+    "家居操作成功不提，只提失败或结果未知的设备。"
+    "有失败、未执行或结果未知时，必须指出对应类别和状态，例如‘清单已更新，提醒失败。’‘提醒结果未知，先核实。’"
+    "查询直接说核心结果，例如‘只有牛奶。’‘客厅灯开着。’用户明确要求详情、解释或搜索资料时，可以展开。"
     "搜索开始时程序会播报‘我查一下’，最终回答不要重复这句过渡话。"
 )
 DUPLICATE_TOOLS = frozenset({"add_items", "create_reminder"}) | (GOOGLE_WRITE_TOOLS - EMAIL_TOOLS)
@@ -325,9 +321,12 @@ class AlphaBrain:
                     "type": "boolean",
                     "description": "仅当用户明确要求重复执行之前已成功的同一操作时设为 true。",
                 }
-        if MEMORY_NAMES & set(self.tool_owners):
+        if (MEMORY_NAMES | {SEARCH_HISTORY}) & set(self.tool_owners):
             raise ValueError("MCP 工具名与本地记忆工具冲突")
         self.tools.extend(deepcopy(MEMORY_TOOLS))
+        if self.archive is not None:
+            # 对话记忆只在开启存档时提供（正式入口开启；测试和 eval 默认不开）。
+            self.tools.append(deepcopy(HISTORY_TOOL))
         if self.store is not None:
             self.store.set_tool_schemas({tool['name']: dict(tool['input_schema']) for tool in self.tools})
         self.system = catalog_system(self.ha_catalog, self.personal_tools)
@@ -403,6 +402,8 @@ class AlphaBrain:
         if self.style == "voice":
             self.system[0]["text"] += "\n" + VOICE_RULES
         self.system[0]["text"] += MEMORY_RULES
+        if self.archive is not None:
+            self.system[0]["text"] += HISTORY_RULES
         self._refresh_memory_system()
 
     def _refresh_memory_system(self) -> None:
@@ -1025,6 +1026,17 @@ class AlphaBrain:
                         turn_ha_successes.append(False)
                         logger.info("[记忆] %s 已完成", block.name)
                         continue
+                    if block.name == SEARCH_HISTORY and self.archive is not None:
+                        # 只读查询本地存档，不经过网关，也不算业务操作。
+                        if not isinstance(block.input, dict):
+                            raise ValueError("查询参数必须是对象")
+                        text = search_history(self.archive, block.input, self.reminder_tz)
+                        results.append({"type": "tool_result", "tool_use_id": block.id,
+                                        "content": text, "is_error": False})
+                        turn_action_replies.append(None)
+                        turn_ha_successes.append(False)
+                        logger.info("[对话记忆] 查询完成")
+                        continue
                     policy = gateway.get_policy(block.name)
                     if policy is None or block.name not in available_names:
                         raise ValueError(f"工具不在可用白名单中：{block.name}")
@@ -1096,11 +1108,17 @@ class AlphaBrain:
                             action_reply = device_action_reply(op, voice=self.style == "voice")
                             # 只有设备动作可以用提示音代替汇报；状态查询必须说出答案。
                             ha_success = op.status == "succeeded" and block.name in HA_ACTION_TOOLS
+                            if ha_success:
+                                # 只写在提示词开头时，模型在“关灯并加清单”里 2/3 仍汇报了灯（eval mix-01）。
+                                # 写在工具结果里，紧挨着最终回答，模型不容易忘。只影响模型看到的文字。
+                                text += "\n[设备已执行成功：回答里不要提这项，只汇报其他任务或失败项]"
                 except DeviceRefused as exc:
                     logger.warning("[设备防护] 拒绝 %s：%s", block.name, exc)
                     text, is_error = str(exc), True
                 except Exception as exc:
                     text = (f"记忆操作失败：{format_error(exc)}" if block.name in MEMORY_NAMES else
+                            f"查询存档失败：{format_error(exc)}。没有任何操作，可以修正参数再查。"
+                            if block.name == SEARCH_HISTORY else
                             f"工具执行失败：{format_error(exc)}。操作可能已生效，写入操作不要盲目重试。")
                     is_error = True
                 finally:

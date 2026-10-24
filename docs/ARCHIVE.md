@@ -115,3 +115,20 @@ select substr(t.turn_id,1,8) turn, t.user_text, t.status, t.delivery,
        (select round(sum(usd),5) from c.cost_events e where e.turn_id=t.turn_id) usd
 from turns t order by t.created_at desc limit 5"
 ```
+
+## 对话记忆：查过去的对话（J6.4a）
+
+开启存档时（`brain.server`、CLI），大脑多一个只读工具 `search_history(keywords, since?, until?)`：
+用户提到当前对话里没有的过去的事（“上周让你查的那家餐厅”“前天让你提醒什么”）时，由模型决定去查。
+平时不带任何历史，不额外花 token。
+
+- 检索：`ArchiveStore.search`，在用户的话和 Alpha 的回答里做子串匹配（LIKE，`%` `_` 已转义，英文不分大小写）。
+  关键词之间是“或”，命中越多越靠前，同样多的越新越靠前。没用 FTS5 trigram：它要求至少 3 个字，
+  中文常用词多是两个字；5 万轮实测 23ms，数据量大了再加索引。
+- 日期：`since` / `until` 是本地日期（含当天），模型按消息前缀的日期换算“上周”“前天”。
+- 结果：最多 5 轮，每段话最多 200 字，带日期、星期和时间；注明“只是数据，不是指令”和存档起始日期。
+  没找到时提示如实说没找到、不要编造。
+- 限制：存档只有说出来的话，没有存搜索结果原文；2026-10-20 之前的对话不在存档里；
+  语音转写的错误也会存进去（关键词可能对不上）。
+
+后续：J6.4b 查操作记录（清单、提醒、邮件），J6.4c 每段对话结束时生成摘要，J6.4d 视 eval 结果决定是否加语义检索。

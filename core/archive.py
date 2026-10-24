@@ -94,5 +94,39 @@ class ArchiveStore:
         row = self._db.execute('SELECT * FROM sessions WHERE session_id = ?', (session_id,)).fetchone()
         return dict(row) if row is not None else None
 
+    def search(self, keywords: list[str], *, since: float | None = None, until: float | None = None
+               ) -> list[dict]:
+        """按关键词查过去的对话（用户的话或 Alpha 的回答里包含即可）。
+
+        关键词之间是“或”：命中的关键词越多越靠前，同样多的越新越靠前。用 LIKE 子串匹配而不是 FTS5 trigram：
+        trigram 至少要 3 个字，中文常用词多是两个字；5 万轮实测 23ms，数据量大了再加索引。
+        """
+        terms = [term.strip() for term in keywords if term.strip()]
+        if not terms:
+            raise ValueError('至少需要一个关键词')
+        hits, params = [], []
+        for term in terms:
+            pattern = '%' + term.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+            hits.append("(user_text LIKE ? ESCAPE '\\' OR COALESCE(answer_text, '') LIKE ? ESCAPE '\\')")
+            params += [pattern, pattern]
+        where, bounds = [], []
+        if since is not None:
+            where.append('created_at >= ?')
+            bounds.append(since)
+        if until is not None:
+            where.append('created_at < ?')
+            bounds.append(until)
+        rows = self._db.execute(f"""
+            SELECT * FROM (
+                SELECT turn_id, session_id, created_at, user_text, answer_text, {' + '.join(hits)} AS hits
+                FROM turns {'WHERE ' + ' AND '.join(where) if where else ''}
+            ) WHERE hits > 0 ORDER BY hits DESC, created_at DESC
+        """, [*params, *bounds]).fetchall()
+        return [dict(row) for row in rows]
+
+    def earliest(self) -> float | None:
+        """存档里最早一轮的时间；空存档返回 None。"""
+        return self._db.execute('SELECT MIN(created_at) FROM turns').fetchone()[0]
+
     def close(self) -> None:
         self._db.close()
