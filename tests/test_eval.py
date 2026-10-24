@@ -301,8 +301,8 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         result, sdk = await self.run_fixture('tasks-04', reply(calls=[('create_reminder', args)]), reply('已设。'))
         self.assertTrue(result['passed'], result)
         request = sdk.messages.requests[0]['messages'][0]['content']
-        self.assertIn('2026-10-31T21:00:00-07:00', request)
-        self.assertIn('America/Los_Angeles', request)
+        self.assertIn('[2026-10-31 周六 21:00]', request)  # 夏令时结束前一晚；本地时间，不带偏移
+        self.assertIn('本地时区：America/Los_Angeles', sdk.messages.requests[0]['system'][0]['text'])
 
     async def test_ha_only_fake_and_schema_check(self):
         with patch('integrations.mcp_client.call_ha_tool', side_effect=AssertionError('真实 HA 不应被调用')):
@@ -424,7 +424,7 @@ class EvalTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(arguments_match({'confirmed': False}, {'confirmed': 0}, schema))
 
     def test_current_cases_and_any_rule(self):
-        self.assertEqual(len(self.cases), 42)
+        self.assertEqual(len(self.cases), 46)
         # 议论/提问不能触发写操作；由工具规则判定，不用会误判的语义评分。
         remark = self.cases['light-05']['turns'][1]
         self.assertEqual(remark['expect_tools'], [])

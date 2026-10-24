@@ -121,6 +121,19 @@ VOICE_REPLY_TOOL: ToolParam = {
 }
 
 
+WEEKDAYS = "一二三四五六日"
+
+
+def reply_language(request: str) -> str:
+    """有汉字就用中文回答（“我的 shopping list 上有什么”也算中文）；全是英文才用英文。
+
+    只写在提示词里时，模型看到夹杂的英文单词就改用英文回答（eval lang-03 0/3），所以由代码判断。
+    """
+    if re.search(r"[\u3400-\u9fff]", request):
+        return "中文"
+    return "English" if re.search(r"[A-Za-z]", request) else "中文"
+
+
 def spoken_number(value: int | float) -> str:
     """设备亮度的零到一百用中文读法，小数逐位读。"""
     digits = "零一二三四五六七八九"
@@ -386,6 +399,7 @@ class AlphaBrain:
             self.system[0]["text"] += (
                 f"\n用户配置的默认查询地点：{search_location}。用户本轮指定地点时优先使用本轮地点。"
             )
+        self.system[0]["text"] += f"\n本地时区：{self.reminder_tz.key}。"
         if self.style == "voice":
             self.system[0]["text"] += "\n" + VOICE_RULES
         self.system[0]["text"] += MEMORY_RULES
@@ -577,11 +591,14 @@ class AlphaBrain:
                         self.ha_catalog = await load_ha_catalog(self.ha_url, self.http_client)
                     self._prepare_catalog()
                     self.catalog_checked_at = time.time()
-                current_time = datetime.now(self.reminder_tz).isoformat(timespec="seconds")
                 # 时间放进本轮用户消息；system 的静态规则保持稳定，便于利用提示缓存。
-                timed_request = (
-                    f"{self._playback_hint()}[当前本地时间：{current_time}；时区：{self.reminder_tz.key}]\n{request}"
-                )
+                # 写法尽量短（约 16 token，会留在历史里）：时区不变，写在 system；带星期，算“下周一”更不易错。
+                # 中文是默认，只有英文提问才注明回答语言。
+                now = datetime.now(self.reminder_tz)
+                stamp = f"{now:%Y-%m-%d} 周{WEEKDAYS[now.weekday()]} {now:%H:%M}"
+                if reply_language(request) == "English":
+                    stamp += "｜回答语言：English"
+                timed_request = f"{self._playback_hint()}[{stamp}]\n{request}"
                 await self.conversation.ensure_budget(self, {'role': 'user', 'content': timed_request})
                 # 预算检查里的同步压缩已经完成；从这里开始产生的费用都归属于这一轮。
                 CURRENT_TURN.set(turn_id)

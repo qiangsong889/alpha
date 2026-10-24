@@ -1143,6 +1143,22 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
         self.brain = module.AlphaBrain()
         self.addAsyncCleanup(self.brain.close)
 
+    def test_reply_language_follows_chinese_characters(self):
+        cases = {"What's on my shopping list?": "English", "Turn off the kitchen light.": "English",
+                 "我的 shopping list 上有什么？": "中文",   # 夹杂英文单词仍然是中文（eval lang-03）
+                 "把客厅灯打开": "中文", "Alpha，把客厅灯打开。": "中文", "123？": "中文"}
+        for request, expected in cases.items():
+            self.assertEqual(module.reply_language(request), expected, request)
+
+    async def test_reply_language_is_stated_in_each_user_message(self):
+        await self.brain.start()
+        self.client.messages.create.side_effect = [reply([NS(type="text", text="Hi")]),
+                                                   reply([NS(type="text", text="你好")])]
+        await self.brain.ask("Hello there")
+        await self.brain.ask("我的 shopping list 上有什么？")
+        self.assertIn("回答语言：English", self.brain.messages[0]["content"])
+        self.assertNotIn("回答语言", self.brain.messages[2]["content"])  # 中文是默认，不额外占 token
+
     async def test_history_time_prefix_and_idempotent_lifecycle(self):
         await self.brain.start()
         worker = self.brain.worker
@@ -1157,7 +1173,10 @@ class BrainTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(await self.brain.ask("你好"), "你好")
             self.assertEqual(await self.brain.ask("记住了吗"), "记得")
         self.assertIn("cache_read=0", " ".join(logs.output))
-        self.assertIn("时区：America/Los_Angeles", self.brain.messages[0]["content"])
+        # 时区不变，写在 system（可缓存）；每条消息只带日期、星期和时间。
+        self.assertNotIn("America/Los_Angeles", self.brain.messages[0]["content"])
+        self.assertIn("本地时区：America/Los_Angeles", self.brain.system[0]["text"])
+        self.assertRegex(self.brain.messages[0]["content"], r"^\[\d{4}-\d{2}-\d{2} 周[一二三四五六日] \d{2}:\d{2}\]\n你好$")
         self.assertTrue(self.brain.messages[0]["content"].endswith("\n你好"))
         self.assertEqual(len(self.client.messages.create.call_args.kwargs["messages"]), 3)
         self.assertEqual(len(self.brain.messages), 4)
