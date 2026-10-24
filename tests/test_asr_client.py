@@ -34,6 +34,7 @@ class Socket:
         event = json.loads(raw)
         self.trace.append((self.label, 'sent', event['type']))
         if event['type'] == 'session.update':
+            self.session = event['session']
             await self.events.put({'type': 'session.updated', 'session': {}})  # null可省略。
         if event['type'] != 'input_audio_buffer.commit':
             return
@@ -84,6 +85,16 @@ class AsrClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([u['output_tokens_details']['audio_tokens'] for u in usages], [734, 8, 734])
         self.assertEqual(ledger.summary()['ASR'], {'usd': '0.00756', 'unpriced': 0, 'events': 3})
         self.assertEqual(len(sockets), 2)
+
+    async def test_session_asks_for_the_assistant_name_as_context(self):
+        # 2026-10-23 实测：没有上下文时“Alpha，我的购物清单上有什么”3/3 认成“阿发”，有上下文 3/3 正确。
+        client, sockets, results, trace = await self.make_client([('ok', None)])
+        await client.submit(segment('one'))
+        await asyncio.wait_for(client.queue.join(), 1)
+        transcription = sockets[0].session['input_audio_transcription']
+        self.assertEqual(transcription['language'], 'zh')
+        self.assertIn('Alpha', transcription['corpus']['text'])
+        self.assertIsNone(sockets[0].session['turn_detection'])  # 仍然是手动提交
 
     async def make_client(self, behaviors, timeout=.3):
         trace, sockets, results = [], [], []

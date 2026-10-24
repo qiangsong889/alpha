@@ -271,3 +271,130 @@ class EchoTextTests(TestCase):
         self.assertFalse(is_echo('停', '停一下'))                # 太短，不下结论
         self.assertFalse(is_echo('购物清单', ''))
         self.assertAlmostEqual(echo_ratio('ALPHA 你好', 'alpha，你好'), 1.0)
+
+
+class CallOnlyInterruptionTests(IsolatedAsyncioTestCase):
+    """QWEN_ALPHA_INTERRUPT_MODE=call：播报期间只接受“Alpha……”、“停”或提问后的简短回答。"""
+    INTRO = '我是 Alpha，你的家居和个人助手。能控制灯光、窗帘和空调，查天气，管理清单、日程和提醒。'
+    local_segment = AsrInputTests.local_segment  # 只复用搭建代码，不继承 jev 模式的测试
+
+    async def asyncSetUp(self):
+        await AsrInputTests.asyncSetUp(self)
+        self.receiver.interrupt_mode = 'call'
+        self.bridge.report_interruption = Mock()
+        self.report = NS(text=self.INTRO, turn_id=None, kind='reply')
+
+    async def hear(self, ident, text):
+        await self.local_segment(ident)
+        with self.assertLogs('alpha.qwen_alpha', level='INFO') as logs:
+            await self.adapter.result(AsrEvent('transcript', ident, text, .2))
+            await asyncio.sleep(.03)
+        return '\n'.join(logs.output)
+
+    async def test_garbled_echo_during_playback_is_ignored_without_jev(self):
+        # 2026-10-23 日志：回声被转写成“我是安好”“你的家居就是”，文字比对拦不住，Jev 判成对 Alpha 说话。
+        self.receiver.current_report = self.report
+        for ident, text in (('a', '我是安好。'), ('b', '你的家居就是。'), ('c', 'Alpha 你的家居就是。')):
+            self.assertIn('[播报中忽略]', await self.hear(ident, text))
+        self.router.interruption_and_turn.assert_not_awaited()
+        self.bridge.new_input.assert_not_called()
+        self.player.clear.assert_not_called()
+        self.submit.assert_not_called()
+
+    async def test_echo_right_after_playback_is_ignored(self):
+        # “现在下午五点二十一分。”说完 244ms 后转写出“二十一分了。”，Alpha 回答“是的……”和自己对话。
+        import time
+        self.receiver.current_report = None
+        self.receiver.finished_report = ('现在下午五点二十一分。', time.perf_counter())
+        self.assertIn('[播报中忽略]', await self.hear('tail', '二十一分了。'))
+        self.submit.assert_not_called()
+
+    async def test_calling_alpha_interrupts_and_reaches_the_brain(self):
+        self.receiver.current_report = self.report
+        output = await self.hear('call', 'Alpha，把客厅灯关了。')
+        self.assertIn('呼叫 Alpha', output)
+        self.router.interruption_and_turn.assert_not_awaited()  # 叫了名字，不需要 Jev
+        self.bridge.new_input.assert_called_once()
+        self.player.clear.assert_called()
+        await asyncio.sleep(.03)
+        self.assertTrue(self.collector.parts or self.submit.called)
+
+    async def test_a_misheard_name_still_counts_as_calling_alpha(self):
+        # 中文识别常把 Alpha 认成“阿发”“奥特”；它们也必须直接当作叫名字，不再交给 Jev。
+        self.receiver.current_report = self.report
+        self.assertIn('呼叫 Alpha', await self.hear('misheard', '阿发，我的购物清单上有什么？'))
+        self.router.interruption_and_turn.assert_not_awaited()
+        self.bridge.new_input.assert_called_once()
+
+    async def test_stop_only_stops_and_is_not_sent_to_the_brain(self):
+        self.receiver.current_report = self.report
+        self.receiver.inputs['stop'] = self.receiver.speech_input()
+        self.assertIn('[停止播报]', await self.hear('stop', '停一下。'))
+        self.bridge.new_input.assert_called_once()
+        self.player.clear.assert_called()
+        await asyncio.sleep(.03)
+        self.assertFalse(self.collector.parts)
+        self.submit.assert_not_called()
+
+    async def test_short_answer_to_alpha_s_question_is_accepted_right_after_it(self):
+        import time
+        now = time.perf_counter()
+        self.receiver.current_report = None
+        self.receiver.finished_report = ('要我把客厅灯打开吗？', now)
+        self.receiver.question_finished_at, self.receiver.question_deadline = now - .01, now + 10
+        await self.local_segment('answer')
+        await self.adapter.result(AsrEvent('transcript', 'answer', '好的', .2))
+        await asyncio.sleep(.03)
+        self.assertTrue(self.collector.parts or self.submit.called)
+
+    async def test_speech_when_alpha_is_quiet_is_normal_input(self):
+        self.receiver.current_report = None
+        await self.local_segment('idle')
+        await self.adapter.result(AsrEvent('transcript', 'idle', '把客厅灯关了', .2))
+        await asyncio.sleep(.03)
+        self.assertTrue(self.collector.parts or self.submit.called)
+
+    async def test_playback_is_not_paused_for_local_voice(self):
+        # 播报中的人声多半是回声，提前暂停只会让播报卡一下；jev 模式仍然暂停。
+        self.receiver.current_report = self.report
+        self.receiver.activity.voiced_ms = 500
+        speaking = NS(speaking=True)
+        for mode, paused in (('call', False), ('jev', True)):
+            self.player.pause.reset_mock()
+            self.receiver.interrupt_mode, self.receiver.paused = mode, False
+            with patch.object(self.receiver, 'collector', speaking):
+                task = asyncio.create_task(self.receiver.confirm_speech())
+                await asyncio.sleep(.05)
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+            self.assertEqual(self.player.pause.called, paused, mode)
+
+
+    async def test_playback_volume_is_not_ducked_for_local_voice(self):
+        # 回声每次触发“人声开始”都会把音量压到 20%，转写被忽略后再恢复：听起来忽大忽小。
+        self.receiver.current_report = self.report
+        for mode, gain in (('call', 1), ('jev', .2)):
+            self.receiver.interrupt_mode, self.player.gain = mode, 1
+            await self.adapter.local_event(SpeechStarted(f'duck-{mode}', 0, 0, .16))
+            self.assertEqual(self.player.gain, gain, mode)
+
+
+class PlaybackCommandTests(TestCase):
+    def test_commands(self):
+        from voice.collection_rules import playback_command
+        said = CallOnlyInterruptionTests.INTRO
+        cases = {'停。': 'stop', '停一下': 'stop', 'Alpha 停': 'stop', '阿尔法，等一下': 'stop', '别说了': 'stop',
+                 'Alpha，把客厅灯关了': 'call', 'alpha': 'call', '嘿 Alpha 现在几点': 'call',
+                 'Alpha 你的家居就是。': None, '把客厅灯关了': None, '好的': None, '我是安好': None,
+                 # ASR 实际认错过的名字写法
+                 '奥特，现在几点了？': 'call', '阿发，我的购物清单上有什么': 'call', '阿尔发停': 'stop',
+                 '奥特曼好看吗': None}
+        for heard, expected in cases.items():
+            self.assertEqual(playback_command(heard, said), expected, heard)
+
+    def test_a_real_question_sharing_a_few_words_with_alpha_is_not_echo(self):
+        from voice.collection_rules import playback_command
+        # 重合 60%，但最长只连续 2 个字（“现在”）：是真心在问，不是回声。
+        self.assertEqual(playback_command('奥特，现在几点了？', '现在下午五点二十一分。'), 'call')
+        # 回声是原话连续的一段（“你的家居”）。
+        self.assertIsNone(playback_command('Alpha 你的家居就是。', '我是 Alpha，你的家居和个人助手。'))

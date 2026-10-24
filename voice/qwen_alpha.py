@@ -23,7 +23,8 @@ from voice.audio_devices import AudioRoute
 from voice.omni_transport import (CostTracker, SessionEnded, QwenProtocolError, MODEL,
     send_event, wait_for_event, send_microphone, session_config as base_config,
     verify_session, websocket_url, raise_api_error, reconnectable, rotate_session)
-from voice.collection_rules import ECHO_TAIL_CHARS, ECHO_TAIL_S, EXECUTE, echo_ratio, is_echo, unfinished
+from voice.collection_rules import (ECHO_TAIL_CHARS, ECHO_TAIL_S, EXECUTE, WAKE, echo_ratio, is_echo,
+                                    playback_command, unfinished)
 from voice.search_router import JevSearchRouter
 from voice.batch_timing import BatchTiming
 from voice.qwen_tts import QwenTTS
@@ -263,6 +264,7 @@ class SpeechInput:
     # 转写要和哪段话比对回声：播报中是整段回答；刚说完 ECHO_TAIL_S 秒内是那句话的结尾。
     echo_text: str = ''
     echo_min_chars: int = 3
+    after_playback: bool = False  # 在播报刚结束的 ECHO_TAIL_S 秒内开始
 
 
 class BrainBridge:
@@ -419,7 +421,7 @@ class BrainBridge:
 
 class Receiver:
     def __init__(self, ws, player, collector, bridge, costs, session_id, activity=None,
-                 *, interruption_filter=True, uncertain_interruption='hold', tts=None):
+                 *, interruption_filter=True, uncertain_interruption='hold', interrupt_mode='jev', tts=None):
         self.ws, self.player, self.collector, self.bridge = ws, player, collector, bridge
         self.costs, self.session_id = costs, session_id
         self.tts = tts
@@ -445,6 +447,10 @@ class Receiver:
         if uncertain_interruption not in {'hold', 'accept'}:
             raise ValueError('QWEN_ALPHA_UNCERTAIN_INTERRUPTION 必须是 hold 或 accept')
         self.uncertain_interruption = uncertain_interruption
+        if interrupt_mode not in {'call', 'jev'}:
+            raise ValueError('QWEN_ALPHA_INTERRUPT_MODE 必须是 call 或 jev')
+        # call：播报期间（含刚结束的 ECHO_TAIL_S 秒）只接受“Alpha……”、“停”或提问后的简短回答。
+        self.interrupt_mode = interrupt_mode
         self.inputs = OrderedDict()
         self.resolving = set()
         self.input_tasks = set()
@@ -456,18 +462,18 @@ class Receiver:
         report, now = self.current_report, time.perf_counter()
         overlapped = report is not None or self.active
         assistant_text = (report.text or '') if report is not None else ''
-        echo_text, echo_min_chars = assistant_text, 3
+        echo_text, echo_min_chars, after_playback = assistant_text, 3, False
         if not overlapped and self.finished_report is not None and now - self.finished_report[1] <= ECHO_TAIL_S:
-            echo_text, echo_min_chars = self.finished_report[0][-ECHO_TAIL_CHARS:], 2
-        return SpeechInput(now, overlapped, report, assistant_text,
-                           echo_text=echo_text, echo_min_chars=echo_min_chars)
+            echo_text, echo_min_chars, after_playback = self.finished_report[0][-ECHO_TAIL_CHARS:], 2, True
+        return SpeechInput(now, overlapped, report, assistant_text, echo_text=echo_text,
+                           echo_min_chars=echo_min_chars, after_playback=after_playback)
 
     @staticmethod
     def meaningful(text):
         return is_meaningful(text) and text.strip(' []【】。.!！') not in {'咳嗽', '咳嗽声', '笑声', '呼吸声', '噪音', '听不清'}
 
     def shortcut(self, text, speech):
-        if re.match(r'^\s*(?:(?:嘿|你好|hey)[，,\s]*)?(?:alpha(?![A-Za-z0-9_])|阿尔法|阿爾法)', text, re.I):
+        if WAKE.match(text):  # 和播报期间的打断规则共用同一份名字写法
             return '呼叫 Alpha'
         if (self.question_finished_at > 0 and
                 self.question_finished_at <= speech.started_at <= self.question_deadline and
@@ -562,7 +568,9 @@ class Receiver:
             while len(self.inputs) > 200:
                 self.inputs.popitem(last=False)
             self.collector.started(event['item_id'])
-            self.player.gain = .2
+            if self.interrupt_mode != 'call':
+                # call 模式下播报中的人声多半是回声，最终会被忽略；压低音量只会让声音忽大忽小。
+                self.player.gain = .2
             if self.activity:
                 self.activity.reset()
         elif kind == 'input_audio_buffer.speech_stopped':
@@ -589,6 +597,25 @@ class Receiver:
                 logger.info('[回声忽略] 和 Alpha %s的话一致（%.0f%%）：%r，继续播放',
                             '正在说' if speech.overlapped else '刚说完', echo_ratio(text, speech.echo_text) * 100, text)
                 return
+            if (self.interrupt_mode == 'call' and (speech.overlapped or speech.after_playback)
+                    and self.shortcut(text, speech) != '提问后的短回答'):
+                command = playback_command(text, speech.echo_text)
+                if command is None:
+                    # 走样的回声（“我是安好”“二十一分了”）文字比对拦不住，Jev 也分不出来，所以一律忽略。
+                    self.collector.transcript(item_id, '')
+                    self.restore_if_quiet()
+                    logger.info('[播报中忽略] 只接受“Alpha……”或“停”：%r', text)
+                    return
+                if command == 'stop':
+                    # 只停下，不把“停”当成新问题发给大脑。
+                    self.collector.transcript(item_id, '')
+                    logger.info('[停止播报] %r', text)
+                    self.bridge.new_input()
+                    if self.current_report is not None and self.current_report is speech.report:
+                        await self.interrupt()
+                    self.restore_if_quiet()
+                    return
+                # call：叫了 Alpha，下面的“呼叫 Alpha”捷径直接当作对 Alpha 说话，不再经过 Jev。
             self.collector.committed(item_id)  # 分类完成前，阻止收集器提交或开始下一段播报。
             self.resolving.add(item_id)
             if speech.overlapped and self.interruption_filter and not self.shortcut(text, speech):
@@ -648,7 +675,8 @@ class Receiver:
 
     async def confirm_speech(self):
         while True:
-            if ((self.current_report is not None or self.active)
+            # call 模式下大部分播报中的人声最终会被忽略（多是回声），提前暂停只会让播报卡一下。
+            if (self.interrupt_mode != 'call' and (self.current_report is not None or self.active)
                     and self.collector.speaking and not self.paused and self.activity is not None
                     and self.activity.voiced_ms >= 400):
                 self.player.pause()
@@ -848,7 +876,10 @@ async def run_asr_connection(player, collector, bridge, costs, route=None):
     tts = QwenTTS(key, workspace, region, setting('QWEN_TTS_VOICE'))
     receiver = Receiver(None, player, collector, bridge, costs, 'local-asr', SileroActivity(),
         interruption_filter=setting('QWEN_ALPHA_JEV_INTERRUPTIONS'),
-        uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'), tts=tts)
+        uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'),
+        interrupt_mode=setting('QWEN_ALPHA_INTERRUPT_MODE'), tts=tts)
+    logger.info('[打断规则] %s', '播报中只接受“Alpha……”、“停”或提问后的简短回答'
+                if receiver.interrupt_mode == 'call' else 'Jev 判断是否对 Alpha 说话')
     adapter = AsrInput(receiver, segmenter, region=region, route=route)
     client = AsrClient(url, key, adapter.result, notify=adapter.notify)
     adapter.client = client
@@ -921,7 +952,9 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
                         # 播报期间的插话是否先由 Jev 判断“是不是在对 Alpha 说”；默认开启。
                         interruption_filter=setting('QWEN_ALPHA_JEV_INTERRUPTIONS'),
                         # Jev 判断不了时的策略：hold 继续播报、不接收；accept 接收并打断。
-                        uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'), tts=tts)
+                        uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'),
+                        # 播报期间只接受“Alpha……”和“停”（call），还是交给 Jev 判断（jev）。
+                        interrupt_mode=setting('QWEN_ALPHA_INTERRUPT_MODE'), tts=tts)
     # 把打断过滤的实际设置打印出来，排查“为什么没被打断/被乱打断”时先看这一行。
     logger.info('[打断过滤] %s ｜ 不确定时%s',
                 'Jev 已开启' if receiver.interruption_filter else '已关闭，接收所有有效转写',

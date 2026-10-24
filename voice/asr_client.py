@@ -16,6 +16,10 @@ from core.costs import CumulativeUsage
 
 PREFIX = 'conversation.item.input_audio_transcription.'
 MODEL = 'qwen3-asr-flash-realtime'
+# 上下文增强（官方 SDK 的 corpus_text，发送时是 input_audio_transcription.corpus.text）。
+# 中文识别经常把夹在中文里的“Alpha”漏掉或认成“奥特”，而播报期间只接受“Alpha……”打断。
+CORPUS = ('这是和家庭语音助手的对话。语音助手的名字是英文 Alpha（也读作阿尔法）。'
+          '用户常用“Alpha，”开头叫它，例如：“Alpha，我的购物清单上有什么？”“Alpha，停一下。”')
 
 
 def websocket_url(workspace, region):
@@ -98,7 +102,8 @@ class AsrClient:
             self.reader = asyncio.create_task(self._read(self.ws, self.incoming), name='serial-asr-receiver')
             await self._wait('session.created')
             await self._send('session.update', session={'input_audio_format': 'pcm', 'sample_rate': 16000,
-                             'input_audio_transcription': {'language': 'zh'}, 'turn_detection': None})
+                             'input_audio_transcription': {'language': 'zh', 'corpus': {'text': CORPUS}},
+                             'turn_detection': None})
             _, updated = await self._wait('session.updated')
             if updated.get('session', {}).get('turn_detection') is not None:
                 raise RuntimeError('ASR没有进入手动模式')
