@@ -9,7 +9,7 @@ from aioesphomeapi import VoiceAssistantEventType as Event
 import numpy as np
 
 from voice import satellite as module
-from voice.satellite import FLUSH, Resampler, SatelliteLink, SatellitePlayer
+from voice.satellite import FLUSH, Resampler, SatelliteLink, SatellitePlayer, split_dismissal
 
 WITH_SPEAKER, WITHOUT_SPEAKER = 7, 5  # VOICE_ASSISTANT | SPEAKER | API_AUDIO；旧固件没有 SPEAKER
 
@@ -21,6 +21,7 @@ class FakeClient:
     def __init__(self, host, port, password, *, client_info, noise_psk):
         self.host, self.noise_psk = host, noise_psk
         self.events, self.audio, self.handlers, self.on_stop = [], [], None, None
+        self.services_called = []
         self.disconnect = AsyncMock()
         FakeClient.instances.append(self)
 
@@ -29,6 +30,12 @@ class FakeClient:
 
     async def device_info(self):
         return NS(name='alpha-xvf', esphome_version='2026.9.1', voice_assistant_feature_flags=self.flags)
+
+    async def list_entities_services(self):
+        return [], [NS(name='dismiss', key=7)]
+
+    async def execute_service(self, service, data):
+        self.services_called.append(service.name)
 
     def subscribe_voice_assistant(self, **handlers):
         self.handlers = handlers
@@ -67,13 +74,14 @@ class Clock:
 
 class LinkTestCase(unittest.IsolatedAsyncioTestCase):
     flags = WITH_SPEAKER
+    followup_s = 0.0  # 默认关掉跟进窗口；FollowupTests 单独测
 
     async def asyncSetUp(self):
         FakeClient.instances.clear()
         FakeClient.flags = self.flags
         self.clock = Clock()
-        self.link = SatelliteLink('192.168.1.115', noise_psk='key', listen_s=8, client_factory=FakeClient,
-                                  clock=self.clock)
+        self.link = SatelliteLink('192.168.1.115', noise_psk='key', listen_s=8, followup_s=self.followup_s,
+                                  client_factory=FakeClient, clock=self.clock)
         self.adapter = FakeAdapter()
         self.tasks = [asyncio.create_task(self.link.run()), asyncio.create_task(self.link.feed(self.adapter))]
         await self.settle()
@@ -85,7 +93,8 @@ class LinkTestCase(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*self.tasks, return_exceptions=True)
 
     async def wake(self):
-        return await self.client.handlers['handle_start']('conv', 0, None, 'Hey Jarvis')
+        # 唤醒词触发的一轮带 USE_WAKE_WORD（2）；设备自动开的跟进和诊断按钮不带
+        return await self.client.handlers['handle_start']('conv', 2, None, 'Hey Jarvis')
 
     async def settle(self):
         await asyncio.sleep(0.05)
@@ -139,6 +148,7 @@ class ListeningTests(LinkTestCase):
         await asyncio.sleep(0.6)  # 没有新音频也要按时结束
         self.assertEqual(self.client.kinds()[-1], Event.VOICE_ASSISTANT_RUN_END)
         self.assertEqual(self.link.phase, 'idle')
+        self.assertEqual(self.client.services_called, ['dismiss'])  # 唤醒后没开口的超时也响退出提示音
 
     async def test_wake_during_playback_interrupts_it(self):
         self.adapter.receiver.active = True
@@ -247,6 +257,132 @@ class DumpTests(LinkTestCase):
         self.assertEqual(len(files), 1)
         with wave.open(str(files[0])) as saved:
             self.assertEqual(np.frombuffer(saved.readframes(10), '<i2').tolist(), [100, -100])
+
+
+class DismissTests(LinkTestCase):
+    async def test_dismissal_words(self):
+        cases = {
+            '退下': '', '退下吧。': '', '没事了': '', '没事的。': '', '拜拜！': '',  # 没事的：ASR 常这样转
+            'Jarvis。；拜拜。': '', '拜拜；退下': '',
+            '没有用啊。；退下。': '没有用啊',  # 跟进窗口把前面的话连在了一起（2026-10-25 实测）
+            '把灯关了，拜拜': '把灯关了', '把灯关了；拜拜。': '把灯关了',
+            '可以了。': '', '好的，可以了': '好的',
+            '再见。': '', '结束。': '', '结束对话吧': '', 'Finish.': '', 'Never mind.': '', 'never mind': '', 'Turn off the lights. Never mind.': 'Turn off the lights',
+        }
+        for text, rest in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(split_dismissal(text), (rest, True))
+        for text in ('没事', '拜拜，明天见', '退下之前把灯关了', '现在几点', '', '可以了吗', '这样就可以了吗？', 'Never mind the lights', 'Finish the email', '调到 25.5 度', '结束了吗', '会议几点结束'):
+            with self.subTest(text=text):
+                self.assertEqual(split_dismissal(text), (text, False))
+
+    async def test_dismiss_ends_the_run_without_follow_up_and_plays_the_exit_beep(self):
+        self.link.followup_s = 6.0
+        await self.wake()
+        self.assertTrue(self.link.dismiss())
+        await self.settle()
+        self.assertEqual(self.client.kinds()[-1], Event.VOICE_ASSISTANT_RUN_END)
+        self.assertNotIn(Event.VOICE_ASSISTANT_INTENT_END, self.client.kinds())
+        self.assertEqual(self.client.services_called, ['dismiss'])
+        self.assertEqual(self.link.phase, 'idle')
+        self.assertFalse(self.link.dismiss())  # 不在收音时什么都不做
+
+    async def test_route_dismisses_unless_alpha_just_asked_a_question(self):
+        from voice.qwen_alpha import route_satellite_submission
+        bridge = NS(last_reply='好的。', last_reply_at=0.0)
+        await self.wake()
+        self.assertIsNone(route_satellite_submission('拜拜', self.link, bridge, clock=lambda: 1000.0))
+        self.assertEqual(self.link.phase, 'idle')
+        # 刚问过“确认发送吗？”：没事了是在回答，整句照常交给大脑
+        bridge = NS(last_reply='确认发送吗？', last_reply_at=990.0)
+        await self.wake()
+        self.assertEqual(route_satellite_submission('没事了', self.link, bridge, clock=lambda: 1000.0), '没事了')
+        self.assertEqual(self.link.phase, 'awaiting')
+        # 很久以前的问句不算
+        bridge = NS(last_reply='确认发送吗？', last_reply_at=0.0)
+        self.link.end_run('test')
+        await self.wake()
+        self.assertIsNone(route_satellite_submission('没事了', self.link, bridge, clock=lambda: 1000.0))
+        # 普通请求照常提交
+        await self.wake()
+        self.assertEqual(route_satellite_submission('现在几点', self.link, bridge, clock=lambda: 1000.0), '现在几点')
+        self.assertFalse(self.link.dismiss_after_answer)
+
+    async def test_request_then_bye_is_answered_then_the_run_ends_with_the_exit_beep(self):
+        from voice.qwen_alpha import route_satellite_submission
+        self.link.followup_s = 6.0
+        bridge = NS(last_reply='', last_reply_at=0.0)
+        await self.wake()
+        self.assertEqual(route_satellite_submission('把灯关了，拜拜', self.link, bridge), '把灯关了')
+        self.link.start_response()
+        self.link.end_response()
+        self.assertEqual(self.client.kinds()[-2:], [Event.VOICE_ASSISTANT_TTS_STREAM_END,
+                                                    Event.VOICE_ASSISTANT_RUN_END])
+        self.assertNotIn(Event.VOICE_ASSISTANT_INTENT_END, self.client.kinds())  # 不开跟进窗口
+        self.assertEqual(self.client.services_called, [])  # 等设备放完回答再响
+        await asyncio.sleep(0.7)
+        self.assertEqual(self.client.services_called, ['dismiss'])
+        await self.wake()
+        self.assertFalse(self.link.dismiss_after_answer)  # 只管那一轮
+
+
+class FollowupTests(LinkTestCase):
+    followup_s = 6.0
+
+    async def answer(self):
+        await self.wake()
+        self.link.end_listening('submitted')
+        self.link.start_response()
+        self.link.end_response()
+
+    async def test_after_the_answer_the_device_is_asked_to_keep_listening_without_run_end(self):
+        await self.answer()
+        self.assertEqual(self.client.events[-2:], [
+            (Event.VOICE_ASSISTANT_INTENT_END, {'continue_conversation': '1'}),
+            (Event.VOICE_ASSISTANT_TTS_STREAM_END, None)])
+        self.assertNotIn(Event.VOICE_ASSISTANT_RUN_END, self.client.kinds())  # 晚到会结束掉设备新开的一轮
+        self.assertEqual(self.link.phase, 'idle')
+
+    async def test_the_device_started_follow_up_uses_the_short_timeout(self):
+        await self.answer()
+        self.clock.now += 1
+        await self.client.handlers['handle_start']('conv', 0, None, 'Hey Jarvis')  # 跟进会沿用上次的唤醒词名字
+        self.assertTrue(self.link.followup)
+        self.clock.now += 5.9
+        await asyncio.sleep(0.6)
+        self.assertEqual(self.link.phase, 'listening')
+        self.assertEqual(self.client.services_called, [])
+        self.clock.now += 0.2
+        await asyncio.sleep(0.6)
+        self.assertEqual(self.link.phase, 'idle')
+        self.assertEqual(self.client.kinds()[-1], Event.VOICE_ASSISTANT_RUN_END)
+        self.assertEqual(self.client.services_called, ['dismiss'])  # 跟进窗口结束响退出提示音
+
+    async def test_wake_word_runs_and_late_or_button_starts_are_not_follow_ups(self):
+        await self.answer()
+        await self.wake()  # 跟进窗口里说了唤醒词：普通的一轮
+        self.assertFalse(self.link.followup)
+        self.link.end_run('test')
+        await self.client.handlers['handle_start']('conv', 0, None, None)  # 诊断按钮：没有紧跟在回答后面
+        self.assertFalse(self.link.followup)
+        self.link.end_run('test')
+        await self.answer()
+        self.clock.now += 6  # 设备太久才来 start，不算跟进
+        await self.client.handlers['handle_start']('conv', 0, None, None)
+        self.assertFalse(self.link.followup)
+
+    async def test_barge_in_does_not_ask_for_a_follow_up(self):
+        await self.wake()
+        self.link.end_listening('submitted')
+        self.link.start_response()
+        self.adapter.receiver.active = True
+        await self.barge_in_event()
+        self.assertNotIn(Event.VOICE_ASSISTANT_INTENT_END, self.client.kinds())
+        self.assertEqual(self.client.kinds()[-1], Event.VOICE_ASSISTANT_RUN_END)
+
+    async def barge_in_event(self):
+        self.client.service_callback(NS(service='esphome.alpha_barge_in', is_event=True, data={}))
+        await self.settle()
 
 
 class WithoutSpeakerTests(LinkTestCase):
@@ -366,7 +502,8 @@ class MakeSatelliteTests(unittest.TestCase):
             self.assertIsNone(make_satellite('asr'))
         with patch.dict('os.environ', {'ALPHA_SATELLITE_HOST': '192.168.1.115', 'ALPHA_SATELLITE_KEY': ''}):
             link = make_satellite('asr')
-            self.assertEqual((link.host, link.noise_psk, link.listen_s), ('192.168.1.115', None, 8.0))
+            self.assertEqual((link.host, link.noise_psk, link.listen_s, link.followup_s),
+                             ('192.168.1.115', None, 8.0, 6.0))
             with self.assertRaises(ValueError):
                 make_satellite('omni')
 

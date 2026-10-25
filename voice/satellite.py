@@ -8,14 +8,21 @@
 - speaking：第一段要播的音频到了，发 TTS_START/TTS_END/TTS_STREAM_START，之后 SatellitePlayer 按实时速度推音频。
   “我查一下”和最终回答在同一个流里。
 - 最终回答播完（Receiver 调 player.end_response）发 TTS_STREAM_END + RUN_END，设备放完后回到空闲、重新听唤醒词。
+  开了跟进窗口（ALPHA_SATELLITE_FOLLOWUP_SECONDS > 0）时改发 INTENT_END(continue_conversation=1) + TTS_STREAM_END、
+  不发 RUN_END：设备放完自动开新的一轮（没有唤醒词），这一轮用跟进超时，不开口就结束、回去听唤醒词。
+  不发 RUN_END 是因为设备放完缓冲就会开新的一轮，RUN_END 晚到一步会把新的一轮结束掉。
 设备不带扬声器（旧固件）时，提交就发 RUN_END 结束这一轮，回答交给 Mac 播放器。
 
 其他结束方式：唤醒后超过 ALPHA_SATELLITE_LISTEN_SECONDS 没有人声（或说完一直没提交）；等回答超过 90 秒；
 设备自己停止。
 
-打断：设备的唤醒词检测常开（播报时用 XVF3800 的 ASR 波束也认得出）。一轮进行中又听到唤醒词，设备发事件
+打断：播报开始时设备重新启动唤醒词检测。一轮进行中又听到唤醒词，设备发事件
 esphome.alpha_barge_in（ESPHome 的 voice_assistant.stop 在播放阶段不会停播放，也不通知服务端），这里停掉播报、
 结束这一轮；设备放完缓冲（不到 0.5 秒）回到空闲后马上开新的一轮。
+
+取消词：一句话的最后一段是取消词（DISMISS_WORDS：退下、没事了、拜拜、可以了、再见、结束、结束对话、finish、never mind）时以它为准（split_dismissal）。前面没有别的内容就直接结束这一轮、
+不交给大脑；前面有请求就照常处理，回答完直接结束、不开跟进窗口。两种情况都调用设备的 dismiss 动作播退出提示音。
+上一句回答在问用户时由调用方照常整句交给大脑。
 
 API 连接跨 ASR 重连保留：run() 由外层常驻，feed() 每条 ASR 连接调用一次。
 """
@@ -25,10 +32,12 @@ from collections import deque
 from dataclasses import dataclass, field
 import logging
 from pathlib import Path
+import re
 import time
 import wave
 
-from aioesphomeapi import APIClient, VoiceAssistantEventType as Event, VoiceAssistantFeature
+from aioesphomeapi import (APIClient, VoiceAssistantCommandFlag, VoiceAssistantEventType as Event,
+                           VoiceAssistantFeature)
 import numpy as np
 
 from voice.segmenter import RATE
@@ -40,6 +49,39 @@ PORT = 6053
 FLUSH = bytes(int(RATE * 0.7) * 2)
 RESPONSE_TIMEOUT_S = 90.0
 BARGE_IN_EVENT = 'esphome.alpha_barge_in'
+# 比较时去掉标点和空格、转小写：never mind → nevermind
+DISMISS_WORDS = frozenset({'退下', '没事了', '拜拜', '可以了', '再见', '结束', '结束对话', 'finish', 'nevermind'})
+# ASR 常把“没事了”转成“没事的”“没事啦”（2026-10-25 实测）
+DISMISS_ALIASES = {'没事的': '没事了', '没事啦': '没事了'}
+DISMISS_SERVICE = 'dismiss'  # 设备 YAML 里 api.actions 定义的动作：播退出提示音
+WAKE_RESIDUE = frozenset({'jarvis', 'heyjarvis'})  # 唤醒词尾巴偶尔会被转写出来
+CLAUSE_END = re.compile(r'[；;，,。.！!？?]+\s*')  # 只按标点断句：英文取消词有空格（never mind）
+
+
+def _clause(text):
+    word = re.sub(r'[\W_]+', '', text).lower().removesuffix('吧')
+    return DISMISS_ALIASES.get(word, word)
+
+
+def split_dismissal(text):
+    """最后一段是取消词就以它为准，返回（前面要处理的内容，True）；不是返回（原文，False）。
+
+    跟进窗口会把这段时间说的话连成一句（“没有用啊。；退下。”），所以看最后一段，不要求整句只有取消词。
+    前面只剩唤醒词的尾巴（“Jarvis。”）也算没有内容。
+    """
+    clauses = [c for c in CLAUSE_END.split(text) if c]
+    if not clauses or _clause(clauses[-1]) not in DISMISS_WORDS:
+        return text, False
+    rest = text[:text.rfind(clauses[-1])]
+    while True:  # 前面连着说了几遍取消词（“拜拜；退下”）也一起去掉
+        before = [c for c in CLAUSE_END.split(rest) if c]
+        if not before or _clause(before[-1]) not in DISMISS_WORDS:
+            break
+        rest = rest[:rest.rfind(before[-1])]
+    rest = rest.rstrip('；;，,。.！!？? ')
+    if all(_clause(c) in WAKE_RESIDUE for c in CLAUSE_END.split(rest) if c):
+        rest = ''
+    return rest, True
 
 
 class _RunEnded:
@@ -47,10 +89,13 @@ class _RunEnded:
 
 
 class SatelliteLink:
-    def __init__(self, host, *, port=PORT, noise_psk=None, listen_s=8.0, client_factory=APIClient,
+    def __init__(self, host, *, port=PORT, noise_psk=None, listen_s=8.0, followup_s=6.0, client_factory=APIClient,
                  clock=time.monotonic, dump_dir=None):
         self.host, self.port, self.noise_psk = host, port, noise_psk
         self.listen_s = listen_s
+        self.followup_s = followup_s  # 回答播完后不用唤醒词接着说的窗口；0 表示关闭
+        self.followup = False  # 这一轮是不是跟进
+        self.followup_until = 0.0  # 在这之前设备发来的无唤醒词 start 算跟进
         self.client_factory, self.clock = client_factory, clock
         self.client = None
         self.speaker = False  # 设备声明了 SPEAKER 能力才把回答推给它
@@ -60,6 +105,8 @@ class SatelliteLink:
         self.started_at = self.last_voice = self.awaiting_since = 0.0
         self.receiver = None  # feed() 设置；唤醒或设备停止时用来打断正在进行的播报
         self.tasks = set()
+        self.dismiss_service = None  # 设备的 dismiss 动作；旧固件没有就只结束这一轮、不播提示音
+        self.dismiss_after_answer = False  # 这一轮说了“……拜拜”：回答完直接结束、播退出提示音
         self.dump_dir = Path(dump_dir) if dump_dir else None  # 调试：每一轮的原始音频（放大前）存成 WAV
         self.recording = bytearray()
 
@@ -78,6 +125,8 @@ class SatelliteLink:
                 info = await client.device_info()
                 self.client = client
                 self.speaker = bool(info.voice_assistant_feature_flags & VoiceAssistantFeature.SPEAKER)
+                _, services = await client.list_entities_services()
+                self.dismiss_service = next((s for s in services if s.name == DISMISS_SERVICE), None)
                 unsubscribe = client.subscribe_voice_assistant(
                     handle_start=self.handle_start, handle_stop=self.handle_stop, handle_audio=self.handle_audio)
                 client.subscribe_service_calls(self.handle_service_call)
@@ -99,7 +148,16 @@ class SatelliteLink:
             await asyncio.sleep(5)
 
     async def handle_start(self, conversation_id, flags, audio_settings, wake_word_phrase):
-        logger.info('[卫星] 唤醒：%s', wake_word_phrase or '（无唤醒词）')
+        # 设备在回答播完后自动开的一轮没有唤醒词；诊断按钮开的也没有，但不会紧跟在回答后面。
+        # 不能看 wake_word_phrase：设备自动开的跟进会沿用上一次的唤醒词名字（2026-10-25 实测）。看请求标记：
+        # 唤醒词触发的一轮带 USE_WAKE_WORD，设备自动开的跟进和诊断按钮都不带；再要求紧跟在回答之后。
+        self.followup = not flags & VoiceAssistantCommandFlag.USE_WAKE_WORD and self.clock() <= self.followup_until
+        self.followup_until = 0.0
+        self.dismiss_after_answer = False
+        if self.followup:
+            logger.info('[卫星] 跟进：不用唤醒词，%.0f 秒内开口就接着聊', self.followup_s)
+        else:
+            logger.info('[卫星] 唤醒：%s', wake_word_phrase or '（无唤醒词）')
         await self._interrupt_playback('唤醒打断当前播报')
         self._finish('restarted', notify=False)
         # 设备请求的放大倍数（ESPHome voice_assistant.volume_multiplier）。XVF3800 右声道是 ASR 波束，处理轻、
@@ -181,11 +239,44 @@ class SatelliteLink:
             self.client.send_voice_assistant_audio(data)
 
     def end_response(self, reason='done'):
-        """最终回答播完：关流并结束这一轮，设备放完缓冲后重新听唤醒词。"""
+        """最终回答播完：关流并结束这一轮。开了跟进窗口时让设备放完后自动开新的一轮，否则回去听唤醒词。"""
+        if self.phase in ('awaiting', 'speaking') and self.dismiss_after_answer:
+            if self.phase == 'speaking':
+                self._event(Event.VOICE_ASSISTANT_TTS_STREAM_END)
+            self._finish('回答完退下')
+            self._play_exit_beep(delay=0.6)  # 等设备放完缓冲里的回答，提示音不和回答叠在一起
+            return
+        if self.phase == 'speaking' and reason == 'done' and self.followup_s > 0:
+            self._event(Event.VOICE_ASSISTANT_INTENT_END, {'continue_conversation': '1'})
+            self._event(Event.VOICE_ASSISTANT_TTS_STREAM_END)
+            self._finish('done，等跟进', notify=False)
+            self.followup_until = self.clock() + 5.0  # 设备放完缓冲（不到 1 秒）就会发 start
+            return
         if self.phase == 'speaking':
             self._event(Event.VOICE_ASSISTANT_TTS_STREAM_END)
         if self.phase in ('awaiting', 'speaking'):
             self._finish(reason)
+
+    def dismiss(self):
+        """取消词：结束这一轮（不开跟进窗口），让设备播退出提示音。不在收音时返回 False。"""
+        if self.phase != 'listening':
+            return False
+        self.end_run('退下')
+        self._play_exit_beep()
+        return True
+
+    def _play_exit_beep(self, delay=0.0):
+        if self.client is None or self.dismiss_service is None:
+            return
+        client, service = self.client, self.dismiss_service
+
+        async def call():
+            await asyncio.sleep(delay)
+            await client.execute_service(service, {})
+
+        task = asyncio.create_task(call(), name='satellite-dismiss')
+        self.tasks.add(task)
+        task.add_done_callback(self.tasks.discard)
 
     def end_run(self, reason):
         if self.phase != 'idle':
@@ -238,8 +329,10 @@ class SatelliteLink:
                     if adapter.segmenter.active is not None:
                         self.last_voice = self.clock()
                 now = self.clock()
-                if self.phase == 'listening' and now - self.last_voice >= self.listen_s:
-                    self.end_run('timeout')
+                limit = self.followup_s if self.followup else self.listen_s
+                if self.phase == 'listening' and now - self.last_voice >= limit:
+                    self.end_run('跟进超时' if self.followup else 'timeout')
+                    self._play_exit_beep()  # 超时结束也响一声（唤醒后没开口、跟进窗口结束），听得出它不再听了
                 elif self.phase == 'awaiting' and now - self.awaiting_since >= RESPONSE_TIMEOUT_S:
                     self.end_run('no response')
         finally:

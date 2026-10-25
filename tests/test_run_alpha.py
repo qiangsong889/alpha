@@ -3,7 +3,7 @@ import asyncio
 import signal
 from unittest import IsolatedAsyncioTestCase
 from unittest.mock import AsyncMock, patch
-from apps import run_qwen as launcher
+from apps import run_alpha as launcher
 
 
 class Process:
@@ -45,7 +45,7 @@ class LauncherTests(IsolatedAsyncioTestCase):
         self.assertEqual(voice.signals, [signal.SIGINT])
 
     async def test_a_broken_output_pipe_does_not_stop_the_cleanup(self):
-        # 2026-10-23：`./start-qwen | tee` 按 Ctrl+C 时 tee 先退出，启动器一打印就抛 BrokenPipeError，
+        # 2026-10-23：`./start-alpha | tee` 按 Ctrl+C 时 tee 先退出，启动器一打印就抛 BrokenPipeError，
         # 大脑和语音留在后台没人关，下次启动后两个语音进程同时回答。
         brain, voice = Process(), Process()
         stopping = asyncio.Event()

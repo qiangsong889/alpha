@@ -107,6 +107,8 @@ SETTINGS: tuple[Setting, ...] = (
        'secret', readers={VOICE}),
     _s('ALPHA_SATELLITE_DUMP', '收音', '调试：把卫星每一轮收到的原始音频存到 data/satellite_runs/', 'bool', False,
        readers={VOICE}),
+    _s('ALPHA_SATELLITE_FOLLOWUP_SECONDS', '收音', '卫星回答播完后不用唤醒词接着说的窗口（秒）；0 表示关闭，每轮都要唤醒词',
+       'float', 6.0, minimum=0, maximum=30, readers={VOICE}),
     _s('ALPHA_SATELLITE_LISTEN_SECONDS', '收音', '卫星唤醒后多少秒没有人声就结束这一轮、恢复听唤醒词', 'float', 8.0,
        minimum=1, maximum=60, readers={VOICE}),
     _s('REALTIME_INPUT_CHANNEL', '收音', '用麦克风设备的第几个声道（从 1 开始；XVF3800 的语音识别波束是 2）', 'int', 1,

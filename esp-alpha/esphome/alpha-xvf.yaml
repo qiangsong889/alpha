@@ -39,6 +39,13 @@ api:
     key: !secret api_encryption_key
   # 允许设备给 API 客户端发事件（homeassistant.event）：打断时通知 Alpha。
   homeassistant_services: true
+  actions:
+    # Alpha 听到取消词（退下、没事了、拜拜、可以了、再见、结束、结束对话、finish、never mind）时调用：播退出提示音。这一轮由 Alpha 发 RUN_END 结束。
+    - action: dismiss
+      then:
+        - script.execute:
+            id: beep
+            rising: false
 
 ota:
   - platform: esphome
@@ -103,9 +110,10 @@ speaker:
     # 混音器至少要两路输入：第二路留给以后的提示音/通知
     source_speakers:
       # 不能用 never：语音助手要等扬声器自己停下才回到空闲（照搬 formatBCE 的 never 后，播完一次就卡住，
-      # 唤醒 10 次只认到 1 次）。0.5 秒没数据就停；“我查一下”和回答之间停了也没关系，新音频来了会重新启动。
+      # 唤醒 10 次只认到 1 次）。先用 500ms，但这段时间就是回答播完到跟进收音开始之间的空白（用户说话录不进），
+      # 2026-10-25 改 100ms。句间空档超过 100ms 时会停了再自动启动，听不出来；“我查一下”和回答之间本来就会停。
       - id: va_mixing_input
-        timeout: 500ms
+        timeout: 100ms
       - id: notice_mixing_input
         timeout: never  # 开机放一段静音让它启动并一直开着：停着时第一次 play 会丢数据（缓冲还没建好）
         buffer_duration: 500ms  # 默认 100ms 装不下整段提示音
@@ -133,7 +141,9 @@ micro_wake_word:
         level: INFO
         format: ">>> 听到唤醒词: %s"
         args: ["wake_word.c_str()"]
-    - script.execute: wake_beep
+    - script.execute:
+        id: beep
+        rising: true
     # 一轮进行中（播报时检测会重新启动）又听到唤醒词＝打断。voice_assistant.stop 在播放阶段不会停播放、也不通知
     # Alpha（2026-10-24 实测：检测到了，回答却照样播完），所以发事件让 Alpha 停掉播报并结束这一轮，
     # 等语音助手回到空闲（放完缓冲，不到 0.5 秒）再开新的一轮。
@@ -191,10 +201,13 @@ button:
       - voice_assistant.start:
 
 script:
-  # 唤醒提示音：“叮-咚”两个短音（880 Hz 90ms + 1320 Hz 110ms，首尾 10ms 淡入淡出），16 kHz 16 位单声道，
-  # 走混音器的提示音输入，在设备上直接播，不经过 Alpha。播放经过 XVF3800，有回声消除参考，基本不会被录进去。
-  - id: wake_beep
+  # 提示音：两个短音（880 Hz 90ms + 1320 Hz 110ms，首尾 10ms 淡入淡出），16 kHz 16 位单声道，走混音器的提示音输入，
+  # 在设备上直接播，不经过 Alpha。rising=true 上行“叮-咚”＝唤醒；false 下行“咚-叮”＝退下。
+  # 播放经过 XVF3800，有回声消除参考，基本不会被录进去。
+  - id: beep
     mode: restart
+    parameters:
+      rising: bool
     then:
       - speaker.play:
           id: notice_mixing_input
@@ -209,6 +222,6 @@ script:
                 out.push_back((v >> 8) & 0xff);
               }
             };
-            tone(880.0f, 90);
-            tone(1320.0f, 110);
+            tone(rising ? 880.0f : 1320.0f, 90);
+            tone(rising ? 1320.0f : 880.0f, 110);
             return out;

@@ -30,7 +30,7 @@ Both processes run the same check at startup and refuse to start with a list of 
 ### 2. Start Alpha (voice)
 
 ```bash
-./start-qwen
+./start-alpha
 ```
 
 The launcher starts AlphaBrain (`brain.server`, `http://127.0.0.1:8765`), waits until it is healthy,
@@ -43,7 +43,7 @@ To keep a log file as well, use `tee -i` so that Ctrl+C does not kill `tee` befo
 stopped the brain and voice processes:
 
 ```bash
-./start-qwen 2>&1 | tee -i -a data/voice.log
+./start-alpha 2>&1 | tee -i -a data/voice.log
 ```
 
 Only one voice process can run at a time (`data/run/voice.lock`); a second one exits immediately with the
@@ -324,7 +324,7 @@ alpha/
 ├─ voice/
 │  ├─ audio.py               Playback, device selection, local VAD, speech filtering
 │  ├─ listen.py              Push-to-talk recording + Whisper transcription (python -m voice.listen)
-│  ├─ qwen_alpha.py          Current voice entry point                     (./start-qwen)
+│  ├─ qwen_alpha.py          Current voice entry point                     (./start-alpha)
 │  ├─ omni_transport.py      Optional Omni transport; no business tools
 │  ├─ asr_client.py          Dedicated Qwen ASR
 │  ├─ qwen_tts.py            Dedicated Qwen TTS
@@ -398,7 +398,7 @@ After 400 ms of silence (420 ms at 30 ms frame boundaries), a background transcr
 
 ## Current voice path
 
-Use `./start-qwen`: local Silero → Qwen ASR → Jev → AlphaBrain → Qwen TTS.
+Use `./start-alpha`: local Silero → Qwen ASR → Jev → AlphaBrain → Qwen TTS.
 Omni remains an explicit transport-only fallback via `QWEN_ALPHA_INPUT=omni`;
 it has no business tools. See [voice setup](voice/QWEN_ALPHA.md).
 
@@ -672,8 +672,8 @@ See [the preserved evaluation history](eval/STABILITY.md).
 
 On the `qwen-alpha` branch, run `python -m brain.server` and then `python -m voice.qwen_alpha`, both with Alpha's `.venv`. Qwen handles microphone transcription and streamed voice; all business tools remain in AlphaBrain. Collection and Jev completeness checking prevent execution before submission; say “执行吧” to finish a long request. See [trial instructions and limitations](voice/QWEN_ALPHA.md).
 
-On `dev`, the default `QWEN_ALPHA_SUBMIT_MODE=jev` submits immediately when Jev judges the request complete; incomplete requests wait, and uncertainty falls back to the collection window. Use `QWEN_ALPHA_SUBMIT_MODE=window ./start-qwen` to restore the parallel timer/Jev mode. Batch IDs connect collection, gateway execution, brain completion, audio arrival and estimated playback-start logs; details are in [the Qwen trial notes](voice/QWEN_ALPHA.md#dev-parallel-completeness-checks-and-batch-latency).
+On `dev`, the default `QWEN_ALPHA_SUBMIT_MODE=jev` submits immediately when Jev judges the request complete; incomplete requests wait, and uncertainty falls back to the collection window. Use `QWEN_ALPHA_SUBMIT_MODE=window ./start-alpha` to restore the parallel timer/Jev mode. Batch IDs connect collection, gateway execution, brain completion, audio arrival and estimated playback-start logs; details are in [the Qwen trial notes](voice/QWEN_ALPHA.md#dev-parallel-completeness-checks-and-batch-latency).
 
-Start both services with `./start-qwen` from `alpha/`. The launcher uses the project environment, waits for the brain to become healthy, then starts Qwen. Ctrl+C stops the processes it started; an already-running healthy brain is reused and left running. Stop any old standalone Qwen process first.
+Start both services with `./start-alpha` from `alpha/`. The launcher uses the project environment, waits for the brain to become healthy, then starts Qwen. Ctrl+C stops the processes it started; an already-running healthy brain is reused and left running. Stop any old standalone Qwen process first.
 
-Qwen filters speech overlapping a report with Jev (`QWEN_ALPHA_JEV_INTERRUPTIONS=1`). The default `QWEN_ALPHA_UNCERTAIN_INTERRUPTION=hold` resumes the report for uncertainty or service failure; only an addressed classification, an explicit call to Alpha, or an eligible question answer interrupts. Idle speech is unaffected. One request checks both addressee and completeness. To restore the earlier uncertainty-accepting behavior use `QWEN_ALPHA_UNCERTAIN_INTERRUPTION=accept ./start-qwen`; disable the filter with `QWEN_ALPHA_JEV_INTERRUPTIONS=0 ./start-qwen`.
+Qwen filters speech overlapping a report with Jev (`QWEN_ALPHA_JEV_INTERRUPTIONS=1`). The default `QWEN_ALPHA_UNCERTAIN_INTERRUPTION=hold` resumes the report for uncertainty or service failure; only an addressed classification, an explicit call to Alpha, or an eligible question answer interrupts. Idle speech is unaffected. One request checks both addressee and completeness. To restore the earlier uncertainty-accepting behavior use `QWEN_ALPHA_UNCERTAIN_INTERRUPTION=accept ./start-alpha`; disable the filter with `QWEN_ALPHA_JEV_INTERRUPTIONS=0 ./start-alpha`.

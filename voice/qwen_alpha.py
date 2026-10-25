@@ -275,6 +275,8 @@ class BrainBridge:
         self.reports = deque()
         self.changed = asyncio.Event()
         self.epoch = 0
+        # 最后播完的一句回答：卫星的取消词要知道 Alpha 是不是刚问过用户（问过就把“没事了”当回答交给大脑）
+        self.last_reply, self.last_reply_at = '', 0.0
         self.delivered = OrderedDict()
         self.delivery_tasks = set()
         self.interruptions = OrderedDict()
@@ -737,6 +739,8 @@ class Receiver:
                 self.bridge.report_delivery(report, 'played' if played else
                                             'interrupted' if self.cancelled else 'not_played')
                 if report.kind in FINAL_KINDS:
+                    if played and report.text:
+                        self.bridge.last_reply, self.bridge.last_reply_at = report.text, time.monotonic()
                     self.player.end_response()  # 卫星：最终回答播完才结束设备上的这一轮
                 if played and report.text:
                     self.finished_report = (report.text, time.perf_counter())
@@ -864,6 +868,31 @@ def input_mode():
     return mode
 
 
+QUESTION_WINDOW_S = 120  # 邮件草稿等确认最多两分钟；更早的问句不再算“刚问过”
+
+
+def route_satellite_submission(text, satellite, bridge, clock=time.monotonic):
+    """卫星模式下提交前的分流。返回要交给大脑的文字；None 表示已处理（只说了取消词），不再交给大脑。
+
+    最后一段是取消词（退下、没事了、拜拜、可以了、再见、结束、结束对话、finish、never mind）：前面没内容就结束这一轮、播退出提示音；前面有请求就照常提交，
+    回答完直接结束、不开跟进窗口。Alpha 刚问过用户（“确认发送吗？”）时，“没事了”是在回答它，整句照常交给大脑。
+    其余情况停止收音：Alpha 播报时设备不推流，听不到自己的声音。
+    """
+    from voice.satellite import split_dismissal
+    asked = bridge.last_reply.rstrip().endswith(('？', '?')) and clock() - bridge.last_reply_at < QUESTION_WINDOW_S
+    rest, dismissed = split_dismissal(text)
+    if dismissed and not asked:
+        if not rest and satellite.dismiss():
+            logger.info('[卫星] 取消词：%s，不交给大脑', text)
+            return None
+        if rest:
+            logger.info('[卫星] 取消词在句尾：先处理“%s”，回答完退下', rest)
+            satellite.dismiss_after_answer = True
+            text = rest
+    satellite.end_listening('submitted')
+    return text
+
+
 def make_satellite(mode):
     """ALPHA_SATELLITE_HOST 填了就用 ESPHome 卫星收音；只接到 asr 路径（Omni 路径自己管麦克风）。"""
     host = setting('ALPHA_SATELLITE_HOST')
@@ -874,6 +903,7 @@ def make_satellite(mode):
     from voice.satellite import SatelliteLink
     return SatelliteLink(host, noise_psk=setting('ALPHA_SATELLITE_KEY') or None,
                          listen_s=setting('ALPHA_SATELLITE_LISTEN_SECONDS'),
+                         followup_s=setting('ALPHA_SATELLITE_FOLLOWUP_SECONDS'),
                          dump_dir=PROJECT_ROOT / 'data/satellite_runs' if setting('ALPHA_SATELLITE_DUMP') else None)
 
 
@@ -1040,8 +1070,9 @@ async def main():
 
         def submit(text):
             if satellite is not None:
-                # 提交给大脑就停止收音：Alpha 播报时设备不推流，听不到自己的声音。
-                satellite.end_listening('submitted')
+                text = route_satellite_submission(text, satellite, bridge)
+                if text is None:
+                    return  # 只说了取消词：已结束这一轮，不交给大脑
             bridge.submit(text, collector.last_submission)
 
         collector = TurnCollector(submit, bridge.say, make_router(client),

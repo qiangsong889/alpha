@@ -9,10 +9,10 @@ The retired standalone Qwen tool agent and LiveKit entry point have been removed
 One command from `alpha/`:
 
 ```bash
-./start-qwen
+./start-alpha
 ```
 
-This uses Alpha's `.venv` automatically, starts the brain, waits for `/health`, then starts Qwen. Press Ctrl+C once to stop both processes it started. A healthy existing brain is reused and is not closed by this launcher. Stop an old standalone Qwen process before using this command. Startup logs from both services share the terminal. Optional: `./start-qwen --startup-timeout 90`.
+This uses Alpha's `.venv` automatically, starts the brain, waits for `/health`, then starts Qwen. Press Ctrl+C once to stop both processes it started. A healthy existing brain is reused and is not closed by this launcher. Stop an old standalone Qwen process before using this command. Startup logs from both services share the terminal. Optional: `./start-alpha --startup-timeout 90`.
 
 From `alpha/`, in two terminals, using **Alpha's** environment in both:
 
@@ -32,11 +32,11 @@ The code defaults are `QWEN_ALPHA_INPUT=asr` and `QWEN_ALPHA_SPEAKER=tts`, even
 without `.env` overrides. Omni input and its upload gate remain explicitly selectable:
 
 ```bash
-QWEN_ALPHA_INPUT=asr ./start-qwen
+QWEN_ALPHA_INPUT=asr ./start-alpha
 # Select the original input (still using dedicated TTS by default):
-QWEN_ALPHA_INPUT=omni ./start-qwen
+QWEN_ALPHA_INPUT=omni ./start-alpha
 # Select both original Omni input and Omni speaker:
-QWEN_ALPHA_INPUT=omni QWEN_ALPHA_SPEAKER=omni ./start-qwen
+QWEN_ALPHA_INPUT=omni QWEN_ALPHA_SPEAKER=omni ./start-alpha
 ```
 
 ASR mode uses Silero ONNX (160ms confirmed onset, 400ms pre-roll, 608ms silence)
@@ -82,10 +82,10 @@ Jev uses the existing `JEV_PROVIDER`, `TYPESAFE_API_KEY`/`AI_GATEWAY_API_KEY`, `
 To restore the previous mode for one run, without changing `.env`:
 
 ```bash
-QWEN_ALPHA_SUBMIT_MODE=window ./start-qwen
+QWEN_ALPHA_SUBMIT_MODE=window ./start-alpha
 ```
 
-Set `QWEN_ALPHA_SUBMIT_MODE=window` in `.env` for a persistent rollback. Use `QWEN_ALPHA_SUBMIT_MODE=jev ./start-qwen` to explicitly select the trial again. A complete sentence does not prove the user has finished a whole task chain: “加牛奶” may be submitted before a later “还有鸡蛋”. The `window` mode remains available for that tradeoff.
+Set `QWEN_ALPHA_SUBMIT_MODE=window` in `.env` for a persistent rollback. Use `QWEN_ALPHA_SUBMIT_MODE=jev ./start-alpha` to explicitly select the trial again. A complete sentence does not prove the user has finished a whole task chain: “加牛奶” may be submitted before a later “还有鸡蛋”. The `window` mode remains available for that tradeoff.
 
 Qwen receives microphone audio continuously but automatic replies and automatic interruptions are disabled and verified against the server's returned configuration. A pause produces transcription, not permission to execute. The client waits for final transcripts for all known segments, then follows the selected submission mode. In `window` mode, the collection timer and Jev check run together and both must finish. An unfinished sentence or an `incomplete` decision retains the request; it does not execute automatically after five seconds. Uncertainty falls back to local sentence rules and the window.
 
@@ -108,13 +108,13 @@ The filter remembers overlap at speech start, even if the original report finish
 The earlier policy accepted all uncertain overlapping speech, which caused unrelated statements such as “我吃过了” to cancel a report. It remains available for comparison, but is no longer the default:
 
 ```bash
-QWEN_ALPHA_UNCERTAIN_INTERRUPTION=accept ./start-qwen
+QWEN_ALPHA_UNCERTAIN_INTERRUPTION=accept ./start-alpha
 ```
 
 After a question has actually finished playback, a ten-second window accepts short answers such as “对”“不是”“不用了” without another addressee/completeness request. An interrupted question does not open this window. Late classification cannot cancel a different, newer report. To disable this trial filter for one run:
 
 ```bash
-QWEN_ALPHA_JEV_INTERRUPTIONS=0 ./start-qwen
+QWEN_ALPHA_JEV_INTERRUPTIONS=0 ./start-alpha
 ```
 
 Each meaningful input advances a voice epoch. Older queued reports are discarded, and late results from older HTTP requests are retained in the brain but not added back to the speech queue. This prevents an old long report and the new short answer from both saying the same result. It does not cancel or replay business operations. Playback claims its own report before waiting, so finishing an interrupted report cannot accidentally remove the next report.
@@ -182,11 +182,11 @@ client uses `close_timeout=1`. `devtools/tts_compare.py` writes side-by-side WAV
 qwen3-tts Ethan 0.53–0.59 s, 3.1 flash 0.56–0.79 s, 3.1 plus 0.71–1.13 s. Price for a
 20-character sentence: qwen3-tts ≈ $0.00026, 3.1 flash ≈ $0.00005 (token-priced).
 
-Start the trial: `./start-qwen`.
+Start the trial: `./start-alpha`.
 Restore the previous Omni speaker for one run:
 
 ```bash
-QWEN_ALPHA_INPUT=omni QWEN_ALPHA_SPEAKER=omni ./start-qwen
+QWEN_ALPHA_INPUT=omni QWEN_ALPHA_SPEAKER=omni ./start-alpha
 ```
 
 For persistent rollback set both `QWEN_ALPHA_INPUT=omni` and `QWEN_ALPHA_SPEAKER=omni` in `.env`.
@@ -254,7 +254,7 @@ including the Ethan TTS trial and Omni rollback, is unaffected.
 Restore continuous upload for one run:
 
 ```bash
-QWEN_ALPHA_LOCAL_VAD=0 ./start-qwen
+QWEN_ALPHA_LOCAL_VAD=0 ./start-alpha
 ```
 
 Or set `QWEN_ALPHA_LOCAL_VAD=0` in `.env` for persistent rollback. Restart the voice
@@ -394,7 +394,10 @@ XVF3800（降噪/回声消除/波束）→ I2S → XIAO ESP32S3（ESPHome，micr
    `SatellitePlayer` 把 24 kHz 重采样到 16 kHz，按实时速度推（设备缓冲只有约 0.5 秒，最多领先 0.4 秒），
    播放开始/结束时间按推送进度估算。“我查一下”和最终回答在同一个流里。
 4. 最终回答（reply/tone/error）播完，Receiver 调 `player.end_response()`：发 TTS_STREAM_END + RUN_END，设备放完回到空闲。
-其他结束：唤醒后超过 `ALPHA_SATELLITE_LISTEN_SECONDS`（默认 8 秒）没有人声；等回答超过 90 秒；设备自己停止。
+跟进窗口（`ALPHA_SATELLITE_FOLLOWUP_SECONDS`，默认 6 秒，0 关闭）：第 4 步改发 INTENT_END(continue_conversation=1)
++ TTS_STREAM_END、不发 RUN_END，设备放完自动开新的一轮（没有唤醒词）。Alpha 把紧跟在回答后 5 秒内、没有唤醒词的
+start 当作跟进（看请求里有没有 USE_WAKE_WORD 标记；唤醒词名字不可靠，设备开跟进时会沿用上次的），用跟进超时：不开口就发 RUN_END、播退出提示音，设备回去听唤醒词。不发 RUN_END 是因为它晚到一步会结束掉设备新开的一轮。
+其他结束：唤醒后超过 `ALPHA_SATELLITE_LISTEN_SECONDS`（默认 8 秒）没有人声（和跟进超时一样播退出提示音）；等回答超过 90 秒；设备自己停止。
 设备没有 SPEAKER 能力（旧固件）时，提交就发 RUN_END，回答走 Mac 播放器。
 
 **打断**：播报开始时设备重新启动唤醒词检测。一轮进行中又听到唤醒词，设备发事件 `esphome.alpha_barge_in`
@@ -405,7 +408,8 @@ API 连接在 `main()` 里常驻，跨 ASR 重连保留；断线 5 秒后重连�
 
 **设备配置踩过的坑**（2026-10-24，详见 `alpha-xvf.yaml` 注释）
 - 扬声器链路照 formatBCE（语音助手 → 重采样 → 混音 → I2S），但混音器输入不能 `timeout: never`：语音助手要等扬声器
-  自己停下才回到空闲，never 会让它播完一次就卡住。改成 500ms。混音器至少要两路输入（第二路留给提示音）。
+  自己停下才回到空闲，never 会让它播完一次就卡住。先改成 500ms，但这段就是回答播完到跟进收音开始之间的空白
+  （用户说话录不进），后来改 100ms。混音器至少要两路输入（第二路留给提示音）。
 - “唤醒几次后就不灵”：先后怀疑过立体声、检测器状态、I2S 帧对齐、XVF3800 状态，都不是。最后用 UDP 探针连续录音、
   离线逐句打分（pymicro-wakeword 特征 + ai-edge-litert，同一模型、同样 5 窗平均，`devtools` 外的临时脚本）查明：
   用户的 Hey Jarvis 大多压在 0.97～1.00，约 1/4 落在 0.3～0.5，默认门槛 0.97 下一半左右失败。普通对话和视频都 ≤ 0.03。
@@ -423,13 +427,19 @@ API 连接在 `main()` 里常驻，跨 ASR 重连保留；断线 5 秒后重连�
 
 **启动**（XVF3800 是 I2S 模式时 Mac 看不到 USB 声卡，两个设备名要留空；回答从板载 3.5mm 接的音箱出来）：
 ```bash
-ALPHA_SATELLITE_HOST=192.168.1.115 REALTIME_INPUT_DEVICE= REALTIME_OUTPUT_DEVICE= ./start-qwen 2>&1 | tee -i -a data/voice.log
+ALPHA_SATELLITE_HOST=192.168.1.115 REALTIME_INPUT_DEVICE= REALTIME_OUTPUT_DEVICE= ./start-alpha 2>&1 | tee -i -a data/voice.log
 ```
 
 API 已加密（2026-10-24）：设备 YAML 用 `!secret api_encryption_key`，同一个密钥填 `.env` 的 `ALPHA_SATELLITE_KEY`。
 不带密钥连接会报 `RequiresEncryptionAPIError`。生成：`openssl rand -base64 32`（追加到 `.env` 前先确认最后一行有换行，
 否则会接到上一行末尾）。
 
-唤醒提示音：设备检测到唤醒词就在本地播“叮-咚”（`wake_beep` 脚本，走混音器的提示音输入），不经过 Alpha。
+提示音：设备检测到唤醒词就在本地播上行“叮-咚”，退下时播下行“咚-叮”（`beep` 脚本，走混音器的提示音输入），不经过 Alpha。
+
+取消词：一句话的最后一段是“退下”“没事了”“拜拜”“可以了”“再见”“结束”“结束对话”“finish”“never mind”（结尾带“吧”也算；“没事的/没事啦”按“没事了”算，ASR 常这样转）时以它为准。
+跟进窗口会把这段时间说的话连成一句（“没有用啊。；退下。”），所以看最后一段，不要求整句只有取消词。
+前面没内容：不交给大脑，发 RUN_END 结束这一轮（不开跟进窗口），调用设备的 `dismiss` 动作（`api.actions`）播退出提示音。
+前面有请求（“把灯关了，拜拜”）：照常处理，回答完发 RUN_END、不开跟进窗口，0.6 秒后（等设备放完回答）播退出提示音。
+例外：Alpha 两分钟内播完的上一句回答以问号结尾（“确认发送吗？”）时，“没事了”是在回答它，照常交给大脑。
 
 待做：训练 "Alpha" 唤醒词（加入用户录音）、LED、观察误触发后再定门槛、播报中打断的成功率。

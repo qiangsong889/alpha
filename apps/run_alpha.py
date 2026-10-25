@@ -1,4 +1,4 @@
-"""一键启动本机 AlphaBrain 和 Qwen，等待健康检查，并负责清理自己启动的进程。"""
+"""一键启动本机 AlphaBrain 和语音层，等待健康检查，并负责清理自己启动的进程。"""
 import argparse
 import asyncio
 import os
@@ -93,7 +93,7 @@ async def run(client, *, url, env, stopping, startup_timeout=60):
                     pass
         if stopping.is_set():
             return 0
-        say('[启动器] 大脑已就绪，启动 Qwen；按一次 Ctrl+C 退出。')
+        say('[启动器] 大脑已就绪，启动语音；按一次 Ctrl+C 退出。')
         voice = await spawn('voice.qwen_alpha', env)
         stopped = asyncio.create_task(stopping.wait())
         voice_exit = asyncio.create_task(voice.wait())
@@ -118,7 +118,7 @@ async def run(client, *, url, env, stopping, startup_timeout=60):
 
 
 async def main():
-    parser = argparse.ArgumentParser(description='同时启动 AlphaBrain 和 Qwen 语音；Ctrl+C 一起退出')
+    parser = argparse.ArgumentParser(description='同时启动 AlphaBrain 和语音层；Ctrl+C 一起退出')
     parser.add_argument('--startup-timeout', type=float, default=60, help='大脑就绪超时秒数，默认 60')
     args = parser.parse_args()
     if not 0 < args.startup_timeout < float('inf'):

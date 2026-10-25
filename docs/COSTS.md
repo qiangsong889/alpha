@@ -2,7 +2,7 @@
 
 Enabled by `brain.server` and `voice.qwen_alpha`. Both processes use the same
 `data/costs.db` SQLite ledger (ignored by git). Restart **both** processes after
-updating, including an already-running brain that `start-qwen` might reuse.
+updating, including an already-running brain that `start-alpha` might reuse.
 
 Logs show per-request estimates and `[费用账本累计]` across all recorded runs.
 They do not include historical usage from before this feature was installed.
