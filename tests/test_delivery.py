@@ -166,7 +166,7 @@ class BridgeTurnTests(IsolatedAsyncioTestCase):
 
 class ReceiverDeliveryTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
-        player = NS(clear=Mock(), append=Mock(), finish=Mock(), gain=1, resume=Mock(), pause=Mock(),
+        player = NS(clear=Mock(), append=Mock(), finish=Mock(), gain=1, resume=Mock(), pause=Mock(), end_response=Mock(),
                     wait_played=AsyncMock(return_value=True), wait_started=AsyncMock(return_value=1))
         gate = TurnCollector(Mock(), Mock(), NS(turn_complete=AsyncMock(return_value=True)), window_s=10, mode='window')
         self.addAsyncCleanup(gate.close)
@@ -193,6 +193,15 @@ class ReceiverDeliveryTests(IsolatedAsyncioTestCase):
         await self.run_one(AsyncMock(return_value=True))
         self.assertEqual(self.seen, [(TURN, 'played')])
         self.assertEqual(self.receiver.finished_report[0], '好的')  # 用于识别紧接着的回声尾巴
+        self.receiver.player.end_response.assert_called_once()  # 卫星：最终回答播完才结束设备上的这一轮
+
+    async def test_search_progress_does_not_end_the_satellite_run(self):
+        self.bridge.say('我查一下。', kind='search_progress')
+        self.bridge.say('好的', turn_id=TURN)
+        play = AsyncMock(return_value=True)
+        await self.run_one(play)
+        self.assertEqual(play.await_count, 2)
+        self.receiver.player.end_response.assert_called_once()
 
     async def test_cancelled_playback_is_interrupted(self):
         async def play(text):

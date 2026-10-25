@@ -386,22 +386,50 @@ XVF3800（降噪/回声消除/波束）→ I2S → XIAO ESP32S3（ESPHome，micr
 - XIAO ESP32S3 必须接上外置天线，否则 Wi-Fi 只有 -91 dBm。
 - 通路先用 `esp-alpha/xvf_udp_probe`（Arduino）+ `devtools/udp_audio_receiver.py` 验证过：20 秒 2502 包、丢包 0。
 
-**一轮的生命周期**（`SatelliteLink`）
-1. 设备听到唤醒词发 start 请求；Alpha 回端口 0（音频走 API 连接），发 RUN_START/STT_START。
-2. 音频直接喂进断句器，后面的 ASR、Jev、大脑、TTS 都不变。
-3. 结束：这句话提交给大脑；或超过 `ALPHA_SATELLITE_LISTEN_SECONDS`（默认 8 秒）没有人声；或设备要求停止。
-   结束时发 RUN_END，设备停麦、恢复听唤醒词，并补 0.7 秒静音让断句器收尾。
-4. Alpha 播报时设备不推流，所以听不到自己的声音；播报中再次唤醒就是打断。
+**一轮的生命周期**（`SatelliteLink.phase`）
+1. listening：设备听到唤醒词发 start 请求；Alpha 回端口 0（音频走 API 连接），发 RUN_START/STT_START，
+   音频直接喂进断句器，后面的 ASR、Jev、大脑、TTS 都不变。设备在请求里给的 `volume_multiplier` 会照做。
+2. awaiting：这句话提交给大脑，发 STT_VAD_END——设备停麦、等回答，这一轮不结束。Alpha 播报时设备不推流，听不到自己。
+3. speaking：第一段要播的音频到了，发 TTS_START（要有文字）/TTS_END（要有 url）/TTS_STREAM_START，设备进入播放状态；
+   `SatellitePlayer` 把 24 kHz 重采样到 16 kHz，按实时速度推（设备缓冲只有约 0.5 秒，最多领先 0.4 秒），
+   播放开始/结束时间按推送进度估算。“我查一下”和最终回答在同一个流里。
+4. 最终回答（reply/tone/error）播完，Receiver 调 `player.end_response()`：发 TTS_STREAM_END + RUN_END，设备放完回到空闲。
+其他结束：唤醒后超过 `ALPHA_SATELLITE_LISTEN_SECONDS`（默认 8 秒）没有人声；等回答超过 90 秒；设备自己停止。
+设备没有 SPEAKER 能力（旧固件）时，提交就发 RUN_END，回答走 Mac 播放器。
 
-API 连接在 `main()` 里常驻，跨 ASR 重连保留；断线 5 秒后重连。`ALPHA_SATELLITE_KEY` 是设备
-`api.encryption.key`（留空表示不加密，只适合测试）。
+**打断**：播报开始时设备重新启动唤醒词检测。一轮进行中又听到唤醒词，设备发事件 `esphome.alpha_barge_in`
+（`api: homeassistant_services: true`），Alpha 停掉播报、结束这一轮，设备回到空闲后马上开新的一轮。
+ESPHome 的 `voice_assistant.stop` 在播放阶段既不停播放也不通知服务端，所以不能靠它。
 
-**试用**（回答暂时用 Mac 扬声器；XVF3800 是 I2S 模式时 Mac 看不到 USB 声卡，两个设备名要留空）：
+API 连接在 `main()` 里常驻，跨 ASR 重连保留；断线 5 秒后重连。
+
+**设备配置踩过的坑**（2026-10-24，详见 `alpha-xvf.yaml` 注释）
+- 扬声器链路照 formatBCE（语音助手 → 重采样 → 混音 → I2S），但混音器输入不能 `timeout: never`：语音助手要等扬声器
+  自己停下才回到空闲，never 会让它播完一次就卡住。改成 500ms。混音器至少要两路输入（第二路留给提示音）。
+- “唤醒几次后就不灵”：先后怀疑过立体声、检测器状态、I2S 帧对齐、XVF3800 状态，都不是。最后用 UDP 探针连续录音、
+  离线逐句打分（pymicro-wakeword 特征 + ai-edge-litert，同一模型、同样 5 窗平均，`devtools` 外的临时脚本）查明：
+  用户的 Hey Jarvis 大多压在 0.97～1.00，约 1/4 落在 0.3～0.5，默认门槛 0.97 下一半左右失败。普通对话和视频都 ≤ 0.03。
+  门槛降到 0.35（11 次能过 10 次）。注意设备日志里 “Detected … sliding average” 是刚越过门槛那一刻的值，不是最高分，
+  门槛设多少它就略高于多少——别拿它当发音分数。根本办法是训练自己的 “Alpha” 唤醒词（加入用户录音）。
+- 声道：左声道（通话输出，带 AGC）平时唤醒和识别都好，但播报中降噪狠，打断只能偶尔成功；右声道（ASR 波束）
+  播报中人声保留得多，但没有 AGC、小约 25 dB，Hey Jarvis 平时几乎不认。现在唤醒和识别都用左声道。
+- 回声消除本身正常：`esp-alpha/xvf_aec_probe`（一边播测试语音一边录）+ `devtools/aec_probe_receiver.py` 实测，
+  收敛约 9 秒后播放中的回声压到 -65～-70 dBFS。
+
+**调试工具**
+- `devtools/satellite_logs.py`：用 aioesphomeapi 直接订阅设备日志，逐行写文件、断线重连（esphome CLI 接管道会缓冲、会卡）。
+- `ALPHA_SATELLITE_DUMP=1`：每一轮收到的原始音频存到 `data/satellite_runs/`；配合设备的“诊断收音”按钮
+  （不用唤醒词直接收音），可以把设备此刻听到的声音录下来离线分析。
+
+**启动**（XVF3800 是 I2S 模式时 Mac 看不到 USB 声卡，两个设备名要留空；回答从板载 3.5mm 接的音箱出来）：
 ```bash
 ALPHA_SATELLITE_HOST=192.168.1.115 REALTIME_INPUT_DEVICE= REALTIME_OUTPUT_DEVICE= ./start-qwen 2>&1 | tee -i -a data/voice.log
 ```
 
-2026-10-24 实测：唤醒词 "Hey Jarvis" 4 次认到 3 次（置信度 0.98–0.99，无误触发）；基本对话、8 秒超时、
-唤醒打断播报、不唤醒不响应都正常。
+API 已加密（2026-10-24）：设备 YAML 用 `!secret api_encryption_key`，同一个密钥填 `.env` 的 `ALPHA_SATELLITE_KEY`。
+不带密钥连接会报 `RequiresEncryptionAPIError`。生成：`openssl rand -base64 32`（追加到 `.env` 前先确认最后一行有换行，
+否则会接到上一行末尾）。
 
-待做：设备播放 TTS（AIC3104，回声消除才有参考信号）、API 加密、训练 "Alpha" 唤醒词、提示音/LED。
+唤醒提示音：设备检测到唤醒词就在本地播“叮-咚”（`wake_beep` 脚本，走混音器的提示音输入），不经过 Alpha。
+
+待做：训练 "Alpha" 唤醒词（加入用户录音）、LED、观察误触发后再定门槛、播报中打断的成功率。

@@ -1,0 +1,214 @@
+# Alpha 语音卫星：reSpeaker Flex XVF3800 Linear-4 + XIAO ESP32S3
+#
+# XVF3800 刷 I2S 固件 respeaker_flex_i2s_l16k2ch_v1.0.4（16 kHz、2 声道、32 位），由它提供 I2S 时钟，
+# XIAO 是 secondary（2026-10-24 用 xvf_udp_probe 实测通过：20 秒 2502 包、丢包 0）。
+# 引脚和 formatBCE/Respeaker-XVF3800-ESPHome-integration 一致：WS 7、BCK 8、DIN 43、DOUT 44。
+# 播放：Alpha 把 TTS 通过 API 推给语音助手 → 重采样 → 混音（单声道变立体声）→ I2S（DOUT 44）→ XVF3800 → AIC3104
+# → 板载 3.5mm。播放经过 XVF3800，回声消除才有参考信号。扬声器链路照 formatBCE 的配置（他们实测过）。
+
+esphome:
+  name: alpha-xvf
+  friendly_name: Alpha XVF
+  # 开机就开始监听唤醒词（还没有 Mac 端连接时也能从日志看到检测结果）
+  on_boot:
+    priority: -100
+    then:
+      - micro_wake_word.start:
+      - speaker.play:
+          id: notice_mixing_input
+          data: !lambda return std::vector<uint8_t>(3200, 0);  # 0.1 秒静音，让提示音这一路先启动
+
+esp32:
+  board: seeed_xiao_esp32s3
+  variant: esp32s3
+  flash_size: 8MB
+  framework:
+    type: esp-idf
+
+psram:
+  mode: octal
+  speed: 80MHz
+
+logger:
+  level: DEBUG
+
+# 设备和 Mac 之间的通信接口（Alpha 通过 aioesphomeapi 连这里）。
+# 加密：唤醒后的音频走这条连接，不加密的话局域网里谁都能连上来听。同一个密钥填在 .env 的 ALPHA_SATELLITE_KEY。
+api:
+  encryption:
+    key: !secret api_encryption_key
+  # 允许设备给 API 客户端发事件（homeassistant.event）：打断时通知 Alpha。
+  homeassistant_services: true
+
+ota:
+  - platform: esphome
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  power_save_mode: none  # 省电模式会让音频流时断时续
+  ap:
+    ssid: "Alpha-XVF-Setup"
+
+captive_portal:
+
+# 麦克风和扬声器各一组 I2S，共用 XVF3800 给的 WS/BCK 时钟线。
+i2s_audio:
+  - id: i2s_input
+    i2s_lrclk_pin:
+      number: GPIO7
+      allow_other_uses: true
+    i2s_bclk_pin:
+      number: GPIO8
+      allow_other_uses: true
+  - id: i2s_output
+    i2s_lrclk_pin:
+      number: GPIO7
+      allow_other_uses: true
+    i2s_bclk_pin:
+      number: GPIO8
+      allow_other_uses: true
+
+microphone:
+  - platform: i2s_audio
+    id: mic
+    i2s_audio_id: i2s_input
+    i2s_din_pin: GPIO43
+    adc_type: external
+    pdm: false
+    i2s_mode: secondary
+    sample_rate: 16000
+    bits_per_sample: 32bit
+    # 只读左声道：通话输出，带 AGC，音量正常，唤醒和识别都用它。右声道（ASR 波束）的试验结论见 micro_wake_word。
+    # 2026-10-24 “唤醒几次后就不灵”先后怀疑过立体声、检测器状态、I2S 对齐、XVF3800 状态，最后查明是唤醒门槛
+    # 对用户发音太严（见 probability_cutoff），这些都不是原因。
+    channel: left
+
+speaker:
+  - platform: i2s_audio
+    id: i2s_speaker
+    i2s_audio_id: i2s_output
+    i2s_dout_pin: GPIO44
+    dac_type: external
+    i2s_mode: secondary
+    sample_rate: 16000  # secondary 模式改不了时钟，必须和 XVF3800 固件一致
+    bits_per_sample: 32bit
+    channel: stereo
+    timeout: never
+    buffer_duration: 100ms
+  - platform: mixer
+    id: mixing_speaker
+    output_speaker: i2s_speaker
+    num_channels: 2
+    # 混音器至少要两路输入：第二路留给以后的提示音/通知
+    source_speakers:
+      # 不能用 never：语音助手要等扬声器自己停下才回到空闲（照搬 formatBCE 的 never 后，播完一次就卡住，
+      # 唤醒 10 次只认到 1 次）。0.5 秒没数据就停；“我查一下”和回答之间停了也没关系，新音频来了会重新启动。
+      - id: va_mixing_input
+        timeout: 500ms
+      - id: notice_mixing_input
+        timeout: never  # 开机放一段静音让它启动并一直开着：停着时第一次 play 会丢数据（缓冲还没建好）
+        buffer_duration: 500ms  # 默认 100ms 装不下整段提示音
+  - platform: resampler
+    id: va_speaker
+    output_speaker: va_mixing_input
+    sample_rate: 16000
+    bits_per_sample: 16
+
+# 本地唤醒词：先用现成的 "Hey Jarvis"，以后换成自己训练的 "Alpha"
+micro_wake_word:
+  id: mww
+  # 2026-10-24 试过右声道（ASR 波束）：播报中好认一些，但平时很难唤醒（加 16 倍增益也一样），录下来的音频本身没坏
+  # （ASR 听得懂），只是这个模型不认。左声道平时可靠（6 轮全对），播报中只能偶尔打断。
+  microphone: mic
+  models:
+    - model: hey_jarvis
+      # 默认 0.97 对用户的发音太严。2026-10-24 用 UDP 探针连续录音、离线逐句打分（同一模型、同样 5 窗平均）：
+      # 11 次 Hey Jarvis 最高分 1.00×5、0.99、0.97×2、0.53、0.39、0.29——大多压在 0.97 附近，约 1/4 落在 0.3～0.5
+      # （说得快、含糊时）。0.97 时一半左右失败；0.35 能过 10/11。普通对话和视频都 ≤ 0.03。
+      # 注意设备日志里 “Detected … sliding average 0.xx” 是刚越过门槛那一刻的值，不是这次的最高分。
+      probability_cutoff: 0.35
+  on_wake_word_detected:
+    - logger.log:
+        level: INFO
+        format: ">>> 听到唤醒词: %s"
+        args: ["wake_word.c_str()"]
+    - script.execute: wake_beep
+    # 一轮进行中（播报时检测会重新启动）又听到唤醒词＝打断。voice_assistant.stop 在播放阶段不会停播放、也不通知
+    # Alpha（2026-10-24 实测：检测到了，回答却照样播完），所以发事件让 Alpha 停掉播报并结束这一轮，
+    # 等语音助手回到空闲（放完缓冲，不到 0.5 秒）再开新的一轮。
+    - if:
+        condition:
+          api.connected:
+        then:
+          - if:
+              condition:
+                voice_assistant.is_running:
+              then:
+                - homeassistant.event:
+                    event: esphome.alpha_barge_in
+                - wait_until:
+                    condition:
+                      not:
+                        voice_assistant.is_running:
+                    timeout: 5s
+          - voice_assistant.start:
+              wake_word: !lambda return wake_word;
+        else:
+          # 检测到即停；没有客户端时这一轮不会开始，也就没有 on_end 来重新启动，这里自己恢复。
+          - delay: 500ms
+          - micro_wake_word.start:
+
+# XVF3800 已经做了降噪，这里不再加 noise_suppression / auto_gain。
+voice_assistant:
+  id: va
+  microphone: mic
+  speaker: va_speaker
+  micro_wake_word: mww
+  # 播报时重新启动唤醒词检测（检测到即停，这一轮开始时已经停了），用来打断。
+  on_tts_stream_start:
+    - micro_wake_word.start:
+  on_client_connected:
+    - micro_wake_word.start:
+  on_end:
+    - wait_until:
+        condition:
+          not:
+            voice_assistant.is_running:
+        timeout: 30s  # 兜底：语音助手万一卡住，至少恢复听唤醒词
+    - micro_wake_word.start:
+
+
+# 诊断：不用唤醒词直接开始收音（Alpha 开 ALPHA_SATELLITE_DUMP=1 时把这一轮音频存下来）。
+# 先停唤醒词检测，免得说 Hey Jarvis 时触发打断把这一轮切断；这一轮结束后 on_end 会重新启动检测。
+button:
+  - platform: template
+    name: "诊断收音"
+    id: diag_listen
+    on_press:
+      - micro_wake_word.stop:
+      - delay: 300ms
+      - voice_assistant.start:
+
+script:
+  # 唤醒提示音：“叮-咚”两个短音（880 Hz 90ms + 1320 Hz 110ms，首尾 10ms 淡入淡出），16 kHz 16 位单声道，
+  # 走混音器的提示音输入，在设备上直接播，不经过 Alpha。播放经过 XVF3800，有回声消除参考，基本不会被录进去。
+  - id: wake_beep
+    mode: restart
+    then:
+      - speaker.play:
+          id: notice_mixing_input
+          data: !lambda |-
+            std::vector<uint8_t> out;
+            auto tone = [&out](float freq, int ms) {
+              const int n = 16000 * ms / 1000;
+              for (int i = 0; i < n; i++) {
+                float envelope = std::min(1.0f, std::min(i / 160.0f, (n - i) / 160.0f));
+                int16_t v = (int16_t) (6000.0f * envelope * sinf(2.0f * M_PI * freq * i / 16000.0f));
+                out.push_back(v & 0xff);
+                out.push_back((v >> 8) & 0xff);
+              }
+            };
+            tone(880.0f, 90);
+            tone(1320.0f, 110);
+            return out;

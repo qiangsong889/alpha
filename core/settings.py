@@ -105,6 +105,8 @@ SETTINGS: tuple[Setting, ...] = (
        default='', readers={VOICE}),
     _s('ALPHA_SATELLITE_KEY', '密钥', 'ESPHome 卫星的 API 加密密钥（设备 YAML 里 api.encryption.key；留空表示不加密）',
        'secret', readers={VOICE}),
+    _s('ALPHA_SATELLITE_DUMP', '收音', '调试：把卫星每一轮收到的原始音频存到 data/satellite_runs/', 'bool', False,
+       readers={VOICE}),
     _s('ALPHA_SATELLITE_LISTEN_SECONDS', '收音', '卫星唤醒后多少秒没有人声就结束这一轮、恢复听唤醒词', 'float', 8.0,
        minimum=1, maximum=60, readers={VOICE}),
     _s('REALTIME_INPUT_CHANNEL', '收音', '用麦克风设备的第几个声道（从 1 开始；XVF3800 的语音识别波束是 2）', 'int', 1,

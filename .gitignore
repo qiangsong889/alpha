@@ -17,4 +17,8 @@ credentials.json
 credentials_*.json
 client_secret*.json
 data/
-esp-alpha
+# ESP 实验目录整体忽略，只跟踪卫星设备的 ESPHome 配置（密码都在被忽略的 secrets.yaml 里，用 !secret 引用）
+esp-alpha/*
+!esp-alpha/esphome/
+esp-alpha/esphome/*
+!esp-alpha/esphome/alpha-xvf.yaml

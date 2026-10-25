@@ -17,7 +17,7 @@ import httpx2 as httpx
 from dotenv import load_dotenv
 from websockets.asyncio.client import connect
 
-from core.paths import ENV_FILE
+from core.paths import ENV_FILE, PROJECT_ROOT
 from voice.audio import StreamingPlayer, SpeechActivity, is_meaningful
 from voice.audio_devices import AudioRoute
 from voice.omni_transport import (CostTracker, SessionEnded, QwenProtocolError, MODEL,
@@ -736,6 +736,8 @@ class Receiver:
                 played = await self._play_report(report.text)
                 self.bridge.report_delivery(report, 'played' if played else
                                             'interrupted' if self.cancelled else 'not_played')
+                if report.kind in FINAL_KINDS:
+                    self.player.end_response()  # 卫星：最终回答播完才结束设备上的这一轮
                 if played and report.text:
                     self.finished_report = (report.text, time.perf_counter())
             except BaseException:
@@ -871,7 +873,8 @@ def make_satellite(mode):
         raise ValueError('ALPHA_SATELLITE_HOST 只支持 QWEN_ALPHA_INPUT=asr')
     from voice.satellite import SatelliteLink
     return SatelliteLink(host, noise_psk=setting('ALPHA_SATELLITE_KEY') or None,
-                         listen_s=setting('ALPHA_SATELLITE_LISTEN_SECONDS'))
+                         listen_s=setting('ALPHA_SATELLITE_LISTEN_SECONDS'),
+                         dump_dir=PROJECT_ROOT / 'data/satellite_runs' if setting('ALPHA_SATELLITE_DUMP') else None)
 
 
 async def run_asr_connection(player, collector, bridge, costs, route=None, satellite=None):
@@ -1021,7 +1024,11 @@ async def main():
                'brain_url': setting('ALPHA_BRAIN_URL'), 'connection': 'starting', 'last_error': None}
     status_writer = StatusWriter(VOICE_STATUS, settings_report, lambda: runtime)
     route = audio_route(mode)
+    satellite = make_satellite(mode)
     player = StreamingPlayer(route)
+    if satellite is not None:
+        from voice.satellite import SatellitePlayer
+        player = SatellitePlayer(satellite, player)  # 设备带扬声器就推给设备播，否则仍用 Mac
     costs = CostTracker(setting('QWEN_REGION'))
     async with httpx.AsyncClient() as client:
         base_url = setting('ALPHA_BRAIN_URL')
@@ -1030,12 +1037,11 @@ async def main():
         except httpx.HTTPError as exc:
             raise SystemExit('请先启动 .venv/bin/python -m brain.server') from exc
         bridge = BrainBridge(client, base_url)
-        satellite = make_satellite(mode)
 
         def submit(text):
             if satellite is not None:
-                # 提交给大脑就结束这一轮：Alpha 播报时设备不推流，听不到自己的声音。
-                satellite.end_run('submitted')
+                # 提交给大脑就停止收音：Alpha 播报时设备不推流，听不到自己的声音。
+                satellite.end_listening('submitted')
             bridge.submit(text, collector.last_submission)
 
         collector = TurnCollector(submit, bridge.say, make_router(client),

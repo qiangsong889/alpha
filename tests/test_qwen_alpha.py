@@ -255,7 +255,7 @@ class BridgeTests(IsolatedAsyncioTestCase):
 class ReceiverTests(IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.ws = NS(send=AsyncMock())
-        self.player = NS(clear=Mock(), append=Mock(), finish=Mock(), gain=1, resume=Mock(), pause=Mock(),
+        self.player = NS(clear=Mock(), append=Mock(), finish=Mock(), gain=1, resume=Mock(), pause=Mock(), end_response=Mock(),
                          wait_played=AsyncMock(return_value=True), wait_started=AsyncMock(return_value=115))
         self.gate = TurnCollector(Mock(), Mock(), NS(turn_complete=AsyncMock(return_value=True)), window_s=10, mode='window')
         self.addAsyncCleanup(self.gate.close)

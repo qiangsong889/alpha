@@ -359,6 +359,9 @@ class StreamingPlayer:
             waiter.loop.call_later(max(0.0, deadline - time.perf_counter()),
                                    self._deliver_playback, playback, waiter)
 
+    def end_response(self) -> None:
+        """一轮的最终回答播完。Mac 扬声器没有要收尾的；卫星播放器（voice/satellite.py）在这里结束设备上的一轮。"""
+
     def duck(self, enabled: bool) -> None:
         with self.lock:
             self.gain = 0.2 if enabled else 1.0
