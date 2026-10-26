@@ -26,7 +26,9 @@ from voice.omni_transport import (CostTracker, SessionEnded, QwenProtocolError, 
 from voice.collection_rules import (ECHO_TAIL_CHARS, ECHO_TAIL_S, EXECUTE, WAKE, echo_ratio, is_echo,
                                     playback_command, unfinished)
 from voice.search_router import JevSearchRouter
+from voice.speech_markup import plain_speech, split_style
 from voice.batch_timing import BatchTiming
+from voice.breeze_tts import with_local_tts
 from voice.qwen_tts import make_tts
 from voice.upload_gate import make_upload_gate
 from core.costs import configure_costs, record_cost, log_summary, AudioCostMeter
@@ -50,7 +52,7 @@ def tts_sentences(text: str) -> list[str]:
     sentences: list[str] = []
     leading = ''
     for part in re.findall(r'.+?(?:[。！？!?；;\n]+|(?<!\d)\.(?!\d)|$)', text, re.S):
-        if any(char.isalnum() for char in part):
+        if any(char.isalnum() for char in plain_speech(part)):  # 只有朗读标记的片段并到邻句
             sentences.append(leading + part)
             leading = ''
         elif sentences:
@@ -248,6 +250,12 @@ class Report:
     kind: str = 'reply'
     turn_id: str | None = None  # 大脑这一轮的 ID；用于报告实际播放结果
     session_id: str | None = None
+    speech: str | None = None  # 交给 TTS 的文字（带声音事件标记）；text 是去掉标记后用户听到的内容
+    style: str | None = None   # 语气，见 voice/speech_markup.py
+
+    def __post_init__(self):
+        if self.speech is None:
+            object.__setattr__(self, 'speech', self.text)  # frozen dataclass
 
 
 # 这些报告是某一轮的最终输出；搜索进度只是过渡提示，不代表这一轮的播放结果。
@@ -321,7 +329,8 @@ class BrainBridge:
 
     def say(self, text, *, epoch=None, timing=None, kind='reply', turn_id=None, session_id=None):
         epoch = self.epoch if epoch is None else epoch
-        report = Report(text, epoch, timing, kind, turn_id, session_id)
+        speech, style = split_style(text) if text else (text, None)
+        report = Report(plain_speech(text) if text else text, epoch, timing, kind, turn_id, session_id, speech, style)
         if epoch != self.epoch:
             logger.info('[播报跳过] 旧轮次结果已被新输入替代；操作结果仍保存在大脑')
             self.report_delivery(report, 'not_played')
@@ -735,7 +744,7 @@ class Receiver:
             self.current_report = report
             self.tts_segments = []
             try:
-                played = await self._play_report(report.text)
+                played = await self._play_report(report.speech)
                 self.bridge.report_delivery(report, 'played' if played else
                                             'interrupted' if self.cancelled else 'not_played')
                 if report.kind in FINAL_KINDS:
@@ -793,6 +802,7 @@ class Receiver:
     async def _play_tts(self, text):
         report = self.current_report
         turn_id = report.turn_id if report is not None else None
+        style = report.style if report is not None else None
         self.active = True
         self.response_done.clear()
         self.tts_segments = []
@@ -803,8 +813,8 @@ class Receiver:
                 if self.cancelled:
                     break
                 ident = 'tts_' + str(time.monotonic_ns())
-                self.tts_segments.append((ident, sentence))
-                stream = self.tts.stream(sentence, turn_id=turn_id)
+                self.tts_segments.append((ident, plain_speech(sentence)))  # 打断时报告已播内容用
+                stream = self.tts.stream(sentence, turn_id=turn_id, style=style)
                 try:
                     async for chunk in stream:
                         if self.cancelled:
@@ -918,7 +928,7 @@ async def run_asr_connection(player, collector, bridge, costs, route=None, satel
     url = asr_url(workspace, region)
     detector = await asyncio.to_thread(SileroVAD, setting('SILERO_MODEL_PATH') or DEFAULT_MODEL)
     segmenter = Segmenter(detector)
-    tts = make_tts(key, workspace, region, setting('QWEN_TTS_VOICE'), setting('QWEN_TTS_MODEL'))
+    tts = with_local_tts(make_tts(key, workspace, region, setting('QWEN_TTS_VOICE'), setting('QWEN_TTS_MODEL')))
     receiver = Receiver(None, player, collector, bridge, costs, 'local-asr', SileroActivity(),
         interruption_filter=setting('QWEN_ALPHA_JEV_INTERRUPTIONS'),
         uncertain_interruption=setting('QWEN_ALPHA_UNCERTAIN_INTERRUPTION'),
@@ -938,7 +948,7 @@ async def run_asr_connection(player, collector, bridge, costs, route=None, satel
                 logger.warning('[%s预连接失败] %s；首次使用时重连', name, type(exc).__name__)
         logger.info('[输入路径] asr ｜ Silero ONNX / 静音600ms / 最长15秒 ｜ 串行手动ASR ｜ %s',
                     f'卫星 {satellite.host}' if satellite is not None else 'Mac 麦克风')
-        logger.info('[播报引擎] Qwen TTS / %s（ASR模式不使用Omni播报）', tts.voice)
+        logger.info('[播报引擎] TTS / %s（ASR模式不使用Omni播报）', tts.voice)
         if collector.parts:
             bridge.say('刚才断线了，我保留了尚未提交的话。请继续补充，或说“执行吧”。')
         async with asyncio.TaskGroup() as tasks:
@@ -975,8 +985,8 @@ async def run_connection(ws, player, collector, bridge, costs, voice):
     if speaker not in {'omni', 'tts'}:
         raise ValueError('QWEN_ALPHA_SPEAKER 必须是 omni 或 tts')
     # 选择 tts 时创建专用 TTS 客户端（凭据、工作空间、区域、音色）；否则为 None，由 Omni 播报。
-    tts = (make_tts(setting('DASHSCOPE_API_KEY'), setting('QWEN_WORKSPACE_ID'),
-                    setting('QWEN_REGION'), setting('QWEN_TTS_VOICE'), setting('QWEN_TTS_MODEL'))
+    tts = (with_local_tts(make_tts(setting('DASHSCOPE_API_KEY'), setting('QWEN_WORKSPACE_ID'),
+                                   setting('QWEN_REGION'), setting('QWEN_TTS_VOICE'), setting('QWEN_TTS_MODEL')))
            if speaker == 'tts' else None)
     # 启动日志写明本次实际使用哪个播报引擎和音色，方便确认没有走到 Omni 的后备路径。
     logger.info('[播报引擎] %s', 'Qwen TTS / ' + tts.voice if tts else 'Omni / ' + voice)

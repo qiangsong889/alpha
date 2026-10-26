@@ -9,6 +9,8 @@ from core.costs import CumulativeUsage, record_cost, log_summary
 
 from websockets.asyncio.client import connect
 
+from voice.speech_markup import plain_speech
+
 logger = logging.getLogger('alpha.qwen_alpha')
 
 
@@ -51,11 +53,13 @@ class QwenTTS:
                         raise RuntimeError('TTS 音色配置未生效')
                     break
 
-    async def stream(self, text, *, turn_id=None):
+    async def stream(self, text, *, turn_id=None, style=None):
         """按原文合成 PCM16 24kHz。失败不自动重播；取消后关闭连接。
 
         turn_id 是大脑那一轮的 ID：语音进程没有大脑的上下文变量，所以显式传入，费用才能归到那一轮。
+        朗读标记（声音事件、语气，见 voice/speech_markup.py）云端不支持：去掉事件标记，忽略语气。
         """
+        text = plain_speech(text)
         completed = False
         cost_id = None
         try:
@@ -115,8 +119,10 @@ class QwenAudioTTS:
         await self.ws.send(json.dumps({'header': {'action': action, 'task_id': task_id, 'streaming': 'duplex'},
                                        'payload': payload}))
 
-    async def stream(self, text, *, turn_id=None):
-        """按原文合成 PCM16 24kHz。失败不自动重播；取消或出错时关闭连接，免得旧任务的音频串到下一句。"""
+    async def stream(self, text, *, turn_id=None, style=None):
+        """按原文合成 PCM16 24kHz。失败不自动重播；取消或出错时关闭连接，免得旧任务的音频串到下一句。
+        朗读标记同 QwenTTS：去掉事件标记，忽略语气。"""
+        text = plain_speech(text)
         completed = False
         cost_id = None
         try:

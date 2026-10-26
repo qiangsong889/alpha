@@ -159,6 +159,11 @@ SETTINGS: tuple[Setting, ...] = (
     _s('QWEN_TTS_VOICE', '播报', 'TTS 音色（qwen3-tts 如 Ethan；qwen-audio-3.1 如 longanlingxin_v3.1）',
        default='Ethan', readers={VOICE}),
     _s('QWEN_VOICE', '播报', 'Omni 路径的音色', default='Tina', readers={VOICE}),
+    _s('BREEZE_TTS_URL', '播报', '本地 Breeze TTS 服务地址（如 http://192.168.1.84:7860）；填了就本地优先、连不上自动用云端 TTS',
+       default='', readers={VOICE}),
+    _s('BREEZE_TTS_REF_AUDIO', '播报', 'Breeze 克隆用的参考录音（相对项目根目录，5～10 秒，如 data/friend_tsundere.wav）',
+       default='', readers={VOICE}),
+    _s('BREEZE_TTS_REF_TEXT', '播报', '参考录音里一字不差的原文', default='', readers={VOICE}),
     _s('REALTIME_OUTPUT_DEVICE', '播报', '扬声器设备（编号或名字；留空用系统默认，并跟随系统切换）', default='', readers={VOICE}),
     _s('QWEN_SESSION_SECONDS', '播报', 'Qwen 会话轮换周期（秒）', 'float', 1800.0, minimum=60, maximum=1800,
        readers={VOICE}, editable=False),
@@ -276,6 +281,11 @@ def _input_channel(get, process):
             yield 'warning', 'REALTIME_INPUT_CHANNEL 只对 asr 收音生效，omni 路径仍用第 1 个声道'
 
 
+def _breeze_tts(get, process):
+    if process == VOICE and get('BREEZE_TTS_URL') and not (get('BREEZE_TTS_REF_AUDIO') and get('BREEZE_TTS_REF_TEXT')):
+        yield 'warning', 'BREEZE_TTS_URL 已填，但缺 BREEZE_TTS_REF_AUDIO 或 BREEZE_TTS_REF_TEXT：克隆需要两者，缺了只用云端 TTS'
+
+
 def _legacy_paths(get, process):
     if process == VOICE:
         if get('QWEN_ALPHA_INPUT') == 'omni':
@@ -297,7 +307,7 @@ class _InvalidInput(Exception):
 
 
 RULES: tuple[Rule, ...] = (_context_limits, _required_credentials, _jev_credentials,
-                           _omni_upload_gate, _input_channel, _legacy_paths, _model_price)
+                           _omni_upload_gate, _input_channel, _breeze_tts, _legacy_paths, _model_price)
 
 
 @dataclass(frozen=True)

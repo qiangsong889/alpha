@@ -92,7 +92,7 @@ class TTSTests(IsolatedAsyncioTestCase):
         ws.close.assert_awaited_once()
 
     async def test_tts_playback_uses_existing_player_and_no_omni_generation(self):
-        async def stream(text, turn_id=None):
+        async def stream(text, turn_id=None, style=None):
             self.assertEqual(text, '没有发送邮件。')
             yield b'pcm'
         tts = NS(voice='Ethan', stream=stream, close=AsyncMock())
@@ -110,7 +110,7 @@ class TTSTests(IsolatedAsyncioTestCase):
     async def test_interruption_cancels_tts_not_microphone_socket(self):
         started = asyncio.Event()
         closed = asyncio.Event()
-        async def stream(text, turn_id=None):
+        async def stream(text, turn_id=None, style=None):
             try:
                 started.set()
                 await asyncio.Future()
@@ -184,6 +184,15 @@ class QwenAudioTTSTests(IsolatedAsyncioTestCase):
         usages = [json.loads(row[0]) for row in ledger.db.execute('SELECT usage FROM cost_events ORDER BY rowid')]
         self.assertEqual([u['output_tokens'] for u in usages], [26, 26])
         ws.close.assert_not_awaited()
+
+    async def test_speech_markers_are_not_read_aloud(self):
+        ws = FakeAudioSocket([[b'pcm', finished({'characters': 2})]])
+        ledger = CostLedger(':memory:')
+        self.addCleanup(ledger.close)
+        with patch('core.costs._ledger', ledger), patch('voice.qwen_tts.connect', AsyncMock(return_value=ws)):
+            self.assertEqual([c async for c in self.service().stream('[笑] 好吧。', style='serious')], [b'pcm'])
+        self.assertEqual([m['payload']['input']['text'] for m in ws.sent
+                          if m['header']['action'] == 'continue-task'], ['好吧。'])
 
     async def test_task_failed_raises_and_closes_connection(self):
         ws = FakeAudioSocket([[{'header': {'event': 'task-failed', 'error_code': 'InvalidParameter',

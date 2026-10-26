@@ -443,3 +443,39 @@ API 已加密（2026-10-24）：设备 YAML 用 `!secret api_encryption_key`，�
 例外：Alpha 两分钟内播完的上一句回答以问号结尾（“确认发送吗？”）时，“没事了”是在回答它，照常交给大脑。
 
 待做：训练 "Alpha" 唤醒词（加入用户录音）、LED、观察误触发后再定门槛、播报中打断的成功率。
+
+## 本地 Breeze TTS + 云端兜底（`BREEZE_TTS_URL`）
+
+家里 PC（RTX 4070 Ti SUPER 16GB，WSL2 Ubuntu）上跑 Breeze TTS 2 的官方服务，Alpha 通过局域网调用；
+不可用时自动用云端 TTS（`voice/breeze_tts.py`）。
+
+**PC 端**（官方仓库 `breezeblue-ai/breeze-tts`，权重 `BreezeBlue/Breeze-TTS-2`；代码 Apache 2.0，
+权重和自托管输出仅限研究/非商业用途）：
+```bash
+cd ~/breeze-tts && source .venv/bin/activate
+python -m breeze_infer.api ~/breeze-tts-2 --host 0.0.0.0 --port 7860 --fast-backbone-decode --fast-depth-decoder
+```
+- 不加速时实时率约 2.2（播放会卡）；这两个分阶段加速（CUDA graph）把实时率降到 0.52～0.54、首包 0.23～0.28 秒，
+  预热约 57 秒。没装 flash-attn。
+- WSL2 用镜像网络（`%USERPROFILE%\.wslconfig`：`[wsl2]` `networkingMode=mirrored`），防火墙放行 7860
+  （Windows 规则限 Private 网络 + Hyper-V 规则 `VMCreatorId {40E0AC32-46A5-438A-A0B2-2B479E8F2E90}`）。
+  家里网络要设成 Private。镜像模式下旧的 `netsh portproxy` 规则会占住同名端口（2026-10-25：11434 被占，
+  WSL 里的 Ollama 起不来），要删掉。
+- 服务一次只合成一句（并发返回 409），没有身份验证，只能在局域网用。
+
+**Alpha 端**：`BREEZE_TTS_URL`、`BREEZE_TTS_REF_AUDIO`（相对项目根目录，5～10 秒）、`BREEZE_TTS_REF_TEXT`
+（参考录音一字不差的原文）。音色设计（只给文字描述）每句声音都不一样，所以用克隆：每句都带参考录音，
+纯克隆模式不能发 `cfg_scale`（服务端 500）。
+- 每句先试本地：连不上（连接超时 1.5 秒）、报错、409 或 3 秒内没出第一块音频，这一句改用云端，并把本地标成
+  不可用，之后直接走云端，后台每 30 秒探测一次（健康检查 + 预热），恢复了切回。播到一半出错的那句算失败，
+  不拼接两种声音。
+- 启动时 `ready()` 先合成一句预热（启动后第一次克隆请求首包约 1.9 秒）。
+- 实测：本地首包 0.24～0.41 秒；模拟 PC 关机时第一句 1.0 秒（等连接超时）后改用云端，之后 0.6 秒。
+- **朗读标记**（`voice/speech_markup.py`，语音模式 VOICE_RULES 允许大脑写）：
+  - 声音事件 `[笑]` `[叹气]` `[咳嗽]` `[清嗓子]`（英文 `(laugh)` `(sigh)` 等）原样交给 Breeze，会真的笑、叹气；
+    句首带事件首包 0.5～0.7 秒（普通 0.2 秒）。
+  - `[严肃]`：整段用音色指导模式（参考录音 + 指令“语气严肃、冷静，语速稍慢”+ `cfg_scale` 4），首包 0.29 秒、实时率 0.77。
+  - 收到回答时拆开：`Report.text` 是去掉标记的文字（回声比对、打断记录、“刚问过用户”都用它），`Report.speech`
+    带事件标记交给 TTS，`Report.style` 是语气。云端 TTS 去掉事件标记、忽略语气。
+- **短句缓存**：不超过 12 字的句子完整合成后按（文字, 语气）缓存 64 条，再说同一句直接播（首包 0）；
+  `ready()` 预先合成“我查一下。”（启动多约 0.5 秒）。预热句不进缓存，探测恢复时一定真的请求服务端。

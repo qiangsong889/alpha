@@ -235,7 +235,7 @@ class ReceiverDeliveryTests(IsolatedAsyncioTestCase):
     async def test_tts_cost_is_attributed_to_the_reports_turn(self):
         calls = []
 
-        async def stream(text, turn_id=None):
+        async def stream(text, turn_id=None, style=None):
             calls.append(turn_id)
             return
             yield b''
